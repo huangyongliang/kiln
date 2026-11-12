@@ -562,6 +562,20 @@ class PostgresStore:
             "只有审核中的 skill 可以发布",
         )
 
+    def reject_skill(self, skill_id: UUID, reason: str, actor_id: UUID | None) -> Skill:
+        with self._session() as session:
+            row = _load_skill(session, skill_id, lock=True)
+            if row.status != SkillStatus.in_review.value:
+                raise Conflict("只有审核中的 skill 可以退回")
+            now = clock.utcnow()
+            row.status = SkillStatus.draft.value
+            row.review_note = reason
+            row.rejected_at = now
+            row.rejected_by = actor_id
+            row.updated_at = now
+            session.commit()
+            return _skill(row)
+
     def _transition(
         self,
         skill_id: UUID,
@@ -708,4 +722,7 @@ def _skill(row: SkillRow) -> Skill:
         output_spec=row.output_spec,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        review_note=row.review_note,
+        rejected_at=row.rejected_at,
+        rejected_by=row.rejected_by,
     )

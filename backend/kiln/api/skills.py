@@ -2,7 +2,8 @@
 
 Listing and reading a skill require `skill.read`. Creating a draft requires
 `skill.use`. Submitting a draft for review requires `skill.submit`. Publishing
-requires `skill.publish`.
+an in-review skill requires `skill.publish`. Rejecting an in-review skill back
+to a draft also requires `skill.publish` and a reason.
 """
 
 from uuid import UUID
@@ -10,9 +11,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 
 from kiln.api.deps import get_store
-from kiln.auth import require_auth, require_permission
+from kiln.auth import Principal, require_auth, require_permission
 from kiln.db.store import PostgresStore
-from kiln.domain.skills import Skill, SkillCreate, SkillList, SkillStatus
+from kiln.domain.skills import Skill, SkillCreate, SkillList, SkillReject, SkillStatus
 
 router = APIRouter(
     prefix="/skills",
@@ -73,3 +74,18 @@ def submit_review(skill_id: UUID, store: PostgresStore = Depends(get_store)) -> 
 )
 def publish_skill(skill_id: UUID, store: PostgresStore = Depends(get_store)) -> Skill:
     return store.publish_skill(skill_id)
+
+
+@router.post(
+    "/{skill_id}/reject",
+    response_model=Skill,
+    summary="退回草稿",
+)
+def reject_skill(
+    skill_id: UUID,
+    payload: SkillReject,
+    principal: Principal = Depends(require_permission("skill.publish")),
+    store: PostgresStore = Depends(get_store),
+) -> Skill:
+    actor_id = principal.account.id if principal.account else None
+    return store.reject_skill(skill_id, payload.reason, actor_id)
