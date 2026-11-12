@@ -70,6 +70,19 @@ def test_blank_git_provider_is_off() -> None:
     assert settings.git_provider == "off"
 
 
+def test_artifact_storage_defaults_to_a_local_directory() -> None:
+    settings = Settings(_env_file=None)
+    assert settings.kiln_artifact_root == "var/kiln-artifacts"
+    assert settings.kiln_artifact_max_bytes == 64 * 1024 * 1024
+
+
+def test_artifact_root_rejects_blank_and_urls() -> None:
+    with pytest.raises(ValidationError, match="KILN_ARTIFACT_ROOT"):
+        Settings(kiln_artifact_root="  ", _env_file=None)
+    with pytest.raises(ValidationError, match="本地目录"):
+        Settings(kiln_artifact_root="http://127.0.0.1:9/repo", _env_file=None)
+
+
 def test_openai_accepts_a_configured_endpoint() -> None:
     settings = Settings(
         llm_provider="openai-compatible",

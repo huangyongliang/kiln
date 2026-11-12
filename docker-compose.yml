@@ -49,6 +49,11 @@ services:
       GIT_BASE_URL: ${GIT_BASE_URL:-}
       GIT_TOKEN: ${GIT_TOKEN:-}
       GIT_TIMEOUT_SECONDS: ${GIT_TIMEOUT_SECONDS:-30}
+      # 平台自管制品字节。这不是 Nexus，也不发布新的宿主机端口。
+      KILN_ARTIFACT_ROOT: /var/lib/kiln/artifacts
+      KILN_ARTIFACT_MAX_BYTES: ${KILN_ARTIFACT_MAX_BYTES:-67108864}
+    volumes:
+      - kiln-artifact-data:/var/lib/kiln/artifacts
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -103,5 +108,6 @@ networks:
 
 volumes:
   kiln-postgres-data:
+  kiln-artifact-data:
   kiln-jenkins-home:
   kiln-gitea-data:

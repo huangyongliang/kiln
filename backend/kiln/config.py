@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     `KILN_API_TOKEN` is required on `/api/v1`. The default is for local use
     and CI only. An empty token is rejected so the gate cannot be turned off
     by leaving the variable blank.
+
+    `KILN_ARTIFACT_ROOT` is the platform-owned directory for artifact bytes.
+    It is a local path, not a Nexus URL.
     """
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -59,6 +62,10 @@ class Settings(BaseSettings):
     git_base_url: str = ""
     git_token: SecretStr = SecretStr("")
     git_timeout_seconds: float = Field(default=30, gt=0, le=120)
+
+    # Platform-owned local directory. Not a Nexus URL.
+    kiln_artifact_root: str = "var/kiln-artifacts"
+    kiln_artifact_max_bytes: int = Field(default=64 * 1024 * 1024, gt=0, le=1024 * 1024 * 1024)
 
     @field_validator("llm_provider", mode="before")
     @classmethod
@@ -103,6 +110,16 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return value.strip()
         return value
+
+    @field_validator("kiln_artifact_root")
+    @classmethod
+    def artifact_root_is_local(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("必须设置 KILN_ARTIFACT_ROOT")
+        if "://" in text:
+            raise ValueError("KILN_ARTIFACT_ROOT 必须是本地目录，不是服务地址")
+        return text
 
     @field_validator("kiln_api_token", mode="before")
     @classmethod

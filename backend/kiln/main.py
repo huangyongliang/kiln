@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 import uvicorn
@@ -22,17 +23,19 @@ from kiln.executor.jenkins import JenkinsClient
 from kiln.git.source import build_git_source
 from kiln.llm.provider import build_provider
 from kiln.paths import API_PREFIX
+from kiln.storage.local import LocalBlobStore
 
 DESCRIPTION = (
     "kiln 一期骨架。账号、RBAC 目录、制品、版本、下载预约、skill 与 Jenkins 任务"
-    "保存在 PostgreSQL 中。"
-    "API 启动时自动迁移，进程重启后记录仍在。"
+    "保存在 PostgreSQL 中。制品字节保存在平台自管的本地目录，进程重启后仍可取回。"
+    "版本保存字节后 content_available 为 true。"
+    "API 启动时自动迁移。"
     "/api/v1 需要请求头 Authorization: Bearer <KILN_API_TOKEN>。"
     "这不是登录，也不按角色鉴权。/health 与 /docs 不接受写入。"
-    "不接收制品字节，不运行 skill 步骤，也不把制品部署到运行环境。"
+    "不运行 skill 步骤，也不把制品部署到运行环境。"
     "配置 JENKINS_URL 后，兼容执行器可以在 Jenkins 上创建任务、跟踪状态并读取日志。"
     "代码源是可替换适配器：GIT_PROVIDER=gitea 是实验室实现，GIT_PROVIDER=gitlab 是生产代码源。"
-    "这两处地址只来自环境变量，仓库不写生产 GitLab 或 Nexus 地址。"
+    "这两处地址只来自环境变量。仓库不写生产 GitLab 地址。Nexus 集成还没有接上，也没有 Nexus 地址。"
     "模型调用走 OpenAI 兼容协议，端点由环境变量配置；未就绪时可使用 mock 或 off。"
     "配置只从环境变量读取。"
 )
@@ -50,7 +53,8 @@ def create_app(
         client = http_client
     provider = build_provider(resolved, client)
     engine = create_db_engine(resolved.database_url)
-    store = PostgresStore(engine)
+    blobs = LocalBlobStore(Path(resolved.kiln_artifact_root))
+    store = PostgresStore(engine, blobs)
     jobs_store = JobStore(engine)
     jenkins_http = httpx.Client(timeout=resolved.jenkins_timeout_seconds, trust_env=False)
     git_http = httpx.Client(timeout=resolved.git_timeout_seconds, trust_env=False)
@@ -69,6 +73,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
+            blobs.prepare()
             upgrade_database(resolved.database_url)
             seed_rbac(engine)
             yield
@@ -90,6 +95,7 @@ def create_app(
     app.state.http_client = client
     app.state.engine = engine
     app.state.store = store
+    app.state.blobs = blobs
     app.state.jobs = jobs_store
     app.state.jenkins = jenkins
     app.state.git_source = git_source

@@ -1,7 +1,10 @@
 """Helpers for tests that talk to a real PostgreSQL database."""
 
+import hashlib
 import os
 import re
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import text
@@ -12,6 +15,7 @@ from kiln.db.engine import create_db_engine
 
 _DEFAULT_DATABASE_URL = "postgresql://kiln:kiln@127.0.0.1:5432/kiln"
 _IDENT = re.compile(r"^[a-z_]+$")
+_TEST_ARTIFACT_ROOT = Path(tempfile.mkdtemp(prefix="kiln-test-artifacts-"))
 
 DOMAIN_TABLES = (
     "download_reservations",
@@ -43,10 +47,33 @@ def auth_headers(token: str = LOCAL_API_TOKEN) -> dict[str, str]:
 def app_settings(**overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "database_url": postgres_url(),
+        "kiln_artifact_root": str(_TEST_ARTIFACT_ROOT),
         "_env_file": None,
     }
     values.update(overrides)
     return Settings(**values)
+
+
+def content_headers(
+    payload: bytes,
+    *,
+    algorithm: str = "sha256",
+    source: str = "upload",
+) -> dict[str, str]:
+    return {
+        "Content-Type": "application/octet-stream",
+        "X-Kiln-Checksum-Algorithm": algorithm,
+        "X-Kiln-Checksum": hashlib.new(algorithm, payload).hexdigest(),
+        "X-Kiln-Source": source,
+    }
+
+
+def blob_files(root: Path) -> list[str]:
+    return sorted(
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and not path.name.startswith(".partial-")
+    )
 
 
 def require_database() -> None:

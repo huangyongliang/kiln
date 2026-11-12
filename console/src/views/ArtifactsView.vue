@@ -23,14 +23,18 @@ function versionText(artifact) {
   if (!artifact.versions.length) {
     return "尚无版本";
   }
-  return artifact.versions.map((item) => item.version).join("、");
+  return artifact.versions
+    .map((item) =>
+      item.content_available ? `${item.version}（字节已入库）` : `${item.version}（尚无字节）`,
+    )
+    .join("、");
 }
 </script>
 
 <template>
   <PageIntro
     title="制品"
-    lead="平台自管目录、不可变版本和校验和。下载预约与稳定取包接口已在 API 中留出大纲。本期不接收文件字节，也不连接制品仓库。"
+    lead="平台自管目录、不可变版本和制品字节。字节保存在平台本地存储。版本入库后可以取回这些字节。Nexus 集成还没有接上。"
   />
   <section class="panel">
     <p v-if="error" class="message error">{{ error }}</p>

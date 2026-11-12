@@ -1,5 +1,6 @@
 """Domain records are stored in PostgreSQL and survive an API process restart."""
 
+import hashlib
 import os
 import socket
 import subprocess
@@ -17,7 +18,7 @@ from kiln.config import LOCAL_API_TOKEN
 from kiln.db.engine import create_db_engine
 from kiln.db.migrate import upgrade_database
 from kiln.domain.rbac import PERMISSIONS, ROLES
-from tests.support import auth_headers, postgres_url, truncate_domain
+from tests.support import auth_headers, content_headers, postgres_url, truncate_domain
 
 BACKEND = Path(__file__).resolve().parents[1]
 SHA256_A = "ab" * 32
@@ -43,6 +44,8 @@ def test_schema_is_postgresql(client: TestClient) -> None:
         "skill_allowed_dependencies",
         "executor_jobs",
     } <= names
+    columns = {column["name"] for column in inspect(engine).get_columns("artifact_versions")}
+    assert {"content_available", "blob_key"} <= columns
     with engine.connect() as connection:
         definition = connection.execute(
             text(
@@ -74,8 +77,9 @@ def test_records_survive_api_process_restart() -> None:
     upgrade_database(database_url)
     engine = create_db_engine(database_url)
     truncate_domain(engine)
+    artifact_root = tempfile.mkdtemp(prefix="kiln-meta-artifacts-")
 
-    first, first_log, first_port = _start_api(database_url)
+    first, first_log, first_port = _start_api(database_url, artifact_root)
     try:
         base = _wait_healthy(first, first_log, first_port)
         with httpx.Client(timeout=5, trust_env=False, headers=auth_headers()) as http:
@@ -155,7 +159,7 @@ def test_records_survive_api_process_restart() -> None:
         assert connection.execute(text("SELECT kind FROM skill_steps")).scalar_one() == "compile"
     engine.dispose()
 
-    second, second_log, second_port = _start_api(database_url)
+    second, second_log, second_port = _start_api(database_url, artifact_root)
     try:
         assert second.pid != first.pid
         base = _wait_healthy(second, second_log, second_port)
@@ -183,7 +187,10 @@ def test_records_survive_api_process_restart() -> None:
             retrieved_body = retrieved.json()
             assert retrieved_body["reservation_id"] == reservation["id"]
             assert retrieved_body["content_available"] is False
+            assert retrieved_body["content_path"] is None
             assert retrieved_body["name"] == "restart-lib"
+            missing_bytes = http.get(f"{base}{reservation['retrieve_path']}/content")
+            assert missing_bytes.status_code == 409
 
             skills = http.get(f"{base}/api/v1/skills")
             assert skills.status_code == 200
@@ -207,6 +214,84 @@ def test_records_survive_api_process_restart() -> None:
         second_log.close()
 
 
+def test_artifact_bytes_survive_api_process_restart() -> None:
+    database_url = postgres_url()
+    upgrade_database(database_url)
+    engine = create_db_engine(database_url)
+    truncate_domain(engine)
+    engine.dispose()
+
+    payload = b"restart-bytes\x00\xff"
+    digest = hashlib.sha256(payload).hexdigest()
+    artifact_root = tempfile.mkdtemp(prefix="kiln-byte-artifacts-")
+    blob = Path(artifact_root) / "sha256" / digest
+
+    first, first_log, first_port = _start_api(database_url, artifact_root)
+    try:
+        base = _wait_healthy(first, first_log, first_port)
+        with httpx.Client(timeout=5, trust_env=False, headers=auth_headers()) as http:
+            artifact = _post(
+                http,
+                f"{base}/api/v1/artifacts",
+                {"name": "byte-restart", "package_type": "generic"},
+            )
+            stored = http.put(
+                f"{base}/api/v1/artifacts/{artifact['id']}/versions/1.0.0/content",
+                content=payload,
+                headers=content_headers(payload),
+            )
+            assert stored.status_code == 201, stored.text
+            assert stored.json()["content_available"] is True
+            reservation = _post(
+                http,
+                f"{base}/api/v1/artifacts/{artifact['id']}/versions/1.0.0/download-reservations",
+                {"requester": "restart_user"},
+            )
+            content_path = f"{reservation['retrieve_path']}/content"
+            assert http.get(f"{base}{content_path}").content == payload
+    finally:
+        _stop(first)
+        first_log.close()
+
+    assert first.poll() is not None
+    assert blob.is_file()
+    assert blob.read_bytes() == payload
+
+    second, second_log, second_port = _start_api(database_url, artifact_root)
+    try:
+        assert second.pid != first.pid
+        base = _wait_healthy(second, second_log, second_port)
+        denied = httpx.get(f"{base}{content_path}", timeout=5, trust_env=False)
+        assert denied.status_code == 401
+        assert payload not in denied.content
+        with httpx.Client(timeout=5, trust_env=False, headers=auth_headers()) as http:
+            artifacts = http.get(f"{base}/api/v1/artifacts")
+            restored = artifacts.json()["items"][0]["versions"][0]
+            assert restored["content_available"] is True
+            assert restored["checksum"]["value"] == digest
+            meta = http.get(f"{base}{reservation['retrieve_path']}")
+            assert meta.status_code == 200
+            assert meta.json()["content_available"] is True
+            downloaded = http.get(f"{base}{content_path}")
+            assert downloaded.status_code == 200
+            assert downloaded.content == payload
+            replacement = b"should-not-land"
+            planted = httpx.put(
+                f"{base}/api/v1/artifacts/{artifact['id']}/versions/9/content",
+                content=replacement,
+                headers=content_headers(replacement),
+                timeout=5,
+                trust_env=False,
+            )
+            assert planted.status_code == 401
+        assert blob.read_bytes() == payload
+        rejected = Path(artifact_root) / "sha256" / hashlib.sha256(replacement).hexdigest()
+        assert not rejected.exists()
+    finally:
+        _stop(second)
+        second_log.close()
+
+
 def _post(http: httpx.Client, url: str, payload: dict) -> dict:
     response = http.post(url, json=payload)
     assert response.status_code == 201, response.text
@@ -221,7 +306,10 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def _start_api(database_url: str) -> tuple[subprocess.Popen[bytes], IO[bytes], int]:
+def _start_api(
+    database_url: str,
+    artifact_root: str,
+) -> tuple[subprocess.Popen[bytes], IO[bytes], int]:
     log = tempfile.TemporaryFile()
     port = _free_port()
     proc = subprocess.Popen(
@@ -237,14 +325,14 @@ def _start_api(database_url: str) -> tuple[subprocess.Popen[bytes], IO[bytes], i
             str(port),
         ],
         cwd=BACKEND,
-        env=_api_env(database_url),
+        env=_api_env(database_url, artifact_root),
         stdout=log,
         stderr=subprocess.STDOUT,
     )
     return proc, log, port
 
 
-def _api_env(database_url: str) -> dict[str, str]:
+def _api_env(database_url: str, artifact_root: str) -> dict[str, str]:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["LLM_PROVIDER"] = "off"
@@ -258,6 +346,8 @@ def _api_env(database_url: str) -> dict[str, str]:
     env["GIT_PROVIDER"] = "off"
     env["GIT_BASE_URL"] = ""
     env["GIT_TOKEN"] = ""
+    env["KILN_ARTIFACT_ROOT"] = artifact_root
+    env["KILN_ARTIFACT_MAX_BYTES"] = str(64 * 1024 * 1024)
     env["PYTHONUNBUFFERED"] = "1"
     return env
 

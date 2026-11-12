@@ -1,11 +1,13 @@
 """Unauthenticated clients cannot read or change durable domain rows."""
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from kiln.config import LOCAL_API_TOKEN
 from kiln.main import create_app
-from tests.support import app_settings
+from tests.support import app_settings, auth_headers, blob_files, content_headers
 
 SHA = "cd" * 32
 
@@ -38,11 +40,13 @@ def test_anonymous_requests_do_not_change_durable_rows(client: TestClient) -> No
     assert skill.status_code == 201
 
     engine = client.app.state.engine
+    root = Path(client.app.state.blobs.root)
     with engine.connect() as connection:
         before_accounts = connection.execute(text("SELECT count(*) FROM accounts")).scalar_one()
         before_jobs = connection.execute(text("SELECT count(*) FROM executor_jobs")).scalar_one()
+    before_files = blob_files(root)
 
-    anon_app = create_app(app_settings(llm_provider="off"))
+    anon_app = create_app(app_settings(llm_provider="off", kiln_artifact_root=str(root)))
     with TestClient(anon_app) as anon:
         assert anon.get("/health").status_code == 200
         assert anon.get("/").status_code == 200
@@ -74,6 +78,7 @@ def test_anonymous_requests_do_not_change_durable_rows(client: TestClient) -> No
             "/api/v1/git/source",
             "/api/v1/git/repositories",
             "/api/v1/git/commits?repository=ada/demo&ref=main",
+            f"{reservation.json()['retrieve_path']}/content",
         ]
         for path in protected_reads:
             response = anon.get(path)
@@ -102,6 +107,15 @@ def test_anonymous_requests_do_not_change_durable_rows(client: TestClient) -> No
             kwargs = {"json": payload} if payload is not None else {}
             response = anon.post(path, **kwargs)
             assert response.status_code == 401, path
+
+        stolen = b"anonymous-bytes"
+        planted = anon.put(
+            f"/api/v1/artifacts/{artifact_id}/versions/9/content",
+            content=stolen,
+            headers=content_headers(stolen),
+        )
+        assert planted.status_code == 401
+        assert stolen not in planted.content
 
         again = anon.post(
             "/api/v1/accounts",
@@ -133,6 +147,66 @@ def test_anonymous_requests_do_not_change_durable_rows(client: TestClient) -> No
     assert after_jobs == before_jobs == 0
     assert intruders == 0
     assert versions == 1
+    assert blob_files(root) == before_files
     listed = client.get("/api/v1/accounts")
     assert [item["username"] for item in listed.json()["items"]] == ["gated_user"]
     assert client.get(reservation.json()["retrieve_path"]).status_code == 200
+
+
+def test_anonymous_clients_cannot_store_or_download_bytes(client: TestClient) -> None:
+    payload = b"platform-owned-bytes\x00\xff"
+    created = client.post(
+        "/api/v1/artifacts",
+        json={"name": "secret-lib", "package_type": "generic"},
+    )
+    assert created.status_code == 201
+    artifact_id = created.json()["id"]
+    stored = client.put(
+        f"/api/v1/artifacts/{artifact_id}/versions/1.0.0/content",
+        content=payload,
+        headers=content_headers(payload),
+    )
+    assert stored.status_code == 201
+    reservation = client.post(
+        f"/api/v1/artifacts/{artifact_id}/versions/1.0.0/download-reservations",
+        json={"requester": "gated_user"},
+    )
+    assert reservation.status_code == 201
+    content_path = f"{reservation.json()['retrieve_path']}/content"
+    assert client.get(content_path).content == payload
+
+    root = Path(client.app.state.blobs.root)
+    digest = stored.json()["checksum"]["value"]
+    blob = root / "sha256" / digest
+    assert blob.read_bytes() == payload
+    before_files = blob_files(root)
+
+    anon_app = create_app(app_settings(llm_provider="off", kiln_artifact_root=str(root)))
+    with TestClient(anon_app) as anon:
+        denied = anon.get(content_path)
+        assert denied.status_code == 401
+        assert denied.json()["detail"] == "需要访问令牌"
+        assert payload not in denied.content
+
+        replacement = b"replaced-bytes"
+        planted = anon.put(
+            f"/api/v1/artifacts/{artifact_id}/versions/1.0.0/content",
+            content=replacement,
+            headers=content_headers(replacement),
+        )
+        assert planted.status_code == 401
+        assert payload not in planted.content
+
+        wrong = anon.get(content_path, headers={"Authorization": "Bearer not-the-token"})
+        assert wrong.status_code == 401
+        assert payload not in wrong.content
+
+        queried = anon.get(f"{content_path}?access_token={LOCAL_API_TOKEN}")
+        assert queried.status_code == 401
+        assert payload not in queried.content
+
+    assert blob.read_bytes() == payload
+    assert blob_files(root) == before_files
+    reread = client.get(content_path, headers=auth_headers())
+    assert reread.status_code == 200
+    assert reread.content == payload

@@ -145,6 +145,11 @@ class ArtifactVersionRow(Base):
             "size_bytes IS NULL OR size_bytes >= 0",
             name="ck_artifact_versions_size",
         ),
+        CheckConstraint(
+            "(content_available = false AND blob_key IS NULL) OR "
+            "(content_available = true AND blob_key IS NOT NULL AND size_bytes IS NOT NULL)",
+            name="ck_artifact_versions_content",
+        ),
     )
 
     artifact_id: Mapped[UUID] = mapped_column(
@@ -156,6 +161,8 @@ class ArtifactVersionRow(Base):
     checksum_value: Mapped[str] = mapped_column(Text, nullable=False)
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     source: Mapped[str] = mapped_column(Text, nullable=False)
+    content_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    blob_key: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     artifact: Mapped[ArtifactRow] = relationship(back_populates="versions")
 
