@@ -4,14 +4,13 @@ Gitea is the lab adapter and is tested against a real Gitea. GitLab is the
 production adapter type. These tests do not invent a production GitLab URL.
 """
 
-import time
 from uuid import uuid4
 
 import httpx
 from fastapi.testclient import TestClient
 
 from kiln.config import Settings
-from kiln.git.gitea import GiteaSource, commit_path
+from kiln.git.gitea import GiteaSource, branch_path, git_commit_path
 from kiln.git.gitlab import GitLabSource, project_commit_path
 from kiln.git.source import PRODUCTION_GIT_PROVIDER, build_git_source
 from kiln.main import create_app
@@ -50,8 +49,9 @@ def test_gitlab_is_the_production_adapter_and_gitea_is_the_lab() -> None:
     assert project_commit_path("group", "app", "main") == (
         "/api/v4/projects/group%2Fapp/repository/commits/main"
     )
-    assert commit_path("kiln", "sample", "main") == "/api/v1/repos/kiln/sample/commits/main"
-    assert "/api/v4/" not in commit_path("kiln", "sample", "main")
+    assert branch_path("kiln", "sample", "main") == "/api/v1/repos/kiln/sample/branches/main"
+    assert git_commit_path("kiln", "sample", "abc") == "/api/v1/repos/kiln/sample/git/commits/abc"
+    assert "/api/v4/" not in branch_path("kiln", "sample", "main")
 
 
 def test_unconfigured_git_source_names_gitlab_without_a_url(client: TestClient) -> None:
@@ -171,24 +171,45 @@ def _default_branch(targets: ExternalTargets, full_name: str) -> str:
 
 
 def _commit_sha(targets: ExternalTargets, full_name: str, branch: str) -> str:
-    deadline = time.monotonic() + 20
-    last_status = 0
-    while time.monotonic() < deadline:
-        response = httpx.get(
-            f"{targets.git_base_url}/api/v1/repos/{full_name}/commits/{branch}",
-            headers=_gitea_headers(targets),
-            timeout=30,
-            trust_env=False,
-        )
-        last_status = response.status_code
-        if response.status_code == 200:
-            sha = response.json().get("sha")
-            if isinstance(sha, str) and sha:
-                return sha
-        time.sleep(0.5)
-    raise AssertionError(
-        f"Gitea did not return a commit for {full_name}@{branch}: HTTP {last_status}"
+    found = _branch_commit_id(targets, full_name, branch)
+    if found:
+        return found
+    _write_readme(targets, full_name, branch)
+    found = _branch_commit_id(targets, full_name, branch)
+    assert found, f"Gitea branch {full_name}@{branch} has no commit"
+    return found
+
+
+def _branch_commit_id(targets: ExternalTargets, full_name: str, branch: str) -> str | None:
+    response = httpx.get(
+        f"{targets.git_base_url}/api/v1/repos/{full_name}/branches/{branch}",
+        headers=_gitea_headers(targets),
+        timeout=30,
+        trust_env=False,
     )
+    if response.status_code == 404:
+        return None
+    assert response.status_code == 200, response.status_code
+    commit = response.json().get("commit")
+    assert isinstance(commit, dict)
+    sha = commit.get("id") or commit.get("sha")
+    assert isinstance(sha, str) and sha
+    return sha
+
+
+def _write_readme(targets: ExternalTargets, full_name: str, branch: str) -> None:
+    response = httpx.post(
+        f"{targets.git_base_url}/api/v1/repos/{full_name}/contents/README.md",
+        headers=_gitea_headers(targets),
+        json={
+            "message": "init",
+            "content": "a2lsbg==",
+            "branch": branch,
+        },
+        timeout=30,
+        trust_env=False,
+    )
+    assert response.status_code in {201, 422}, response.status_code
 
 
 def _delete_gitea_repo(targets: ExternalTargets, full_name: str) -> None:
