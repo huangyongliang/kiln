@@ -1,0 +1,94 @@
+# 本地与后续实验室的 compose 契约。
+# 默认只启动 Postgres、API 和控制台。Jenkins 与 Gitea 是 profile `lab` 下的占位，
+# 不会随 `docker compose up` 启动。容器名使用 kiln- 前缀，避免和共享机器上的实例重名。
+# 这里的数据库口令是本地开发默认值，不是生产密钥。
+
+name: kiln
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kiln-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kiln}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kiln}
+      POSTGRES_DB: ${POSTGRES_DB:-kiln}
+    ports:
+      - "5432:5432"
+    volumes:
+      - kiln-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: ./backend
+    image: kiln-api:local
+    container_name: kiln-api
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-kiln}:${POSTGRES_PASSWORD:-kiln}@postgres:5432/${POSTGRES_DB:-kiln}"
+      KILN_CORS_ORIGINS: http://localhost:8080,http://localhost:5173
+      LLM_PROVIDER: ${LLM_PROVIDER:-off}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  console:
+    build:
+      context: ./console
+    image: kiln-console:local
+    container_name: kiln-console
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+
+  jenkins:
+    profiles: ["lab"]
+    image: jenkins/jenkins:lts-jdk17
+    container_name: kiln-jenkins
+    ports:
+      - "18080:8080"
+    volumes:
+      - kiln-jenkins-home:/var/jenkins_home
+
+  gitea:
+    profiles: ["lab"]
+    image: gitea/gitea:1.22
+    container_name: kiln-gitea
+    environment:
+      GITEA__database__DB_TYPE: sqlite3
+    ports:
+      - "13000:3000"
+    volumes:
+      - kiln-gitea-data:/data
+
+networks:
+  default:
+    name: kiln-net
+
+volumes:
+  kiln-postgres-data:
+  kiln-jenkins-home:
+  kiln-gitea-data:

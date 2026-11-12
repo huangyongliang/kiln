@@ -1,0 +1,46 @@
+"""Application errors mapped to HTTP responses by the API shell."""
+
+
+class AppError(Exception):
+    def __init__(self, status_code: int, detail: str) -> None:
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(detail)
+
+
+class NotFound(AppError):
+    def __init__(self, detail: str) -> None:
+        super().__init__(404, detail)
+
+
+class Conflict(AppError):
+    def __init__(self, detail: str) -> None:
+        super().__init__(409, detail)
+
+
+class Gone(AppError):
+    def __init__(self, detail: str) -> None:
+        super().__init__(410, detail)
+
+
+class ModelDisabled(AppError):
+    def __init__(self) -> None:
+        super().__init__(
+            503,
+            "模型未启用。将 LLM_PROVIDER 设为 openai 并配置 LLM_BASE_URL，或在本地使用 mock。",
+        )
+
+
+class ModelRequestError(AppError):
+    def __init__(self, detail: str) -> None:
+        super().__init__(400, detail)
+
+
+class ModelUpstreamError(AppError):
+    def __init__(self, detail: str) -> None:
+        super().__init__(502, detail)
+
+
+class ModelTimeout(AppError):
+    def __init__(self) -> None:
+        super().__init__(504, "模型端点超时。")
