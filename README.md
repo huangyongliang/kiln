@@ -188,13 +188,16 @@ cd console && npm run build
 
 依赖代理对接测试在 `backend/tests/test_nexus_docking.py`。未设置 `KILN_TEST_NEXUS_URL` 时会跳过。`KILN_REQUIRE_NEXUS_TESTS=1` 时缺少配置会失败，并且不理会 `KILN_SKIP_EXTERNAL_TESTS`。
 
-GitHub Actions 会跑后端测试、控制台构建、`docker compose config`，以及单独的 `nexus-docking` 作业。该作业在 `127.0.0.1:28081` 启动一次性容器 `kiln-ci-depproxy`，不进入 compose。
+GitHub Actions 会跑后端测试、控制台的 `npm test` 与 `npm run build`、`docker compose config`，以及单独的 `nexus-docking` 作业。该作业在 `127.0.0.1:28081` 启动一次性容器 `kiln-ci-depproxy`，不进入 compose。
 
 本地登录，以及用户信息同步的起步已经接上：控制台有登录页，口令只保存哈希，会话写在 Postgres。未配置公司用户系统时使用本地口令。配置之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。`KILN_API_TOKEN` 仍是必填的机器和开发访问令牌。
 
 ## 这一版还没有，但仍属于一期
 
-骨架如何在一台机器上启动，见 [部署说明](docs/DEPLOY.md)。制品目录、版本、权限目录和取包接口由平台持有。版本字节保存在平台本地目录里，取包会返回这些字节。
+骨架如何在一台机器上启动，见 [部署说明](docs/DEPLOY.md)。制品目录、版本、权限目录和取包接口由平台持有。版本字节保存在平台本地目录里，取包会返回这些字节。下面这些按架构方案仍是一期要完成的事，但不是这一版：
+
+- 把制品发布到 Nexus。可选依赖代理可以接线，默认关闭，但平台不会把制品上传到 Nexus。
+- 把 Nexus 里的内容同步进平台目录。制品字节仍只在 `KILN_ARTIFACT_ROOT`，取包走平台自己的接口。
 
 没有令牌或会话时不能改领域数据，也不能读取这些接口，也不能保存或下载制品字节。平台自身具备完整的账号与权限能力。
 
