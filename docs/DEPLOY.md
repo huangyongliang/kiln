@@ -187,7 +187,7 @@ curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/
 curl -fsS http://127.0.0.1:8080/health
 ```
 
-浏览器打开 <http://127.0.0.1:8080>。概览页读取 `/health`。页面有概览、制品、Skill、账号与权限、对话。`console/nginx.conf` 把 `/api/` 和 `/health` 转到 compose 网络里的 `api:8000`，并把客户端请求体限制为 `1m`。直接访问宿主机 `8000` 不经过这道限制。
+浏览器打开 <http://127.0.0.1:8080>。概览页读取 `/health`。页面有概览、构建、制品、Skill、账号与权限、对话。`console/nginx.conf` 把 `/api/` 和 `/health` 转到 compose 网络里的 `api:8000`，并把客户端请求体限制为 `1m`。直接访问宿主机 `8000` 不经过这道限制。
 
 ### Postgres
 
@@ -418,4 +418,3 @@ docker compose logs api
 - **Kubernetes 镜像构建。** 仓库中没有清单。
 - **专用镜像仓库。** 没有镜像推送。
 - **把制品发布到运行环境。** 平台不把制品部署到运行环境。执行器响应里的 `deploys_to_runtime` 为 false。
-- **控制台视觉重做。**

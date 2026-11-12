@@ -1,3 +1,4 @@
+import { clearAccount, writeFlash } from "./session";
 import { readApiToken } from "./token";
 
 function errorDetail(body, status) {
@@ -13,22 +14,52 @@ function errorDetail(body, status) {
   return `请求失败（${status}）`;
 }
 
+function isSessionExpiry(path, status) {
+  if (status !== 401) {
+    return false;
+  }
+  return !path.startsWith("/api/v1/auth/login") && !path.startsWith("/api/v1/auth/sync");
+}
+
 export async function requestJson(path, options = {}) {
   const token = readApiToken();
-  const response = await fetch(path, {
-    ...options,
-    credentials: "include",
-    headers: {
-      Accept: "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...(options.headers || {}),
-    },
-  });
+  let response;
+  try {
+    response = await fetch(path, {
+      ...options,
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...(options.headers || {}),
+      },
+    });
+  } catch (caught) {
+    const error = new Error("无法连接 API");
+    error.cause = caught;
+    throw error;
+  }
   const text = await response.text();
-  const body = text ? JSON.parse(text) : null;
+  let body = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = null;
+    }
+  }
   if (!response.ok) {
-    throw new Error(errorDetail(body, response.status));
+    const error = new Error(errorDetail(body, response.status));
+    error.status = response.status;
+    if (isSessionExpiry(path, response.status)) {
+      clearAccount();
+      if (window.location.pathname !== "/login") {
+        writeFlash("登录已过期，请重新登录");
+        window.location.assign("/login");
+      }
+    }
+    throw error;
   }
   return body;
 }
@@ -42,4 +73,23 @@ export function postJson(path, payload) {
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export function postEmpty(path) {
+  return requestJson(path, { method: "POST" });
+}
+
+export function errorText(caught, fallback) {
+  if (caught instanceof Error && caught.message) {
+    return caught.message;
+  }
+  return fallback;
+}
+
+export function isForbidden(caught) {
+  return Boolean(caught && caught.status === 403);
+}
+
+export function isNotConfigured(caught) {
+  return Boolean(caught && caught.status === 503);
 }
