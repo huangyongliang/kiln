@@ -1,64 +1,141 @@
 <script setup>
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
+import { RouterLink } from "vue-router";
 
-import { getJson } from "../api";
+import { accessReady, perms } from "../access";
+import { errorText, getJson, isForbidden } from "../api";
 import PageIntro from "../components/PageIntro.vue";
+import StatePanel from "../components/StatePanel.vue";
+import StatusTag from "../components/StatusTag.vue";
+import { latestVersion } from "../format";
+import { canSee } from "../permissions";
+
+const note =
+  "平台自管目录、不可变版本和制品字节。字节保存在平台本地存储。版本入库后可以取回这些字节。Nexus 集成还没有接上。";
 
 const items = ref([]);
+const mode = ref("loading");
 const error = ref("");
-const loaded = ref(false);
+const forbidden = ref(false);
+const query = ref("");
+const typeFilter = ref("全部");
 
-onMounted(async () => {
-  try {
-    const body = await getJson("/api/v1/artifacts");
-    items.value = body.items;
-  } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : "无法读取制品目录";
-  } finally {
-    loaded.value = true;
+const types = computed(() => {
+  const values = new Set(items.value.map((item) => item.package_type_label).filter(Boolean));
+  return ["全部", ...values];
+});
+
+const filtered = computed(() => {
+  const needle = query.value.trim().toLowerCase();
+  return items.value.filter((item) => {
+    if (typeFilter.value !== "全部" && item.package_type_label !== typeFilter.value) {
+      return false;
+    }
+    if (!needle) {
+      return true;
+    }
+    return [item.name, item.group, item.package_type_label, latestVersion(item)?.version]
+      .join(" ")
+      .toLowerCase()
+      .includes(needle);
+  });
+});
+
+onMounted(load);
+watch(accessReady, (ready) => {
+  if (ready) {
+    load();
   }
 });
 
-function versionText(artifact) {
-  if (!artifact.versions.length) {
-    return "尚无版本";
+async function load() {
+  forbidden.value = false;
+  if (accessReady.value && !canSee("artifacts", perms.value)) {
+    forbidden.value = true;
+    return;
   }
-  return artifact.versions
-    .map((item) =>
-      item.content_available ? `${item.version}（字节已入库）` : `${item.version}（尚无字节）`,
-    )
-    .join("、");
+  mode.value = "loading";
+  error.value = "";
+  try {
+    const body = await getJson("/api/v1/artifacts");
+    items.value = body.items || [];
+    mode.value = "ready";
+  } catch (caught) {
+    if (isForbidden(caught)) {
+      forbidden.value = true;
+      return;
+    }
+    mode.value = "error";
+    error.value = errorText(caught, "无法读取制品目录");
+  }
+}
+
+function byteStatus(artifact) {
+  const latest = latestVersion(artifact);
+  if (latest?.content_available) {
+    return "stored";
+  }
+  return "missing";
 }
 </script>
 
 <template>
-  <PageIntro
-    title="制品"
-    lead="平台自管目录、不可变版本和制品字节。字节保存在平台本地存储。版本入库后可以取回这些字节。Nexus 集成还没有接上。"
-  />
-  <section class="panel">
-    <p v-if="error" class="message error">{{ error }}</p>
-    <p v-else-if="loaded && items.length === 0" class="message">
-      还没有制品。登记请调用 API。目录写在 PostgreSQL 里，只重启 API 进程不会清空。
-    </p>
-    <table v-else-if="loaded">
-      <thead>
-        <tr>
-          <th>名称</th>
-          <th>组</th>
-          <th>类型</th>
-          <th>版本</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="item in items" :key="item.id">
-          <td>{{ item.name }}</td>
-          <td>{{ item.group || "—" }}</td>
-          <td>{{ item.package_type_label }}</td>
-          <td>{{ versionText(item) }}</td>
-        </tr>
-      </tbody>
-    </table>
-    <p v-else class="message">正在读取制品目录 …</p>
-  </section>
+  <StatePanel v-if="forbidden" forbidden forbidden-code="artifact.read" />
+  <template v-else>
+    <PageIntro title="制品" lead="平台自管目录里的不可变版本。" :note="note" />
+    <section class="panel">
+      <div class="toolbar">
+        <input v-model="query" class="search" type="search" placeholder="搜索名称或组" />
+        <button
+          v-for="type in types"
+          :key="type"
+          type="button"
+          class="chip"
+          :class="{ active: typeFilter === type }"
+          @click="typeFilter = type"
+        >
+          {{ type }}
+        </button>
+      </div>
+      <StatePanel
+        :loading="mode === 'loading'"
+        :error="mode === 'error' ? error : ''"
+        :empty="mode === 'ready' && filtered.length === 0"
+        :empty-text="items.length ? '没有符合条件的制品' : '还没有制品'"
+        @retry="load"
+      >
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>组</th>
+                <th>类型</th>
+                <th>最新版本</th>
+                <th>版本数</th>
+                <th>字节</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in filtered" :key="item.id">
+                <td>
+                  <RouterLink class="linkish" :to="`/artifacts/${item.id}`">{{ item.name }}</RouterLink>
+                </td>
+                <td>{{ item.group || "—" }}</td>
+                <td>{{ item.package_type_label }}</td>
+                <td class="mono nowrap">{{ latestVersion(item)?.version || "—" }}</td>
+                <td class="nowrap">{{ item.versions.length }}</td>
+                <td class="nowrap">
+                  <StatusTag
+                    :status="byteStatus(item) === 'stored' ? 'success' : 'unknown'"
+                    :label="byteStatus(item) === 'stored' ? '已入库' : '尚无字节'"
+                  />
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </StatePanel>
+    </section>
+  </template>
 </template>

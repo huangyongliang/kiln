@@ -1,53 +1,114 @@
 <script setup>
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
+import { RouterLink } from "vue-router";
 
-import { getJson } from "../api";
+import { accessReady, perms } from "../access";
+import { errorText, getJson, isForbidden } from "../api";
 import PageIntro from "../components/PageIntro.vue";
+import StatePanel from "../components/StatePanel.vue";
+import StatusTag from "../components/StatusTag.vue";
+import { canSee } from "../permissions";
+
+const note =
+  "构建流程用 skill 描述。本期可以创建草稿、提交审核并发布，但步骤只作为数据保存，不会执行，也不会运行 shell。";
 
 const items = ref([]);
+const mode = ref("loading");
 const error = ref("");
-const loaded = ref(false);
+const forbidden = ref(false);
+const statusFilter = ref("all");
 
-onMounted(async () => {
-  try {
-    const body = await getJson("/api/v1/skills");
-    items.value = body.items;
-  } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : "无法读取 skill";
-  } finally {
-    loaded.value = true;
+const filters = [
+  ["all", "全部"],
+  ["draft", "草稿"],
+  ["in_review", "审核中"],
+  ["published", "已发布"],
+];
+
+const filtered = computed(() => {
+  if (statusFilter.value === "all") {
+    return items.value;
+  }
+  return items.value.filter((item) => item.status === statusFilter.value);
+});
+
+onMounted(load);
+watch(accessReady, (ready) => {
+  if (ready) {
+    load();
   }
 });
+
+async function load() {
+  forbidden.value = false;
+  if (accessReady.value && !canSee("skills", perms.value)) {
+    forbidden.value = true;
+    return;
+  }
+  mode.value = "loading";
+  error.value = "";
+  try {
+    const body = await getJson("/api/v1/skills");
+    items.value = body.items || [];
+    mode.value = "ready";
+  } catch (caught) {
+    if (isForbidden(caught)) {
+      forbidden.value = true;
+      return;
+    }
+    mode.value = "error";
+    error.value = errorText(caught, "无法读取 skill");
+  }
+}
 </script>
 
 <template>
-  <PageIntro
-    title="Skill"
-    lead="构建流程用 skill 描述。本期可以创建草稿、提交审核并发布，但步骤只作为数据保存，不会执行，也不会运行 shell。"
-  />
-  <section class="panel">
-    <p v-if="error" class="message error">{{ error }}</p>
-    <p v-else-if="loaded && items.length === 0" class="message">
-      还没有 skill。创建草稿请调用 API。
-    </p>
-    <table v-else-if="loaded">
-      <thead>
-        <tr>
-          <th>名称</th>
-          <th>版本</th>
-          <th>状态</th>
-          <th>步骤</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="item in items" :key="item.id">
-          <td>{{ item.name }}</td>
-          <td>{{ item.version }}</td>
-          <td><span class="tag">{{ item.status_label }}</span></td>
-          <td>{{ item.steps.length }}</td>
-        </tr>
-      </tbody>
-    </table>
-    <p v-else class="message">正在读取 skill …</p>
-  </section>
+  <StatePanel v-if="forbidden" forbidden forbidden-code="skill.read" />
+  <template v-else>
+    <PageIntro title="Skill" lead="构建流程用 skill 描述，步骤只作为数据保存。" :note="note" />
+    <section class="panel">
+      <div class="toolbar">
+        <button
+          v-for="item in filters"
+          :key="item[0]"
+          type="button"
+          class="chip"
+          :class="{ active: statusFilter === item[0] }"
+          @click="statusFilter = item[0]"
+        >
+          {{ item[1] }}
+        </button>
+      </div>
+      <StatePanel
+        :loading="mode === 'loading'"
+        :error="mode === 'error' ? error : ''"
+        :empty="mode === 'ready' && filtered.length === 0"
+        :empty-text="items.length ? '没有这个状态的 skill' : '还没有 skill'"
+        @retry="load"
+      >
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>版本</th>
+                <th>状态</th>
+                <th>步骤数</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in filtered" :key="item.id">
+                <td>
+                  <RouterLink class="linkish" :to="`/skills/${item.id}`">{{ item.name }}</RouterLink>
+                </td>
+                <td class="mono nowrap">{{ item.version }}</td>
+                <td class="nowrap"><StatusTag :status="item.status" :label="item.status_label" /></td>
+                <td class="nowrap">{{ item.steps.length }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </StatePanel>
+    </section>
+  </template>
 </template>

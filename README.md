@@ -198,4 +198,3 @@ GitHub Actions 会跑后端测试、控制台构建，以及 `docker compose con
 - Kubernetes 镜像构建
 - 专用镜像仓库
 - 把制品发布到运行环境。平台仍然不把制品部署到运行环境。响应里 `deploys_to_runtime` 为 false
-- 控制台视觉重做
