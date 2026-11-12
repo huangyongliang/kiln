@@ -1,7 +1,7 @@
 """Local RBAC catalog.
 
-The catalog is who may manage accounts, use or publish skills, upload or
-download artifacts, read executor, job, build, and git-source state, and
+The catalog is who may manage accounts, use, submit, or publish skills, upload
+or download artifacts, read executor, job, build, and git-source state, and
 start a job or product build on a compat executor, plus which in-platform
 agent abilities can be granted. Routes that match one of these codes check
 the signed-in user's roles. `KILN_API_TOKEN` is a machine credential and has
@@ -18,6 +18,7 @@ _READER = (
 )
 _BUILDER = _READER + (
     "skill.use",
+    "skill.submit",
     "artifact.upload",
     "artifact.download",
     "agent.qa",
@@ -61,6 +62,7 @@ PERMISSIONS: tuple[Permission, ...] = (
     Permission(code="account.manage", description="管理本地账号与角色分配"),
     Permission(code="skill.read", description="查看 skill"),
     Permission(code="skill.use", description="使用已发布的 skill"),
+    Permission(code="skill.submit", description="提交 skill 审核"),
     Permission(code="skill.publish", description="审核并发布 skill"),
     Permission(code="artifact.read", description="查看制品目录"),
     Permission(code="artifact.upload", description="登记制品版本"),
@@ -89,7 +91,8 @@ ROLES: tuple[Role, ...] = (
         id="builder",
         name="构建者",
         description=(
-            "使用已发布 skill、登记制品，在兼容执行器上发起任务或产品构建，并使用问答与制作制品"
+            "使用已发布 skill、起草并提交审核、登记制品，"
+            "在兼容执行器上发起任务或产品构建，并使用问答与制作制品"
         ),
         permissions=list(_BUILDER),
     ),

@@ -1,6 +1,8 @@
 """Skill draft, review, and publish outline. Steps are stored and never executed.
 
-Listing and reading a skill require `skill.read`.
+Listing and reading a skill require `skill.read`. Creating a draft requires
+`skill.use`. Submitting a draft for review requires `skill.submit`. Publishing
+requires `skill.publish`.
 """
 
 from uuid import UUID
@@ -57,7 +59,7 @@ def get_skill(skill_id: UUID, store: PostgresStore = Depends(get_store)) -> Skil
     "/{skill_id}/submit-review",
     response_model=Skill,
     summary="提交审核",
-    dependencies=[Depends(require_permission("skill.publish"))],
+    dependencies=[Depends(require_permission("skill.submit"))],
 )
 def submit_review(skill_id: UUID, store: PostgresStore = Depends(get_store)) -> Skill:
     return store.submit_skill_review(skill_id)

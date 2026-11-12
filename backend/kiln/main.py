@@ -147,11 +147,15 @@ def create_app(
 
     @app.exception_handler(AppError)
     async def handle_app_error(_request: Request, exc: AppError) -> JSONResponse:
-        headers = {"WWW-Authenticate": "Bearer"} if exc.status_code == 401 else None
+        headers: dict[str, str] = {}
+        if exc.status_code == 401:
+            headers["WWW-Authenticate"] = "Bearer"
+        if _request.url.path == f"{API_PREFIX}/auth/me":
+            headers["Cache-Control"] = "no-store"
         return JSONResponse(
             status_code=exc.status_code,
             content={"detail": exc.detail},
-            headers=headers,
+            headers=headers or None,
         )
 
     app.include_router(health.router)

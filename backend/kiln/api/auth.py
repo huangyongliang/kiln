@@ -2,7 +2,9 @@
 
 Login, logout, the OIDC callback, and the sync probe are outside the
 auth gate. They do not write domain rows except sessions and the account
-created or updated for an external subject.
+created or updated for an external subject. `GET /auth/me` is the only
+route on this router that requires a session or the machine token, and it
+only reads the current principal.
 """
 
 import base64
@@ -18,11 +20,12 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from kiln.api.deps import get_oidc_http, get_settings, get_store
-from kiln.auth import SESSION_COOKIE, digest_token, token_matches
+from kiln.auth import SESSION_COOKIE, Principal, digest_token, require_auth, token_matches
 from kiln.config import Settings
 from kiln.db.store import PostgresStore
 from kiln.domain.accounts import Account
-from kiln.domain.auth import LoginRequest, SessionLogin, SyncStatus
+from kiln.domain.auth import LoginRequest, SessionLogin, SessionPrincipal, SyncStatus
+from kiln.domain.rbac import PERMISSIONS
 from kiln.errors import NotConfigured, Unauthorized, UpstreamFailure
 from kiln.oidc import OidcFlowError, begin_authorization, finish_authorization
 
@@ -48,6 +51,19 @@ def login(
     response = JSONResponse(content=jsonable_encoder(body))
     _remember_session(response, settings, token)
     return response
+
+
+@router.get("/me", response_model=SessionPrincipal, summary="查看当前登录身份")
+def current_principal(
+    response: Response,
+    principal: Principal = Depends(require_auth),
+) -> SessionPrincipal:
+    response.headers["Cache-Control"] = "no-store"
+    return SessionPrincipal(
+        kind=principal.kind,
+        account=principal.account,
+        permissions=[item.code for item in PERMISSIONS if item.code in principal.permissions],
+    )
 
 
 @router.post("/logout", status_code=204, summary="退出并撤销会话")

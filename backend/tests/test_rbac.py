@@ -159,24 +159,28 @@ def test_permission_catalog_includes_read_codes(client: TestClient) -> None:
     assert described["executor.run"] == "在兼容执行器上发起任务或产品构建"
     assert described["executor.read"] == _EXECUTOR_READ
     assert described["git.read"] == _GIT_READ
+    assert described["skill.submit"] == "提交 skill 审核"
     listed = {role["id"]: role for role in client.get("/api/v1/rbac/roles").json()["items"]}
     assert listed["reader"]["description"] == "查看账号、skill 与制品"
+    assert "起草并提交审核" in listed["builder"]["description"]
     roles = {role_id: set(role["permissions"]) for role_id, role in listed.items()}
     assert "executor.run" not in roles["reader"]
     assert "agent.qa" not in roles["reader"]
     assert "executor.read" not in roles["reader"]
     assert "git.read" not in roles["reader"]
+    assert "skill.submit" not in roles["reader"]
     for role_id in ("builder", "publisher", "admin"):
         assert "executor.run" in roles[role_id]
         assert "agent.qa" in roles[role_id]
         assert "executor.read" in roles[role_id]
         assert "git.read" in roles[role_id]
+        assert "skill.submit" in roles[role_id]
 
 
 def test_seed_rbac_upserts_new_codes_onto_an_existing_catalog(client: TestClient) -> None:
     engine = client.app.state.engine
     with engine.begin() as connection:
-        for code in ("executor.run", "executor.read", "git.read"):
+        for code in ("executor.run", "executor.read", "git.read", "skill.submit"):
             removed = connection.execute(
                 text("DELETE FROM rbac_role_permissions WHERE permission_code = :code"),
                 {"code": code},
@@ -194,7 +198,7 @@ def test_seed_rbac_upserts_new_codes_onto_an_existing_catalog(client: TestClient
         remaining = connection.execute(text("SELECT count(*) FROM rbac_permissions")).scalar_one()
     assert remaining >= 1
     before = client.get("/api/v1/rbac/permissions").json()["items"]
-    removed_codes = {"executor.run", "executor.read", "git.read"}
+    removed_codes = {"executor.run", "executor.read", "git.read", "skill.submit"}
     assert all(item["code"] not in removed_codes for item in before)
     seed_rbac(engine)
     permissions = client.get("/api/v1/rbac/permissions").json()["items"]
@@ -202,13 +206,14 @@ def test_seed_rbac_upserts_new_codes_onto_an_existing_catalog(client: TestClient
     assert described["executor.run"] == "在兼容执行器上发起任务或产品构建"
     assert described["executor.read"] == _EXECUTOR_READ
     assert described["git.read"] == _GIT_READ
+    assert described["skill.submit"] == "提交 skill 审核"
     assert described["agent.qa"] == "使用平台内问答"
     assert len(permissions) == len({item["code"] for item in permissions})
     roles = {
         role["id"]: role["permissions"]
         for role in client.get("/api/v1/rbac/roles").json()["items"]
     }
-    for code in ("executor.run", "executor.read", "git.read"):
+    for code in ("executor.run", "executor.read", "git.read", "skill.submit"):
         assert code not in roles["reader"]
         assert roles["builder"].count(code) == 1
         assert roles["publisher"].count(code) == 1

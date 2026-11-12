@@ -65,3 +65,57 @@ def test_duplicate_skill_version_conflicts(client: TestClient) -> None:
     _draft(client, name="重复技能")
     again = client.post("/api/v1/skills", json={"name": "重复技能", "version": "0.1.0"})
     assert again.status_code == 409
+
+
+def test_builder_submits_any_draft_and_cannot_publish(client: TestClient) -> None:
+    draft = _draft(client, name="submit-gate")
+    builder = _login(client, "ada_builder", ["builder"])
+    submitted = builder.post(f"/api/v1/skills/{draft['id']}/submit-review")
+    assert submitted.status_code == 200
+    assert submitted.json()["status"] == "in_review"
+    assert submitted.json()["status_label"] == "审核中"
+
+    denied_publish = builder.post(f"/api/v1/skills/{draft['id']}/publish")
+    assert denied_publish.status_code == 403
+    assert denied_publish.json()["detail"] == "没有权限"
+    assert client.get(f"/api/v1/skills/{draft['id']}").json()["status"] == "in_review"
+
+    again = builder.post(f"/api/v1/skills/{draft['id']}/submit-review")
+    assert again.status_code == 409
+    assert again.json()["detail"] == "只有草稿可以提交审核"
+
+    other = _draft(client, name="reader-draft")
+    reader = _login(client, "ada_reader", ["reader"])
+    reader_submit = reader.post(f"/api/v1/skills/{other['id']}/submit-review")
+    assert reader_submit.status_code == 403
+    assert reader_submit.json()["detail"] == "没有权限"
+    assert client.get(f"/api/v1/skills/{other['id']}").json()["status"] == "draft"
+
+    publisher = _login(client, "ada_publisher", ["publisher"])
+    published = publisher.post(f"/api/v1/skills/{draft['id']}/publish")
+    assert published.status_code == 200
+    assert published.json()["status"] == "published"
+
+
+LOCAL_PASSWORD = "correct-horse-1"
+
+
+def _login(client: TestClient, username: str, role_ids: list[str]) -> TestClient:
+    created = client.post(
+        "/api/v1/accounts",
+        json={
+            "username": username,
+            "display_name": username,
+            "password": LOCAL_PASSWORD,
+            "role_ids": role_ids,
+        },
+    )
+    assert created.status_code == 201, created.text
+    session = TestClient(client.app)
+    logged_in = session.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": LOCAL_PASSWORD},
+    )
+    assert logged_in.status_code == 200, logged_in.text
+    assert logged_in.json()["account"]["role_ids"] == role_ids
+    return session

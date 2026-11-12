@@ -143,7 +143,7 @@ docker compose --profile lab up
 - 保存字节：`PUT /artifacts/{id}/versions/{version}/content`，请求体是原始字节，并用 `X-Kiln-Checksum-Algorithm`、`X-Kiln-Checksum` 声明校验和。成功后该版本的 `content_available` 为 true
 - 下载预约：`POST /artifacts/{id}/versions/{version}/download-reservations`
 - 取包：`GET /retrieve/{reservation_id}` 返回预约信息。字节已保存时 `content_available` 为 true，`GET /retrieve/{reservation_id}/content` 返回这些字节
-- Skill：`GET /skills` 与 `GET /skills/{id}` 需要 `skill.read`。`POST /skills` 创建草稿，`POST /skills/{id}/submit-review`，`POST /skills/{id}/publish`
+- Skill：`GET /skills` 与 `GET /skills/{id}` 需要 `skill.read`。`POST /skills` 创建草稿，需要 `skill.use`。`POST /skills/{id}/submit-review` 需要 `skill.submit`。`POST /skills/{id}/publish` 需要 `skill.publish`
 - 模型：`GET /llm/provider` 仍只需会话或机器令牌，`POST /llm/chat`。对话写入需要 `agent.qa`。只读角色不能调用。对话可在授权下通过工具起草 skill 草稿，或发起与 POST /builds 相同的产品构建。
 - 执行器：`GET /executor`，`POST /jobs`（需要 `executor.run`），`GET /jobs`，`GET /jobs/{id}`，`GET /jobs/{id}/log`。任务记录在 PostgreSQL。状态和日志来自 Jenkins。响应里 `deploys_to_runtime` 为 false。兼容任务只打印调用方给出的标记。读取执行器状态、任务和日志需要 `executor.read`。只读角色没有这项权限
 - 产品构建：`POST /builds`（需要 `executor.run`），`GET /builds`，`GET /builds/{id}`，`GET /builds/{id}/log`。请求体给出 `repository`、`ref`、`artifact_name`、`version`、`package_type`。kiln 用当前代码源适配器解析提交，Jenkins 克隆该提交并运行仓库根目录的 `kiln-build.sh`。脚本必须写出 `kiln-dist/artifact.bin`。构建成功后，这些字节写入 `KILN_ARTIFACT_ROOT`，对应版本的 `content_available` 为 true，`source` 为 `build`。取包接口返回同一组字节。响应里 `deploys_to_runtime` 为 false。读取构建和日志需要 `executor.read`
