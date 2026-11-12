@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends
 
 from kiln.api.deps import get_llm, get_settings
-from kiln.auth import require_api_token
+from kiln.auth import require_auth
 from kiln.config import Settings
 from kiln.llm.provider import (
     ChatCompletion,
@@ -16,7 +16,7 @@ from kiln.llm.provider import (
 router = APIRouter(
     prefix="/llm",
     tags=["模型"],
-    dependencies=[Depends(require_api_token)],
+    dependencies=[Depends(require_auth)],
 )
 
 

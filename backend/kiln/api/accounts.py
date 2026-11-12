@@ -1,7 +1,7 @@
-"""Local account and RBAC outlines.
+"""Local accounts and the RBAC catalog.
 
-Calls require the local API token. Roles are not enforced. Passwords, login,
-and identity federation are not implemented.
+Calls require a user session or the machine token. Creating an account
+requires `account.manage`. The response never includes a password.
 """
 
 from uuid import UUID
@@ -9,12 +9,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 
 from kiln.api.deps import get_store
-from kiln.auth import require_api_token
+from kiln.auth import require_auth, require_permission
 from kiln.db.store import PostgresStore
 from kiln.domain.accounts import Account, AccountCreate, AccountList
 from kiln.domain.rbac import PermissionList, RoleList
 
-router = APIRouter(tags=["账号与权限"], dependencies=[Depends(require_api_token)])
+router = APIRouter(tags=["账号与权限"], dependencies=[Depends(require_auth)])
 
 
 @router.get("/accounts", response_model=AccountList, summary="列出本地账号")
@@ -22,7 +22,13 @@ def list_accounts(store: PostgresStore = Depends(get_store)) -> AccountList:
     return AccountList(items=store.list_accounts())
 
 
-@router.post("/accounts", response_model=Account, status_code=201, summary="创建本地账号")
+@router.post(
+    "/accounts",
+    response_model=Account,
+    status_code=201,
+    summary="创建本地账号",
+    dependencies=[Depends(require_permission("account.manage"))],
+)
 def create_account(
     payload: AccountCreate,
     store: PostgresStore = Depends(get_store),

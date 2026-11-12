@@ -1,7 +1,8 @@
 """Product build HTTP API.
 
-Creating a build, reading it, and reading its log require the local API token.
-The build stores artifact bytes on the platform. It does not deploy them.
+Creating a build, reading it, and reading its log require a user session or
+the machine token. The build stores artifact bytes on the platform. It does
+not deploy them.
 """
 
 from uuid import UUID
@@ -9,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 
 from kiln.api.deps import get_build_store, get_git_source, get_jenkins, get_settings, get_store
-from kiln.auth import require_api_token
+from kiln.auth import require_auth
 from kiln.config import Settings
 from kiln.db.builds import BuildStore
 from kiln.db.store import PostgresStore
@@ -24,7 +25,7 @@ from kiln.executor.product import (
 )
 from kiln.git.source import GitSource
 
-router = APIRouter(tags=["产品构建"], dependencies=[Depends(require_api_token)])
+router = APIRouter(tags=["产品构建"], dependencies=[Depends(require_auth)])
 
 
 @router.get("/builds", response_model=ProductBuildList, summary="列出产品构建")

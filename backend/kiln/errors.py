@@ -9,8 +9,13 @@ class AppError(Exception):
 
 
 class Unauthorized(AppError):
-    def __init__(self) -> None:
-        super().__init__(401, "需要访问令牌")
+    def __init__(self, detail: str = "需要访问令牌") -> None:
+        super().__init__(401, detail)
+
+
+class Forbidden(AppError):
+    def __init__(self, detail: str = "没有权限") -> None:
+        super().__init__(403, detail)
 
 
 class BadRequest(AppError):

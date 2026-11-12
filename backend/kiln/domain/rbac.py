@@ -1,8 +1,10 @@
 """Local RBAC catalog.
 
-The catalog is the phase-1 outline of who may use skills, publish skills, and
+The catalog is who may manage accounts, use or publish skills, and upload or
 download artifacts, plus which in-platform agent abilities can be granted.
-Requests are not authorized against it yet.
+Write routes that match one of these codes check the signed-in user's roles.
+`KILN_API_TOKEN` is a machine credential and has every code. Optional company
+user-system sync does not copy groups or roles into this catalog.
 """
 
 from pydantic import BaseModel, ConfigDict
@@ -93,6 +95,17 @@ ROLES: tuple[Role, ...] = (
 )
 
 ROLE_INDEX = {role.id: role for role in ROLES}
+ALL_PERMISSIONS = frozenset(item.code for item in PERMISSIONS)
+
+
+def permissions_for(role_ids: list[str]) -> frozenset[str]:
+    codes: set[str] = set()
+    for role_id in role_ids:
+        role = ROLE_INDEX.get(role_id)
+        if role is not None:
+            codes.update(role.permissions)
+    return frozenset(codes)
+
 
 for _role in ROLES:
     unknown = set(_role.permissions) - _PERMISSION_CODES

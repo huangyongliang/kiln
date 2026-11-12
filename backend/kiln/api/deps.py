@@ -1,5 +1,6 @@
 """Request dependencies bound to application state."""
 
+import httpx
 from fastapi import Request
 
 from kiln.config import Settings
@@ -20,6 +21,10 @@ def get_store(request: Request) -> PostgresStore:
     return request.app.state.store
 
 
+def get_oidc_http(request: Request) -> httpx.Client:
+    return request.app.state.oidc_http
+
+
 def get_llm(request: Request) -> LLMProvider:
     return request.app.state.llm
 
@@ -35,9 +40,7 @@ def get_build_store(request: Request) -> BuildStore:
 def get_jenkins(request: Request) -> JenkinsClient:
     client = request.app.state.jenkins
     if client is None:
-        raise NotConfigured(
-            "执行器未配置。请设置 JENKINS_URL、JENKINS_USER 和 JENKINS_API_TOKEN。"
-        )
+        raise NotConfigured("执行器未配置。请设置 JENKINS_URL、JENKINS_USER 和 JENKINS_API_TOKEN。")
     return client
 
 

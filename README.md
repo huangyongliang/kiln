@@ -33,7 +33,7 @@
 | Git 远端 | 可替换适配器 | `GIT_PROVIDER=gitea` 是实验室实现，对着配置的 `GIT_BASE_URL` 调用 Gitea HTTP API。`GIT_PROVIDER=gitlab` 是生产代码源，调用 GitLab HTTP API。仓库不写生产 GitLab 地址。compose 里的 `gitea/gitea:1.22` 仍是未作为生产源的占位 |
 | 制品目录 | 目录、版本和字节由平台保存 | 元数据在 PostgreSQL。字节在平台自管的本地目录 `KILN_ARTIFACT_ROOT`（compose 命名卷 `kiln-artifact-data`）。版本保存字节后 `content_available` 为 true，`GET /api/v1/retrieve/{reservation_id}/content` 返回这些字节。Nexus 集成仍属于一期，这一版没有 Nexus 地址或客户端 |
 | OpenAI 兼容模型端点 | 可选 | `LLM_PROVIDER` 默认 `off`。设为 `openai` 时必须提供 `LLM_BASE_URL` |
-| 本地登录与身份联邦 | 一期要做，这一版还没有 | 平台自身具备完整的账号与权限能力。本地账号和 RBAC 目录在 Postgres。`/api/v1` 需要本地令牌 `KILN_API_TOKEN`。没有登录页和口令。公司用户系统的对接是可选的。可选对接之后，公司系统只确认身份和在职状态，kiln 的授权仍留在平台上 |
+| 本地登录与用户信息同步 | 这一版已接上起步 | 平台自身具备完整的账号与权限能力。本地账号、口令哈希、会话和 RBAC 目录在 Postgres。控制台有登录页。未配置公司用户系统时使用本地口令登录。`KILN_API_TOKEN` 仍是必填的机器和开发访问令牌，拥有目录中的全部权限。公司用户系统的对接是可选的。可选对接之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上 |
 | Harbor、Kubernetes、专用镜像仓库 | 不属于一期 | 仓库中没有对应清单或配置项。架构方案把镜像构建放在后面 |
 
 ## 本地运行
@@ -117,6 +117,15 @@ docker compose --profile lab up
 | `GIT_TIMEOUT_SECONDS` | `30` | 单次代码源 HTTP 调用超时，最大 120 |
 | `KILN_ARTIFACT_ROOT` | `var/kiln-artifacts` | 平台自管制品字节的本地目录。相对路径按进程工作目录解析。不是 Nexus 地址 |
 | `KILN_ARTIFACT_MAX_BYTES` | `67108864` | 单次保存的字节上限 |
+| `KILN_OIDC_ISSUER_URL` | 空 | 用户信息同步的发行方地址。留空则只使用本地口令。不要把公司用户系统的地址写进仓库 |
+| `KILN_OIDC_CLIENT_ID` | 空 | 用户信息同步的客户端标识。配置时必填 |
+| `KILN_OIDC_CLIENT_SECRET` | 空 | 用户信息同步的客户端密钥。只从环境读取 |
+| `KILN_OIDC_REDIRECT_URI` | 空 | 授权码回调地址，须是 http 或 https。配置时必填 |
+| `KILN_OIDC_EMPLOYMENT_CLAIM` | 空 | 在职状态声明的名称。配置时必填 |
+| `KILN_OIDC_EMPLOYMENT_ACTIVE_VALUES` | 空 | 视为在职的声明值，逗号分隔。配置时必填 |
+| `KILN_OIDC_SCOPES` | 空 | 仅在已配置时生效。留空则使用 `openid profile email` |
+| `KILN_SESSION_TTL_SECONDS` | `43200` | 用户会话有效期，默认 12 小时 |
+| `KILN_SESSION_COOKIE_SECURE` | `false` | 为 true 时会话 cookie 带 Secure。本地 http 保持 false |
 
 `LLM_PROVIDER=openai` 时，聊天请求会 `POST {LLM_BASE_URL}/chat/completions`。模拟模式和关闭模式不会访问网络。
 
@@ -124,9 +133,11 @@ docker compose --profile lab up
 
 ## API 大纲
 
-前缀 `/api/v1`。账号、RBAC 目录、制品、版本、下载预约和 skill 保存在 PostgreSQL，API 进程重启后仍然在。这些路由需要请求头 `Authorization: Bearer <KILN_API_TOKEN>`。没有令牌时返回 401，不会改库。`/health` 和 `/docs` 不需要令牌；说明页本身不能绕过这道门去写入。这不是登录，也不按角色鉴权。
+前缀 `/api/v1`。账号、RBAC 目录、制品、版本、下载预约、skill 和用户会话保存在 PostgreSQL，API 进程重启后仍然在。登录、退出、用户信息同步的开始与回调，以及「是否已配置」探测不需要事先持有令牌。其余路由接受会话 cookie、登录返回的 Bearer 令牌，或机器令牌 `KILN_API_TOKEN`。没有这些凭证时返回 401，不会改库。`/health` 和 `/docs` 不需要令牌；说明页本身不能绕过这道门去写入。已登录用户的写入会按现有权限目录校验。机器令牌拥有目录中的全部权限。
 
-- 本地账号：`GET/POST /accounts`，`GET /accounts/{id}`
+- 登录：`POST /auth/login` 校验本地口令，写入会话哈希，设置 httpOnly cookie，并返回 Bearer 令牌。`POST /auth/logout` 撤销会话。口令只以哈希保存，响应里不出现口令
+- 用户信息同步：`GET /auth/sync` 说明是否已配置。未配置时 `GET /auth/oidc/start` 与 `GET /auth/oidc/callback` 返回「用户信息同步未配置」。配置后使用授权码和 PKCE，按发行方与 subject 找到或创建 kiln 账号。新账号的默认角色是 `reader`，不设置口令，也不复制公司侧的组或角色。在职状态未通过或账号已停用时不建立会话
+- 本地账号：`GET/POST /accounts`，`GET /accounts/{id}`。创建账号可以带口令，调用方需要 `account.manage`
 - RBAC 目录：`GET /rbac/roles`，`GET /rbac/permissions`
 - 制品：`GET/POST /artifacts`，`POST /artifacts/{id}/versions` 登记尚无字节的版本
 - 保存字节：`PUT /artifacts/{id}/versions/{version}/content`，请求体是原始字节，并用 `X-Kiln-Checksum-Algorithm`、`X-Kiln-Checksum` 声明校验和。成功后该版本的 `content_available` 为 true
@@ -142,7 +153,7 @@ Skill 步骤不会被执行。kiln 进程本身不运行 shell。产品构建的
 
 ## 测试
 
-后端测试连接真实 PostgreSQL，不使用内存库、SQLite 或假的持久层。制品字节测试把文件写进临时目录，不用模拟存储。默认连接串是 `postgresql://kiln:kiln@127.0.0.1:5432/kiln`，可用环境变量 `KILN_TEST_DATABASE_URL` 覆盖。GitHub Actions 的 backend 作业会启动 `postgres:16`。`backend/tests/test_persistence.py` 里的 `test_records_survive_api_process_restart` 通过 HTTP 写入记录，结束 API 进程，确认库里仍有这些行，再启动一个新进程读回同一条记录。`test_artifact_bytes_survive_api_process_restart` 把字节写进临时目录，结束 API 进程，再由新进程从同一目录取回相同字节。`backend/tests/test_auth.py` 确认未带令牌的客户端得到 401，不能写入账号或版本，也不能保存或下载制品字节。`backend/tests/test_boundaries.py` 确认 compose 发布端口都带 `127.0.0.1`。
+后端测试连接真实 PostgreSQL，不使用内存库、SQLite 或假的持久层。制品字节测试把文件写进临时目录，不用模拟存储。默认连接串是 `postgresql://kiln:kiln@127.0.0.1:5432/kiln`，可用环境变量 `KILN_TEST_DATABASE_URL` 覆盖。GitHub Actions 的 backend 作业会启动 `postgres:16`。`backend/tests/test_persistence.py` 里的 `test_records_survive_api_process_restart` 通过 HTTP 写入记录，结束 API 进程，确认库里仍有这些行，再启动一个新进程读回同一条记录。`test_artifact_bytes_survive_api_process_restart` 把字节写进临时目录，结束 API 进程，再由新进程从同一目录取回相同字节。`backend/tests/test_auth.py` 确认未带令牌的客户端得到 401，不能写入账号或版本，也不能保存或下载制品字节。`backend/tests/test_login.py` 覆盖本地口令、会话在进程重启后仍然有效，以及用户信息同步。同步测试使用进程内的授权码测试双端（authorize、token、JWKS、userinfo 和在职声明）。这些测试每次都会跑，不读取 `KILN_SKIP_EXTERNAL_TESTS`。`backend/tests/test_boundaries.py` 确认 compose 发布端口都带 `127.0.0.1`。
 
 执行器和代码源测试同样不使用假的 Jenkins 或 Gitea。它们读取：
 
@@ -169,14 +180,15 @@ cd console && npm run build
 
 GitHub Actions 会跑后端测试、控制台构建，以及 `docker compose config`。
 
+本地登录，以及用户信息同步的起步已经接上：控制台有登录页，口令只保存哈希，会话写在 Postgres。未配置公司用户系统时使用本地口令。配置之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。`KILN_API_TOKEN` 仍是必填的机器和开发访问令牌。
+
 ## 这一版还没有，但仍属于一期
 
 骨架如何在一台机器上启动，见 [部署说明](docs/DEPLOY.md)。制品目录、版本、权限目录和取包接口由平台持有。版本字节保存在平台本地目录里，取包会返回这些字节。下面这些按架构方案仍是一期要完成的事，但不是这一版：
 
 - Nexus 集成
-- 本地登录，以及身份联邦的起步
 
-`/api/v1` 已经有本地访问令牌。没有令牌不能改领域数据，也不能读取这些接口，也不能保存或下载制品字节。这还不是登录，也不是身份联邦。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的。可选对接之后，公司系统只确认身份和在职状态，kiln 的授权仍留在平台上。
+没有令牌或会话时不能改领域数据，也不能读取这些接口，也不能保存或下载制品字节。平台自身具备完整的账号与权限能力。
 
 这一版有产品构建：从已配置的代码源检出提交，在 Jenkins 上运行仓库里的 `kiln-build.sh`，把 `kiln-dist/artifact.bin` 存进平台目录，取包返回这些字节，`content_available` 为 true。响应里 `deploys_to_runtime` 为 false。兼容任务仍然只打印标记。代码源适配器可以替换。实验室适配器是 Gitea，生产代码源是 GitLab。生产 GitLab 的地址不在仓库里。
 

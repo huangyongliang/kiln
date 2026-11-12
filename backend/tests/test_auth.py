@@ -44,9 +44,8 @@ def test_anonymous_requests_do_not_change_durable_rows(client: TestClient) -> No
     with engine.connect() as connection:
         before_accounts = connection.execute(text("SELECT count(*) FROM accounts")).scalar_one()
         before_jobs = connection.execute(text("SELECT count(*) FROM executor_jobs")).scalar_one()
-        before_builds = connection.execute(
-            text("SELECT count(*) FROM product_builds")
-        ).scalar_one()
+        before_builds = connection.execute(text("SELECT count(*) FROM product_builds")).scalar_one()
+        before_sessions = connection.execute(text("SELECT count(*) FROM sessions")).scalar_one()
     before_files = blob_files(root)
 
     anon_app = create_app(app_settings(llm_provider="off", kiln_artifact_root=str(root)))
@@ -62,6 +61,20 @@ def test_anonymous_requests_do_not_change_durable_rows(client: TestClient) -> No
         schemes = document["components"]["securitySchemes"].values()
         assert any(item.get("scheme") == "bearer" for item in schemes)
         assert "security" not in document["paths"]["/health"]["get"]
+        assert "security" not in document["paths"]["/api/v1/auth/login"]["post"]
+        assert "security" not in document["paths"]["/api/v1/auth/sync"]["get"]
+        sync = anon.get("/api/v1/auth/sync")
+        assert sync.status_code == 200
+        assert sync.json() == {"configured": False}
+        assert anon.get("/api/v1/auth/oidc/start").status_code == 503
+        assert anon.post("/api/v1/auth/logout").status_code == 204
+        bad_login = anon.post(
+            "/api/v1/auth/login",
+            json={"username": "nobody", "password": "not-a-real-secret"},
+        )
+        assert bad_login.status_code == 401
+        assert "password" not in bad_login.text
+        assert "not-a-real-secret" not in bad_login.text
 
         protected_reads = [
             "/api/v1/accounts",
@@ -153,18 +166,16 @@ def test_anonymous_requests_do_not_change_durable_rows(client: TestClient) -> No
     with engine.connect() as connection:
         after_accounts = connection.execute(text("SELECT count(*) FROM accounts")).scalar_one()
         after_jobs = connection.execute(text("SELECT count(*) FROM executor_jobs")).scalar_one()
-        after_builds = connection.execute(
-            text("SELECT count(*) FROM product_builds")
-        ).scalar_one()
+        after_builds = connection.execute(text("SELECT count(*) FROM product_builds")).scalar_one()
+        after_sessions = connection.execute(text("SELECT count(*) FROM sessions")).scalar_one()
         intruders = connection.execute(
             text("SELECT count(*) FROM accounts WHERE username = 'intruder'")
         ).scalar_one()
-        versions = connection.execute(
-            text("SELECT count(*) FROM artifact_versions")
-        ).scalar_one()
+        versions = connection.execute(text("SELECT count(*) FROM artifact_versions")).scalar_one()
     assert after_accounts == before_accounts
     assert after_jobs == before_jobs == 0
     assert after_builds == before_builds == 0
+    assert after_sessions == before_sessions == 0
     assert intruders == 0
     assert versions == 1
     assert blob_files(root) == before_files

@@ -6,11 +6,11 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import Response
 
 from kiln.api.deps import get_store
-from kiln.auth import require_api_token
+from kiln.auth import require_auth, require_permission
 from kiln.db.store import PostgresStore
 from kiln.domain.artifacts import RetrieveResult
 
-router = APIRouter(tags=["取包"], dependencies=[Depends(require_api_token)])
+router = APIRouter(tags=["取包"], dependencies=[Depends(require_auth)])
 
 
 @router.get(
@@ -29,6 +29,7 @@ def retrieve(
     "/retrieve/{reservation_id}/content",
     summary="取回制品字节",
     response_class=Response,
+    dependencies=[Depends(require_permission("artifact.download"))],
     responses={
         200: {
             "content": {

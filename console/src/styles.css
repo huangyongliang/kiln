@@ -57,7 +57,19 @@ body {
 }
 
 .token-form {
+  margin-top: 16px;
+}
+
+.token-form summary {
+  cursor: pointer;
+  color: #e7edf2;
+  font-size: 13px;
+}
+
+.logout {
+  width: 100%;
   margin-top: 28px;
+  background: #1b2632;
 }
 
 .token-form label {
@@ -179,7 +191,8 @@ label {
 }
 
 textarea,
-.panel input[type="text"] {
+.panel input[type="text"],
+.panel input[type="password"] {
   width: 100%;
   max-width: 420px;
   padding: 10px 12px;
@@ -229,6 +242,10 @@ button:disabled {
   border-radius: 999px;
   font-size: 12px;
   color: #3d4853;
+}
+
+.login-screen {
+  min-height: 100vh;
 }
 
 @media (max-width: 720px) {

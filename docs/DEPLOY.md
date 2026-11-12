@@ -16,7 +16,7 @@
 | Git 远端 | 可替换适配器 | `GIT_PROVIDER=gitlab` 是生产代码源，`GIT_PROVIDER=gitea` 是实验室实现。地址只来自 `GIT_BASE_URL`，令牌只来自 `GIT_TOKEN`。仓库不写生产 GitLab 地址。profile `lab` 的 `gitea/gitea:1.22`（容器 `kiln-gitea`）仍是占位，不是生产代码源 |
 | 制品存储 | 目录在 PostgreSQL，字节在平台本地目录 | 制品、版本和下载预约写在 Postgres。字节写在 `KILN_ARTIFACT_ROOT`。compose 把它挂到命名卷 `kiln-artifact-data`，容器内路径是 `/var/lib/kiln/artifacts`。版本保存字节后 `content_available` 为 true，`GET /api/v1/retrieve/{reservation_id}/content` 返回这些字节。包类型字段有 `maven`、`python`、`generic`、`frontend`。Nexus 集成还没有写入配置，仓库里没有 Nexus 地址 |
 | OpenAI 兼容模型端点 | 可选 | `LLM_PROVIDER` 默认 `off`。`openai` 会 `POST {LLM_BASE_URL}/chat/completions`。`mock` 不访问网络 |
-| 本地登录与身份联邦 | 一期要做，这一版还没有 | 平台自身具备完整的账号与权限能力。本地账号和 RBAC 目录在 Postgres 中。`/api/v1` 需要本地令牌 `KILN_API_TOKEN`。没有登录页和口令。公司用户系统的对接是可选的。可选对接之后，公司系统只确认身份和在职状态，kiln 的授权仍留在平台上 |
+| 本地登录与用户信息同步 | 这一版已接上起步 | 平台自身具备完整的账号与权限能力。本地账号、口令哈希、会话和 RBAC 目录在 Postgres 中。控制台有登录页。未配置公司用户系统时使用本地口令登录。`KILN_API_TOKEN` 仍是必填的机器和开发访问令牌，拥有目录中的全部权限。公司用户系统的对接是可选的。可选对接之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上 |
 | Harbor、Kubernetes、专用镜像仓库 | 不属于一期 | 没有清单、没有镜像推送。架构方案把镜像构建放在一期之后 |
 
 默认命令 `docker compose up` 只启动 Postgres、API、控制台。profile `lab` 里的 Jenkins 和 Gitea 仍是占位。不要在共享实验机上加 `--profile lab`，也不要在那台机器上启动这份 compose。执行器和代码源通过环境变量指向已经在跑的服务。
@@ -106,10 +106,19 @@ cp .env.example .env
 | `GIT_TIMEOUT_SECONDS` | `30` | 单次调用超时，大于 0 且不超过 120 |
 | `KILN_ARTIFACT_ROOT` | 进程方式默认 `var/kiln-artifacts`；compose 固定为 `/var/lib/kiln/artifacts` | 平台自管制品字节的本地目录。compose 不读取 `.env` 里的这一行，而是写死容器内路径并挂载命名卷 `kiln-artifact-data` |
 | `KILN_ARTIFACT_MAX_BYTES` | `67108864` | 单次保存的字节上限。compose 在未设置时传入这个值 |
+| `KILN_OIDC_ISSUER_URL` | 空 | 用户信息同步的发行方地址。留空则只使用本地口令。compose 原样传入。不要把公司用户系统的地址写进仓库 |
+| `KILN_OIDC_CLIENT_ID` | 空 | 用户信息同步的客户端标识。任一项必填变量有值时必须同时填写 |
+| `KILN_OIDC_CLIENT_SECRET` | 空 | 用户信息同步的客户端密钥。只从环境读取 |
+| `KILN_OIDC_REDIRECT_URI` | 空 | 授权码回调地址。配置时必填 |
+| `KILN_OIDC_EMPLOYMENT_CLAIM` | 空 | 在职状态声明的名称。配置时必填 |
+| `KILN_OIDC_EMPLOYMENT_ACTIVE_VALUES` | 空 | 视为在职的声明值，逗号分隔。配置时必填 |
+| `KILN_OIDC_SCOPES` | 空 | 仅在已配置时生效。留空则使用 `openid profile email` |
+| `KILN_SESSION_TTL_SECONDS` | `43200` | 用户会话有效期，默认 12 小时 |
+| `KILN_SESSION_COOKIE_SECURE` | `false` | 为 true 时会话 cookie 带 Secure。本地 http 保持 false |
 
 已经导出的同名环境变量会覆盖 `.env`。Compose 插值是这样，pydantic-settings 也是这样。
 
-`JENKINS_URL` 和 `GIT_BASE_URL` 由这一版的 API 读取。`GIT_CLONE_BASE_URL` 只在 Jenkins 看到的代码源地址和 API 不同时才填，留空则克隆地址与 `GIT_BASE_URL` 相同。GitLab 仍是生产代码源，Gitea 是实验室适配器，两者都只使用你填入的地址。制品字节由平台写到 `KILN_ARTIFACT_ROOT`，不依赖 Nexus。Nexus 集成、本地登录和身份联邦的起步仍属于一期，这一版没有 Nexus 客户端，也没有 Nexus 地址。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的。可选对接之后，公司系统只确认身份和在职状态，kiln 的授权仍留在平台上。Harbor、Kubernetes 和专用镜像仓库不属于一期。平台不把制品部署到运行环境。
+`JENKINS_URL` 和 `GIT_BASE_URL` 由这一版的 API 读取。`GIT_CLONE_BASE_URL` 只在 Jenkins 看到的代码源地址和 API 不同时才填，留空则克隆地址与 `GIT_BASE_URL` 相同。GitLab 仍是生产代码源，Gitea 是实验室适配器，两者都只使用你填入的地址。制品字节由平台写到 `KILN_ARTIFACT_ROOT`，不依赖 Nexus。Nexus 集成仍属于一期，这一版没有 Nexus 客户端，也没有 Nexus 地址。本地登录，以及用户信息同步的起步已经接上。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的。可选对接之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。Harbor、Kubernetes 和专用镜像仓库不属于一期。平台不把制品部署到运行环境。
 
 `LLM_PROVIDER=openai` 且 `LLM_BASE_URL` 为空或只有空白时，进程在加载配置时失败。校验错误中包含 `LLM_PROVIDER=openai 时必须设置 LLM_BASE_URL`。保持示例里的 `off` 即可先把骨架启动。
 
@@ -236,7 +245,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/v1/accounts
 
 ## 账号
 
-没有引导账号，没有登录页，也没有口令字段。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的。可选对接之后，公司系统只确认身份和在职状态，kiln 的授权仍留在平台上。控制台侧栏可以填访问令牌，请求 `/api` 时放在 `Authorization` 头。本地登录和身份联邦的起步仍属于一期，这一版还没有接上。控制台「账号与权限」在 API 尚未创建账号时显示「还没有账号」，并列出角色目录：`reader`（只读）、`builder`（构建者）、`publisher`（发布者）、`admin`（管理员）。这些角色目前不参与请求鉴权。
+控制台有登录页。创建账号时可以设置口令，库里只保存哈希。会话写在 Postgres，退出时撤销。未配置公司用户系统时使用本地口令。配置 `KILN_OIDC_*` 之后，用户信息同步按发行方和 subject 找到或创建 kiln 账号，新账号默认角色是 `reader`，不复制公司侧的组或角色。在职状态未通过或账号已停用时不建立会话。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的。可选对接之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。`KILN_API_TOKEN` 仍是机器和开发用的访问令牌，拥有目录中的全部权限。侧栏里的令牌输入不再是主要入口。控制台「账号与权限」在 API 尚未创建账号时显示「还没有账号」，并列出角色目录：`reader`（只读）、`builder`（构建者）、`publisher`（发布者）、`admin`（管理员）。这些角色参与写入鉴权。没有对应权限时返回 403。
 
 需要一条账号时，可以向 API 登记。用户名须匹配 `^[a-z][a-z0-9_-]{2,31}$`。记录写在 Postgres 里，只重启 API 进程不会消失。上文 Postgres 一节有一组创建后重启再读取的命令。
 
@@ -393,12 +402,13 @@ docker compose --profile lab down -v
 docker compose logs api
 ```
 
+本地登录，以及用户信息同步的起步已经接上。控制台有登录页，口令只保存哈希。未配置公司用户系统时使用本地口令。配置之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。`KILN_API_TOKEN` 仍是必填的机器和开发访问令牌。
+
 ## 这一版还没有，但仍属于一期
 
 下面这些按架构方案仍是一期要完成的事。这一版没有做它们，本文也不给出虚构的接入步骤。
 
 - **Nexus。** 现网制品库。没有地址、仓库名或同步。平台自己的本地目录已经能保存并取回字节。
-- **本地登录，以及身份联邦的起步。** 没有登录页和口令。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的。可选对接之后，公司系统只确认身份和在职状态，kiln 的授权仍留在平台上。`/api/v1` 仍用本地访问令牌。
 
 产品构建、Jenkins 兼容执行器和可替换的代码源适配器在这一版。产品构建从代码仓库检出提交，在 Jenkins 上运行 `kiln-build.sh`，把字节存进平台目录，取包返回这些字节。生产代码源适配器的类型是 GitLab，实验室实现是 Gitea。两边的地址都只来自环境变量。兼容任务仍然只打印标记。
 
