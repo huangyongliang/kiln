@@ -11,12 +11,18 @@ from pathlib import Path
 from typing import IO
 
 import httpx
+from alembic import command
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect, text
+from sqlalchemy.engine import Engine
 
 from kiln.config import LOCAL_API_TOKEN
+from kiln.db import migrate as db_migrate
 from kiln.db.engine import create_db_engine
 from kiln.db.migrate import upgrade_database
+from kiln.db.url import to_sqlalchemy_url
 from kiln.domain.rbac import PERMISSIONS, ROLES
 from tests.support import auth_headers, content_headers, postgres_url, truncate_domain
 
@@ -294,6 +300,102 @@ def test_artifact_bytes_survive_api_process_restart() -> None:
     finally:
         _stop(second)
         second_log.close()
+
+
+def test_skill_rejection_migration_round_trip(client: TestClient) -> None:
+    """Drop the rejection columns at 0005_local_login, then restore them at head."""
+
+    cfg = _alembic_config(postgres_url())
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0006_skill_rejection"]
+    engine = client.app.state.engine
+    try:
+        command.downgrade(cfg, "0005_local_login")
+        assert _rejection_schema(engine) == (set(), set())
+        command.upgrade(cfg, "head")
+        _assert_rejection_schema(engine)
+    finally:
+        command.upgrade(cfg, "head")
+
+
+def _alembic_config(database_url: str) -> Config:
+    script_location = str(Path(db_migrate.__file__).resolve().parent / "migrations")
+    cfg = Config()
+    cfg.set_main_option("script_location", script_location)
+    cfg.set_main_option("sqlalchemy.url", to_sqlalchemy_url(database_url))
+    return cfg
+
+
+def _rejection_schema(engine: Engine) -> tuple[set[str], set[str]]:
+    with engine.connect() as connection:
+        columns = set(
+            connection.execute(
+                text(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'skills'
+                      AND column_name IN ('review_note', 'rejected_at', 'rejected_by')
+                    """
+                )
+            ).scalars()
+        )
+        constraints = set(
+            connection.execute(
+                text(
+                    """
+                    SELECT constraint_name
+                    FROM information_schema.table_constraints
+                    WHERE table_schema = 'public'
+                      AND table_name = 'skills'
+                      AND constraint_name IN (
+                          'fk_skills_rejected_by_accounts',
+                          'ck_skills_rejection_pair'
+                      )
+                    """
+                )
+            ).scalars()
+        )
+    return columns, constraints
+
+
+def _assert_rejection_schema(engine: Engine) -> None:
+    columns, constraints = _rejection_schema(engine)
+    assert columns == {"review_note", "rejected_at", "rejected_by"}
+    assert constraints == {
+        "fk_skills_rejected_by_accounts",
+        "ck_skills_rejection_pair",
+    }
+    with engine.connect() as connection:
+        kinds = dict(
+            connection.execute(
+                text(
+                    """
+                    SELECT column_name, data_type || ' ' || is_nullable
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'skills'
+                      AND column_name IN ('review_note', 'rejected_at', 'rejected_by')
+                    """
+                )
+            ).all()
+        )
+        delete_rule = connection.execute(
+            text(
+                """
+                SELECT delete_rule
+                FROM information_schema.referential_constraints
+                WHERE constraint_schema = 'public'
+                  AND constraint_name = 'fk_skills_rejected_by_accounts'
+                """
+            )
+        ).scalar_one()
+    assert kinds == {
+        "review_note": "text YES",
+        "rejected_at": "timestamp with time zone YES",
+        "rejected_by": "uuid YES",
+    }
+    assert delete_rule == "SET NULL"
 
 
 def _post(http: httpx.Client, url: str, payload: dict) -> dict:

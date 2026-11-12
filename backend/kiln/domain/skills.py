@@ -4,6 +4,7 @@ Steps are declarative data. This skeleton does not execute them and does not
 run shell commands.
 """
 
+import unicodedata
 from datetime import datetime
 from enum import Enum
 from typing import Literal
@@ -83,6 +84,24 @@ class SkillCreate(BaseModel):
         return cleaned
 
 
+class SkillReject(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str
+
+    @field_validator("reason")
+    @classmethod
+    def clean_reason(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("退回原因不能为空")
+        if len(text) > 500:
+            raise ValueError("退回原因过长")
+        if any(char not in "\n\t" and unicodedata.category(char) == "Cc" for char in text):
+            raise ValueError("退回原因含有非法字符")
+        return text
+
+
 class Skill(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -100,6 +119,9 @@ class Skill(BaseModel):
     output_spec: str | None
     created_at: datetime
     updated_at: datetime
+    review_note: str | None = None
+    rejected_at: datetime | None = None
+    rejected_by: UUID | None = None
 
     @computed_field
     @property

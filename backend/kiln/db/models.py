@@ -230,6 +230,10 @@ class SkillRow(Base):
             "status IN ('draft', 'in_review', 'published')",
             name="ck_skills_status",
         ),
+        CheckConstraint(
+            "(review_note IS NULL) = (rejected_at IS NULL)",
+            name="ck_skills_rejection_pair",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
@@ -242,6 +246,16 @@ class SkillRow(Base):
     output_spec: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    review_note: Mapped[str | None] = mapped_column(Text)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejected_by: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "accounts.id",
+            name="fk_skills_rejected_by_accounts",
+            ondelete="SET NULL",
+        ),
+    )
     inputs: Mapped[list[SkillInputRow]] = relationship(
         back_populates="skill",
         order_by="SkillInputRow.position",
