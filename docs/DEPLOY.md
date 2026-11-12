@@ -194,7 +194,7 @@ curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/
 curl -fsS http://127.0.0.1:8080/health
 ```
 
-浏览器打开 <http://127.0.0.1:8080>。概览页读取 `/health`。页面有概览、构建、制品、Skill、账号与权限、对话。`console/nginx.conf` 把 `/api/` 和 `/health` 转到 compose 网络里的 `api:8000`，并把客户端请求体限制为 `1m`。直接访问宿主机 `8000` 不经过这道限制。
+浏览器打开 <http://127.0.0.1:8080>。概览页读取 `/health`。页面有概览、构建、制品、Skill、账号与权限、对话。`console/nginx.conf` 把 `/api/` 和 `/health` 转到 compose 网络里的 `api:8000`，并把客户端请求体限制为 `1m`。直接访问宿主机 `8000` 不经过这道限制。控制台可新建账号、起草与审核 skill、发起构建、登记与上传制品（单次 ≤1 MB）、预约下载。
 
 ### Postgres
 
