@@ -1,10 +1,11 @@
 """Local RBAC catalog.
 
-The catalog is who may manage accounts, use or publish skills, and upload or
-download artifacts, plus which in-platform agent abilities can be granted.
-Write routes that match one of these codes check the signed-in user's roles.
-`KILN_API_TOKEN` is a machine credential and has every code. Optional company
-user-system sync does not copy groups or roles into this catalog.
+The catalog is who may manage accounts, use or publish skills, upload or
+download artifacts, and start a job or product build on a compat executor,
+plus which in-platform agent abilities can be granted. Write routes that
+match one of these codes check the signed-in user's roles. `KILN_API_TOKEN`
+is a machine credential and has every code. Optional company user-system sync
+does not copy groups or roles into this catalog.
 """
 
 from pydantic import BaseModel, ConfigDict
@@ -20,6 +21,7 @@ _BUILDER = _READER + (
     "artifact.download",
     "agent.qa",
     "agent.build_artifact",
+    "executor.run",
 )
 _PUBLISHER = _BUILDER + (
     "skill.publish",
@@ -63,6 +65,7 @@ PERMISSIONS: tuple[Permission, ...] = (
     Permission(code="agent.qa", description="使用平台内问答"),
     Permission(code="agent.draft_skill", description="使用对话起草 skill"),
     Permission(code="agent.build_artifact", description="使用对话制作制品"),
+    Permission(code="executor.run", description="在兼容执行器上发起任务或产品构建"),
 )
 
 _PERMISSION_CODES = {item.code for item in PERMISSIONS}
@@ -77,7 +80,9 @@ ROLES: tuple[Role, ...] = (
     Role(
         id="builder",
         name="构建者",
-        description="使用已发布 skill、登记制品，并使用问答与制作制品",
+        description=(
+            "使用已发布 skill、登记制品，在兼容执行器上发起任务或产品构建，并使用问答与制作制品"
+        ),
         permissions=list(_BUILDER),
     ),
     Role(

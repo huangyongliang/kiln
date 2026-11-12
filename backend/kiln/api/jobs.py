@@ -1,7 +1,8 @@
 """Jenkins compat executor HTTP API.
 
-Creating a job, reading its status, and reading its log require a user session
-or the machine token. These routes do not deploy to a runtime.
+Reading executor status, a job, and its log requires a user session or the
+machine token. Creating a job also requires `executor.run`. These routes do
+not deploy to a runtime.
 """
 
 from uuid import UUID
@@ -9,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 
 from kiln.api.deps import get_jenkins, get_job_store, get_settings
-from kiln.auth import require_auth
+from kiln.auth import require_auth, require_permission
 from kiln.config import Settings
 from kiln.db.jobs import JobStore
 from kiln.domain.jobs import ExecutorInfo, Job, JobCreate, JobList, JobLog
@@ -38,7 +39,13 @@ def list_jobs(
     return JobList(items=[item.public() for item in list_tracked(store, jenkins)])
 
 
-@router.post("/jobs", response_model=Job, status_code=201, summary="在 Jenkins 上创建任务")
+@router.post(
+    "/jobs",
+    response_model=Job,
+    status_code=201,
+    summary="在 Jenkins 上创建任务",
+    dependencies=[Depends(require_permission("executor.run"))],
+)
 def post_job(
     payload: JobCreate,
     store: JobStore = Depends(get_job_store),
