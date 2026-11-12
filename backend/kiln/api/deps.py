@@ -7,7 +7,7 @@ from kiln.config import Settings
 from kiln.db.builds import BuildStore
 from kiln.db.jobs import JobStore
 from kiln.db.store import PostgresStore
-from kiln.errors import NotConfigured
+from kiln.errors import GIT_SOURCE_UNCONFIGURED_DETAIL, JENKINS_UNCONFIGURED_DETAIL, NotConfigured
 from kiln.executor.jenkins import JenkinsClient
 from kiln.git.source import GitSource
 from kiln.llm.provider import LLMProvider
@@ -40,15 +40,12 @@ def get_build_store(request: Request) -> BuildStore:
 def get_jenkins(request: Request) -> JenkinsClient:
     client = request.app.state.jenkins
     if client is None:
-        raise NotConfigured("执行器未配置。请设置 JENKINS_URL、JENKINS_USER 和 JENKINS_API_TOKEN。")
+        raise NotConfigured(JENKINS_UNCONFIGURED_DETAIL)
     return client
 
 
 def get_git_source(request: Request) -> GitSource:
     source = request.app.state.git_source
     if source is None:
-        raise NotConfigured(
-            "代码源未配置。请将 GIT_PROVIDER 设为 gitea（实验室）或 gitlab（生产代码源），"
-            "并设置 GIT_BASE_URL 与 GIT_TOKEN。"
-        )
+        raise NotConfigured(GIT_SOURCE_UNCONFIGURED_DETAIL)
     return source

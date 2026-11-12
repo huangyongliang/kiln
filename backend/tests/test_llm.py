@@ -113,6 +113,7 @@ def test_openai_mode_posts_chat_completions() -> None:
     assert [item["function"]["name"] for item in OPENAI_TOOLS] == [
         "list_skills",
         "draft_skill",
+        "build_artifact",
     ]
 
 

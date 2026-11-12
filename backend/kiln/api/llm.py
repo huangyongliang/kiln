@@ -5,11 +5,12 @@ OpenAI provider runs a server-owned tool loop. mock and off keep complete()
 and do not attach or execute tools.
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
-from kiln.api.deps import get_llm, get_settings, get_store
+from kiln.api.deps import get_build_store, get_llm, get_settings, get_store
 from kiln.auth import Principal, require_auth, require_permission
 from kiln.config import Settings
+from kiln.db.builds import BuildStore
 from kiln.db.store import PostgresStore
 from kiln.llm.provider import (
     ChatCompletion,
@@ -19,7 +20,7 @@ from kiln.llm.provider import (
     ProviderStatus,
     provider_status,
 )
-from kiln.llm.tools import run_tool_loop
+from kiln.llm.tools import ToolContext, run_tool_loop
 
 router = APIRouter(
     prefix="/llm",
@@ -41,10 +42,24 @@ def read_provider(settings: Settings = Depends(get_settings)) -> ProviderStatus:
 )
 def chat(
     payload: ChatRequest,
+    request: Request,
     principal: Principal = Depends(require_permission("agent.qa")),
     provider: LLMProvider = Depends(get_llm),
     store: PostgresStore = Depends(get_store),
+    builds: BuildStore = Depends(get_build_store),
+    settings: Settings = Depends(get_settings),
 ) -> ChatCompletion:
     if isinstance(provider, OpenAICompatibleProvider):
-        return run_tool_loop(payload, provider, principal, store)
+        return run_tool_loop(
+            payload,
+            provider,
+            principal,
+            ToolContext(
+                catalog=store,
+                builds=builds,
+                jenkins=request.app.state.jenkins,
+                git_source=request.app.state.git_source,
+                settings=settings,
+            ),
+        )
     return provider.complete(payload)
