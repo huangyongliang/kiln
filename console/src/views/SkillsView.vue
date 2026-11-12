@@ -7,7 +7,7 @@ import { errorText, getJson, isForbidden } from "../api";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
 import StatusTag from "../components/StatusTag.vue";
-import { canSee } from "../permissions";
+import { canDo, canSee } from "../permissions";
 
 const note = "步骤只作为数据保存，不会执行，也不会运行 shell。";
 
@@ -64,7 +64,11 @@ async function load() {
 <template>
   <StatePanel v-if="forbidden" forbidden forbidden-code="skill.read" />
   <template v-else>
-    <PageIntro title="Skill" lead="Skill 描述构建流程：起草、提交审核、发布。" :note="note" />
+    <PageIntro title="Skill" lead="Skill 描述构建流程：起草、提交审核、发布。" :note="note">
+      <template v-if="canDo('skill.create', perms)" #actions>
+        <RouterLink class="btn" :to="{ name: 'skill-new' }">新建草稿</RouterLink>
+      </template>
+    </PageIntro>
     <section class="panel">
       <div class="toolbar">
         <button

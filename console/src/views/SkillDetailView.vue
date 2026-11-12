@@ -3,12 +3,14 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
 import { accessReady, actionDeniedText, perms } from "../access";
-import { errorText, getJson, isForbidden, postEmpty } from "../api";
+import { errorText, getJson, isForbidden, postEmpty, postJson } from "../api";
+import FormDialog from "../components/FormDialog.vue";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
 import StatusTag from "../components/StatusTag.vue";
 import { pageCrumb } from "../crumb";
-import { stepLabel } from "../format";
+import { codePointLength, fieldErrors, rejectReasonError } from "../forms";
+import { formatTime, stepLabel } from "../format";
 import { apiPath, isUuid } from "../paths";
 import { canDo, canSee } from "../permissions";
 
@@ -20,6 +22,11 @@ const forbidden = ref(false);
 const missing = ref(false);
 const busy = ref("");
 const actionError = ref("");
+const rejectOpen = ref(false);
+const rejectReason = ref("");
+const rejectError = ref("");
+const rejectField = ref("");
+const rejectorName = ref("");
 
 const canSubmit = computed(
   () => skill.value?.status === "draft" && canDo("skill.submit", perms.value),
@@ -27,6 +34,22 @@ const canSubmit = computed(
 const canPublish = computed(
   () => skill.value?.status === "in_review" && canDo("skill.publish", perms.value),
 );
+const canReject = computed(
+  () => skill.value?.status === "in_review" && canDo("skill.reject", perms.value),
+);
+const reviewTitle = computed(() => {
+  if (!skill.value?.review_note || skill.value.status === "published") {
+    return "";
+  }
+  if (skill.value.status === "draft") {
+    return "退回原因";
+  }
+  if (skill.value.status === "in_review") {
+    return "上次退回原因";
+  }
+  return "";
+});
+const reasonCount = computed(() => codePointLength(rejectReason.value.trim()));
 
 onMounted(load);
 watch(
@@ -37,6 +60,9 @@ watch(accessReady, (ready) => {
   if (ready) {
     load();
   }
+});
+watch(skill, (value) => {
+  loadRejector(value);
 });
 
 async function load() {
@@ -95,6 +121,69 @@ async function act(kind) {
     busy.value = "";
   }
 }
+
+async function loadRejector(value) {
+  rejectorName.value = "";
+  if (!value?.review_note || value.status === "published") {
+    return;
+  }
+  if (!value.rejected_by) {
+    rejectorName.value = value.rejected_at ? "机器令牌" : "—";
+    return;
+  }
+  if (!canDo("account.read", perms.value)) {
+    rejectorName.value = "—";
+    return;
+  }
+  try {
+    const person = await getJson(apiPath`/api/v1/accounts/${value.rejected_by}`);
+    rejectorName.value = person.display_name || person.username || "—";
+  } catch {
+    rejectorName.value = "—";
+  }
+}
+
+function openReject() {
+  rejectReason.value = "";
+  rejectError.value = "";
+  rejectField.value = "";
+  rejectOpen.value = true;
+}
+
+function closeReject() {
+  rejectOpen.value = false;
+}
+
+async function submitReject() {
+  const id = route.params.id;
+  const message = rejectReasonError(rejectReason.value);
+  rejectField.value = message;
+  rejectError.value = "";
+  if (message || busy.value || !isUuid(id)) {
+    return;
+  }
+  busy.value = "reject";
+  try {
+    skill.value = await postJson(apiPath`/api/v1/skills/${id}/reject`, {
+      reason: rejectReason.value.trim(),
+    });
+    pageCrumb.value = `Skill / ${skill.value.name}`;
+    rejectOpen.value = false;
+  } catch (caught) {
+    if (isForbidden(caught)) {
+      rejectError.value = actionDeniedText("skill.publish");
+      return;
+    }
+    const mapped = fieldErrors(caught?.detail);
+    if (mapped.reason) {
+      rejectField.value = mapped.reason;
+      return;
+    }
+    rejectError.value = errorText(caught, "无法退回草稿");
+  } finally {
+    busy.value = "";
+  }
+}
 </script>
 
 <template>
@@ -104,13 +193,17 @@ async function act(kind) {
       <template v-if="skill" #meta>
         <p class="meta-row">
           <StatusTag :status="skill.status" :label="skill.status_label" />
+          <span v-if="skill.status === 'draft' && skill.review_note" class="tag">已退回</span>
           <span class="mono">{{ skill.version }}</span>
         </p>
       </template>
-      <template v-if="canSubmit || canPublish" #actions>
+      <template v-if="canSubmit || canPublish || canReject" #actions>
         <button v-if="canSubmit" type="button" class="btn" :disabled="Boolean(busy)" @click="act('submit')">
           <span v-if="busy === 'submit'" class="spinner" aria-hidden="true"></span>
           提交审核
+        </button>
+        <button v-if="canReject" type="button" class="btn btn-secondary" :disabled="Boolean(busy)" @click="openReject">
+          退回草稿
         </button>
         <button v-if="canPublish" type="button" class="btn" :disabled="Boolean(busy)" @click="act('publish')">
           <span v-if="busy === 'publish'" class="spinner" aria-hidden="true"></span>
@@ -119,6 +212,13 @@ async function act(kind) {
       </template>
     </PageIntro>
     <p v-if="skill?.description" class="prose">{{ skill.description }}</p>
+    <section v-if="skill && reviewTitle" class="panel">
+      <div class="panel-head">
+        <h2>{{ reviewTitle }}</h2>
+      </div>
+      <p class="review-note">{{ skill.review_note }}</p>
+      <p class="hint">{{ formatTime(skill.rejected_at) }} · {{ rejectorName || "—" }}</p>
+    </section>
     <p v-if="actionError" class="message error" role="alert">{{ actionError }}</p>
     <StatePanel
       :loading="mode === 'loading'"
@@ -166,5 +266,20 @@ async function act(kind) {
         </section>
       </div>
     </StatePanel>
+    <FormDialog
+      v-if="rejectOpen"
+      title="退回草稿"
+      :busy="busy === 'reject'"
+      :error="rejectError"
+      @close="closeReject"
+      @submit="submitReject"
+    >
+      <div class="field">
+        <label for="reject-reason">原因</label>
+        <textarea id="reject-reason" v-model="rejectReason" rows="5"></textarea>
+        <p class="counter">{{ reasonCount }}/500</p>
+        <p v-if="rejectField" class="field-error">{{ rejectField }}</p>
+      </div>
+    </FormDialog>
   </template>
 </template>
