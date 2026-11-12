@@ -4,6 +4,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from kiln.llm.provider import chat_completions_url
+from kiln.llm.tools import OPENAI_TOOLS
 from kiln.main import create_app
 from tests.support import app_settings, auth_headers
 
@@ -107,7 +108,12 @@ def test_openai_mode_posts_chat_completions() -> None:
     assert seen["body"] == {
         "model": "demo-model",
         "messages": [{"role": "user", "content": "ping"}],
+        "tools": OPENAI_TOOLS,
     }
+    assert [item["function"]["name"] for item in OPENAI_TOOLS] == [
+        "list_skills",
+        "draft_skill",
+    ]
 
 
 def test_openai_mode_omits_authorization_when_key_is_empty() -> None:
