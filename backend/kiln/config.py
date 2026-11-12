@@ -2,10 +2,15 @@
 
 Values come from process environment variables and, when present, a local `.env`
 file. Secrets stay out of the repository.
+
+Jenkins and the git source are optional endpoints. Neither has a built-in
+production host. GitLab is the production provider name; Gitea is the lab
+provider name. Callers supply the base URL.
 """
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -43,6 +48,18 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_timeout_seconds: float = Field(default=30, gt=0, le=300)
 
+    jenkins_url: str = ""
+    jenkins_user: str = ""
+    jenkins_api_token: SecretStr = SecretStr("")
+    jenkins_timeout_seconds: float = Field(default=30, gt=0, le=120)
+
+    # `gitea` is the lab stand-in. `gitlab` is the production code source.
+    # The base URL is never defaulted to a production host.
+    git_provider: Literal["gitea", "gitlab", "off"] = "off"
+    git_base_url: str = ""
+    git_token: SecretStr = SecretStr("")
+    git_timeout_seconds: float = Field(default=30, gt=0, le=120)
+
     @field_validator("llm_provider", mode="before")
     @classmethod
     def normalize_llm_provider(cls, value: object) -> object:
@@ -56,10 +73,36 @@ class Settings(BaseSettings):
         }
         return aliases.get(text, text)
 
-    @field_validator("llm_base_url", "llm_model")
+    @field_validator("llm_base_url", "llm_model", "jenkins_user")
     @classmethod
     def strip_text(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("git_provider", mode="before")
+    @classmethod
+    def normalize_git_provider(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        text = value.strip().lower()
+        if text in {"", "none", "disabled"}:
+            return "off"
+        return text
+
+    @field_validator("jenkins_url", "git_base_url", mode="before")
+    @classmethod
+    def normalize_service_url(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        return _clean_http_url(value)
+
+    @field_validator("jenkins_api_token", "git_token", mode="before")
+    @classmethod
+    def strip_optional_secret(cls, value: object) -> object:
+        if isinstance(value, SecretStr):
+            value = value.get_secret_value()
+        if isinstance(value, str):
+            return value.strip()
+        return value
 
     @field_validator("kiln_api_token", mode="before")
     @classmethod
@@ -76,6 +119,20 @@ class Settings(BaseSettings):
             raise ValueError("LLM_PROVIDER=openai 时必须设置 LLM_BASE_URL")
         return self
 
+    @model_validator(mode="after")
+    def external_endpoints_are_complete(self) -> "Settings":
+        jenkins = (self.jenkins_url, self.jenkins_user, self.jenkins_api_token_value())
+        if any(jenkins) and not all(jenkins):
+            raise ValueError(
+                "配置 Jenkins 时必须同时设置 JENKINS_URL、JENKINS_USER 和 JENKINS_API_TOKEN"
+            )
+        if self.git_provider != "off":
+            if not self.git_base_url:
+                raise ValueError("GIT_PROVIDER 为 gitea 或 gitlab 时必须设置 GIT_BASE_URL")
+            if not self.git_token_value():
+                raise ValueError("GIT_PROVIDER 为 gitea 或 gitlab 时必须设置 GIT_TOKEN")
+        return self
+
     def cors_origins(self) -> list[str]:
         return [item.strip() for item in self.kiln_cors_origins.split(",") if item.strip()]
 
@@ -84,6 +141,35 @@ class Settings(BaseSettings):
 
     def api_token_value(self) -> str:
         return self.kiln_api_token.get_secret_value()
+
+    def jenkins_api_token_value(self) -> str:
+        return self.jenkins_api_token.get_secret_value()
+
+    def git_token_value(self) -> str:
+        return self.git_token.get_secret_value()
+
+    @property
+    def executor_configured(self) -> bool:
+        return bool(self.jenkins_url and self.jenkins_user and self.jenkins_api_token_value())
+
+    @property
+    def git_configured(self) -> bool:
+        return self.git_provider != "off" and bool(self.git_base_url and self.git_token_value())
+
+
+def _clean_http_url(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return ""
+    text = text.rstrip("/")
+    parts = urlsplit(text)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise ValueError("地址必须是 http 或 https URL")
+    if parts.username or parts.password:
+        raise ValueError("地址里不能带用户名或口令")
+    if parts.query or parts.fragment:
+        raise ValueError("地址不能带查询串或片段")
+    return text
 
 
 @lru_cache

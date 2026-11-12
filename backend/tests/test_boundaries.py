@@ -39,3 +39,34 @@ def test_compose_contract_prefixes_container_names() -> None:
     for item in published:
         assert item in text
     assert re.findall(r'^\s+-\s+"(\d+:\d+)"\s*$', text, re.MULTILINE) == []
+    assert "JENKINS_URL:" in text
+    assert "GIT_PROVIDER:" in text
+    assert "GIT_BASE_URL:" in text
+
+
+def test_repository_does_not_invent_a_production_gitlab_or_nexus_url() -> None:
+    pattern = re.compile(r"https?://[^\s\"'`<>]*?(gitlab|nexus)", re.IGNORECASE)
+    skipped = {".git", "node_modules", ".venv", "venv", "dist", "__pycache__"}
+    suffixes = {
+        ".py",
+        ".md",
+        ".yml",
+        ".yaml",
+        ".vue",
+        ".js",
+        ".toml",
+        ".css",
+        ".html",
+        ".sh",
+        ".groovy",
+    }
+    offenders: list[str] = []
+    for path in ROOT.rglob("*"):
+        if not path.is_file() or skipped.intersection(path.parts):
+            continue
+        if path.name != ".env.example" and path.suffix not in suffixes:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if pattern.search(text):
+            offenders.append(str(path.relative_to(ROOT)))
+    assert offenders == []

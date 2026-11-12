@@ -40,6 +40,36 @@ def test_openai_requires_base_url() -> None:
         Settings(llm_provider="openai", llm_base_url="  ", _env_file=None)
 
 
+def test_jenkins_and_git_are_off_until_configured() -> None:
+    settings = Settings(_env_file=None)
+    assert settings.jenkins_url == ""
+    assert settings.git_provider == "off"
+    assert settings.git_base_url == ""
+    assert settings.executor_configured is False
+    assert settings.git_configured is False
+
+
+def test_jenkins_requires_url_user_and_token_together() -> None:
+    with pytest.raises(ValidationError):
+        Settings(jenkins_url="http://127.0.0.1:9", _env_file=None)
+    with pytest.raises(ValidationError):
+        Settings(jenkins_url="http://user:secret@127.0.0.1:9", _env_file=None)
+
+
+def test_git_provider_requires_base_url_and_token() -> None:
+    with pytest.raises(ValidationError, match="GIT_BASE_URL"):
+        Settings(git_provider="gitlab", _env_file=None)
+    with pytest.raises(ValidationError, match="GIT_BASE_URL"):
+        Settings(git_provider="gitea", _env_file=None)
+    with pytest.raises(ValidationError, match="GIT_TOKEN"):
+        Settings(git_provider="gitlab", git_base_url="http://127.0.0.1:9", _env_file=None)
+
+
+def test_blank_git_provider_is_off() -> None:
+    settings = Settings(git_provider="disabled", _env_file=None)
+    assert settings.git_provider == "off"
+
+
 def test_openai_accepts_a_configured_endpoint() -> None:
     settings = Settings(
         llm_provider="openai-compatible",

@@ -296,3 +296,33 @@ class SkillDependencyRow(Base):
     position: Mapped[int] = mapped_column(Integer, primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     skill: Mapped[SkillRow] = relationship(back_populates="allowed_dependencies")
+
+
+class ExecutorJobRow(Base):
+    """A Jenkins build tracked by kiln. The row does not deploy anything."""
+
+    __tablename__ = "executor_jobs"
+    __table_args__ = (
+        UniqueConstraint("jenkins_job_name", name="uq_executor_jobs_jenkins_job_name"),
+        CheckConstraint(
+            "status IN ("
+            "'queued', 'running', 'success', 'failure', "
+            "'unstable', 'aborted', 'not_built', 'unknown'"
+            ")",
+            name="ck_executor_jobs_status",
+        ),
+        CheckConstraint(
+            "build_number IS NULL OR build_number >= 1",
+            name="ck_executor_jobs_build_number",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    jenkins_job_name: Mapped[str] = mapped_column(Text, nullable=False)
+    marker: Mapped[str] = mapped_column(Text, nullable=False)
+    queue_url: Mapped[str | None] = mapped_column(Text)
+    build_number: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

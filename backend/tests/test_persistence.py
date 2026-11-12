@@ -41,6 +41,7 @@ def test_schema_is_postgresql(client: TestClient) -> None:
         "skill_steps",
         "skill_allowed_repositories",
         "skill_allowed_dependencies",
+        "executor_jobs",
     } <= names
     with engine.connect() as connection:
         definition = connection.execute(
@@ -251,6 +252,12 @@ def _api_env(database_url: str) -> dict[str, str]:
     env["LLM_API_KEY"] = ""
     env["LLM_MODEL"] = ""
     env["KILN_API_TOKEN"] = LOCAL_API_TOKEN
+    env["JENKINS_URL"] = ""
+    env["JENKINS_USER"] = ""
+    env["JENKINS_API_TOKEN"] = ""
+    env["GIT_PROVIDER"] = "off"
+    env["GIT_BASE_URL"] = ""
+    env["GIT_TOKEN"] = ""
     env["PYTHONUNBUFFERED"] = "1"
     return env
 

@@ -19,7 +19,7 @@ onMounted(async () => {
 <template>
   <PageIntro
     title="概览"
-    lead="这是 kiln 的一期控制台骨架。页面用于确认后端可访问，并进入制品、skill、账号和对话的占位视图。"
+    lead="这是 kiln 的一期控制台。页面用于确认后端可访问，并进入构建、制品、skill、账号和对话。构建任务交给已配置的 Jenkins，平台不把制品部署到运行环境。"
   />
   <section class="panel">
     <h2>健康检查</h2>

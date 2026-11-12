@@ -6,6 +6,7 @@ import { readApiToken, writeApiToken } from "./token";
 
 const links = [
   { to: "/", label: "概览" },
+  { to: "/builds", label: "构建" },
   { to: "/artifacts", label: "制品" },
   { to: "/skills", label: "Skill" },
   { to: "/access", label: "账号与权限" },
@@ -46,7 +47,7 @@ function saveToken() {
       <main class="content">
         <RouterView />
       </main>
-      <footer class="footnote">一期骨架 · 领域数据保存在 PostgreSQL</footer>
+      <footer class="footnote">一期骨架 · 领域数据保存在 PostgreSQL · 不部署到运行环境</footer>
     </div>
   </div>
 </template>

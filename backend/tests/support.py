@@ -24,6 +24,7 @@ DOMAIN_TABLES = (
     "skill_steps",
     "skill_inputs",
     "skills",
+    "executor_jobs",
 )
 
 

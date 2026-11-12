@@ -15,6 +15,7 @@ jobs:
   backend:
     name: backend
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     services:
       postgres:
         image: postgres:16-alpine
@@ -46,9 +47,14 @@ jobs:
           python -m venv /tmp/kiln-pkg
           /tmp/kiln-pkg/bin/pip install --disable-pip-version-check ./backend
           /tmp/kiln-pkg/bin/python -c "from pathlib import Path; import kiln.db.migrate as migrate; root = Path(migrate.__file__).resolve().parent / 'migrations' / 'versions'; files = [path for path in root.glob('*.py')]; assert files, root"
+      - name: Start throwaway Jenkins and Gitea
+        run: bash scripts/ci-external-services.sh start
       - name: Test
         working-directory: backend
         run: python -m pytest
+      - name: Stop throwaway Jenkins and Gitea
+        if: always()
+        run: bash scripts/ci-external-services.sh stop
 
   console:
     name: console
