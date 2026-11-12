@@ -14,10 +14,10 @@ def test_root_points_at_health(client: TestClient) -> None:
 
 
 def test_cors_allows_configured_console_origin() -> None:
-    from kiln.config import Settings
     from kiln.main import create_app
+    from tests.support import app_settings
 
-    app = create_app(Settings(kiln_cors_origins="http://localhost:5173", _env_file=None))
+    app = create_app(app_settings(kiln_cors_origins="http://localhost:5173"))
     with TestClient(app) as client:
         allowed = client.get("/health", headers={"Origin": "http://localhost:5173"})
         rejected = client.get("/health", headers={"Origin": "http://evil.example"})

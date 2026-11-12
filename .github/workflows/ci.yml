@@ -15,6 +15,22 @@ jobs:
   backend:
     name: backend
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: kiln
+          POSTGRES_PASSWORD: kiln
+          POSTGRES_DB: kiln
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kiln -d kiln"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      KILN_TEST_DATABASE_URL: postgresql://kiln:kiln@127.0.0.1:5432/kiln
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,6 +41,11 @@ jobs:
       - name: Lint
         working-directory: backend
         run: python -m ruff check .
+      - name: Migrations ship inside the package
+        run: |
+          python -m venv /tmp/kiln-pkg
+          /tmp/kiln-pkg/bin/pip install --disable-pip-version-check ./backend
+          /tmp/kiln-pkg/bin/python -c "from pathlib import Path; import kiln.db.migrate as migrate; root = Path(migrate.__file__).resolve().parent / 'migrations' / 'versions'; files = [path for path in root.glob('*.py')]; assert files, root"
       - name: Test
         working-directory: backend
         run: python -m pytest

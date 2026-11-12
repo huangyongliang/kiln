@@ -1,0 +1,464 @@
+"""PostgreSQL store for the domain HTTP API.
+
+Records stay in the database when the API process exits.
+"""
+
+from datetime import timedelta
+from uuid import UUID, uuid4
+
+from psycopg.errors import UniqueViolation
+from sqlalchemy import select
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, selectinload
+
+from kiln import clock
+from kiln.db.models import (
+    AccountRoleRow,
+    AccountRow,
+    ArtifactRow,
+    ArtifactVersionRow,
+    PermissionRow,
+    ReservationRow,
+    RoleRow,
+    SkillDependencyRow,
+    SkillInputRow,
+    SkillRepositoryRow,
+    SkillRow,
+    SkillStepRow,
+)
+from kiln.domain.accounts import Account, AccountCreate
+from kiln.domain.artifacts import (
+    PACKAGE_LABELS,
+    Artifact,
+    ArtifactCreate,
+    ArtifactSource,
+    ArtifactVersion,
+    ArtifactVersionCreate,
+    Checksum,
+    DownloadReservationCreate,
+    PackageType,
+    Reservation,
+    RetrieveResult,
+)
+from kiln.domain.rbac import Permission, Role
+from kiln.domain.skills import (
+    Skill,
+    SkillCreate,
+    SkillInput,
+    SkillStatus,
+    SkillStep,
+)
+from kiln.errors import Conflict, Gone, NotFound
+from kiln.paths import retrieve_path
+
+_SKILL_LOAD = (
+    selectinload(SkillRow.inputs),
+    selectinload(SkillRow.steps),
+    selectinload(SkillRow.allowed_repositories),
+    selectinload(SkillRow.allowed_dependencies),
+)
+
+
+class PostgresStore:
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine
+
+    def _session(self) -> Session:
+        return Session(self.engine, expire_on_commit=False)
+
+    def list_permissions(self) -> list[Permission]:
+        with self._session() as session:
+            rows = session.scalars(
+                select(PermissionRow).order_by(PermissionRow.position, PermissionRow.code)
+            ).all()
+            return [Permission(code=row.code, description=row.description) for row in rows]
+
+    def list_roles(self) -> list[Role]:
+        with self._session() as session:
+            rows = session.scalars(
+                select(RoleRow)
+                .order_by(RoleRow.position, RoleRow.id)
+                .options(selectinload(RoleRow.grants))
+            ).all()
+            return [
+                Role(
+                    id=row.id,
+                    name=row.name,
+                    description=row.description,
+                    permissions=[
+                        grant.permission_code
+                        for grant in sorted(row.grants, key=lambda item: item.position)
+                    ],
+                )
+                for row in rows
+            ]
+
+    def list_accounts(self) -> list[Account]:
+        with self._session() as session:
+            rows = session.scalars(
+                select(AccountRow)
+                .order_by(AccountRow.created_at, AccountRow.id)
+                .options(selectinload(AccountRow.roles))
+            ).all()
+            return [_account(row) for row in rows]
+
+    def get_account(self, account_id: UUID) -> Account:
+        with self._session() as session:
+            row = session.scalars(
+                select(AccountRow)
+                .where(AccountRow.id == account_id)
+                .options(selectinload(AccountRow.roles))
+            ).first()
+            if row is None:
+                raise NotFound("账号不存在")
+            return _account(row)
+
+    def create_account(self, payload: AccountCreate) -> Account:
+        account_id = uuid4()
+        created_at = clock.utcnow()
+        row = AccountRow(
+            id=account_id,
+            username=payload.username,
+            display_name=payload.display_name,
+            email=payload.email,
+            status="active",
+            created_at=created_at,
+        )
+        row.roles = [
+            AccountRoleRow(role_id=role_id, position=index)
+            for index, role_id in enumerate(payload.role_ids)
+        ]
+        with self._session() as session:
+            existing = session.scalar(
+                select(AccountRow.id).where(AccountRow.username == payload.username)
+            )
+            if existing is not None:
+                raise Conflict("用户名已存在")
+            session.add(row)
+            _commit_unique(session, "用户名已存在")
+            return _account(row)
+
+    def list_artifacts(self) -> list[Artifact]:
+        with self._session() as session:
+            rows = session.scalars(
+                select(ArtifactRow)
+                .order_by(ArtifactRow.created_at, ArtifactRow.id)
+                .options(selectinload(ArtifactRow.versions))
+            ).all()
+            return [_artifact(row) for row in rows]
+
+    def get_artifact(self, artifact_id: UUID) -> Artifact:
+        with self._session() as session:
+            row = session.scalars(
+                select(ArtifactRow)
+                .where(ArtifactRow.id == artifact_id)
+                .options(selectinload(ArtifactRow.versions))
+            ).first()
+            if row is None:
+                raise NotFound("制品不存在")
+            return _artifact(row)
+
+    def create_artifact(self, payload: ArtifactCreate) -> Artifact:
+        artifact_id = uuid4()
+        created_at = clock.utcnow()
+        row = ArtifactRow(
+            id=artifact_id,
+            name=payload.name,
+            group_name=payload.group,
+            description=payload.description,
+            package_type=payload.package_type.value,
+            created_at=created_at,
+        )
+        with self._session() as session:
+            existing = session.scalar(
+                select(ArtifactRow.id).where(
+                    ArtifactRow.name == payload.name,
+                    ArtifactRow.group_name.is_not_distinct_from(payload.group),
+                )
+            )
+            if existing is not None:
+                raise Conflict("同组内制品名称已存在")
+            session.add(row)
+            _commit_unique(session, "同组内制品名称已存在")
+            return _artifact(row)
+
+    def add_version(self, artifact_id: UUID, payload: ArtifactVersionCreate) -> ArtifactVersion:
+        with self._session() as session:
+            artifact = session.get(ArtifactRow, artifact_id)
+            if artifact is None:
+                raise NotFound("制品不存在")
+            if session.get(ArtifactVersionRow, (artifact_id, payload.version)) is not None:
+                raise Conflict("版本已存在且不可变")
+            created_at = clock.utcnow()
+            row = ArtifactVersionRow(
+                artifact_id=artifact_id,
+                version=payload.version,
+                checksum_algorithm=payload.checksum.algorithm,
+                checksum_value=payload.checksum.value,
+                size_bytes=payload.size_bytes,
+                source=payload.source.value,
+                created_at=created_at,
+            )
+            session.add(row)
+            _commit_unique(session, "版本已存在且不可变")
+            return _version(row)
+
+    def reserve_download(
+        self,
+        artifact_id: UUID,
+        version: str,
+        payload: DownloadReservationCreate,
+    ) -> Reservation:
+        with self._session() as session:
+            artifact = session.get(ArtifactRow, artifact_id)
+            if artifact is None:
+                raise NotFound("制品不存在")
+            matched = session.get(ArtifactVersionRow, (artifact_id, version))
+            if matched is None:
+                raise NotFound("版本不存在")
+            created_at = clock.utcnow()
+            reservation_id = uuid4()
+            expires_at = created_at + timedelta(seconds=payload.ttl_seconds)
+            package_type = PackageType(artifact.package_type)
+            row = ReservationRow(
+                id=reservation_id,
+                artifact_id=artifact.id,
+                artifact_name=artifact.name,
+                version=matched.version,
+                package_type=artifact.package_type,
+                checksum_algorithm=matched.checksum_algorithm,
+                checksum_value=matched.checksum_value,
+                requester=payload.requester,
+                created_at=created_at,
+                expires_at=expires_at,
+            )
+            session.add(row)
+            session.commit()
+            return Reservation(
+                id=reservation_id,
+                artifact_id=artifact.id,
+                artifact_name=artifact.name,
+                version=matched.version,
+                package_type=package_type,
+                package_type_label=PACKAGE_LABELS[package_type],
+                checksum=Checksum(
+                    algorithm=matched.checksum_algorithm,
+                    value=matched.checksum_value,
+                ),
+                requester=payload.requester,
+                created_at=created_at,
+                expires_at=expires_at,
+                retrieve_path=retrieve_path(reservation_id),
+            )
+
+    def get_retrieve(self, reservation_id: UUID) -> RetrieveResult:
+        with self._session() as session:
+            row = session.get(ReservationRow, reservation_id)
+            if row is None:
+                raise NotFound("取包预约不存在")
+            if row.expires_at <= clock.utcnow():
+                raise Gone("取包预约已过期")
+            package_type = PackageType(row.package_type)
+            return RetrieveResult(
+                reservation_id=row.id,
+                artifact_id=row.artifact_id,
+                name=row.artifact_name,
+                version=row.version,
+                package_type=package_type,
+                package_type_label=PACKAGE_LABELS[package_type],
+                checksum=Checksum(
+                    algorithm=row.checksum_algorithm,
+                    value=row.checksum_value,
+                ),
+                detail="一期骨架只登记取包预约，不提供制品字节。",
+            )
+
+    def list_skills(self, status: SkillStatus | None) -> list[Skill]:
+        with self._session() as session:
+            stmt = select(SkillRow).order_by(SkillRow.created_at, SkillRow.id).options(*_SKILL_LOAD)
+            if status is not None:
+                stmt = stmt.where(SkillRow.status == status.value)
+            rows = session.scalars(stmt).all()
+            return [_skill(row) for row in rows]
+
+    def get_skill(self, skill_id: UUID) -> Skill:
+        with self._session() as session:
+            row = _load_skill(session, skill_id, lock=False)
+            return _skill(row)
+
+    def create_skill(self, payload: SkillCreate) -> Skill:
+        skill_id = uuid4()
+        now = clock.utcnow()
+        row = SkillRow(
+            id=skill_id,
+            name=payload.name,
+            version=payload.version,
+            status=SkillStatus.draft.value,
+            description=payload.description,
+            toolchain=payload.toolchain,
+            environment=payload.environment,
+            output_spec=payload.output_spec,
+            created_at=now,
+            updated_at=now,
+        )
+        row.inputs = [
+            SkillInputRow(
+                position=index,
+                name=item.name,
+                description=item.description,
+                required=item.required,
+            )
+            for index, item in enumerate(payload.inputs)
+        ]
+        row.steps = [
+            SkillStepRow(position=index, kind=item.kind, description=item.description)
+            for index, item in enumerate(payload.steps)
+        ]
+        row.allowed_repositories = [
+            SkillRepositoryRow(position=index, value=item)
+            for index, item in enumerate(payload.allowed_repositories)
+        ]
+        row.allowed_dependencies = [
+            SkillDependencyRow(position=index, value=item)
+            for index, item in enumerate(payload.allowed_dependencies)
+        ]
+        with self._session() as session:
+            existing = session.scalar(
+                select(SkillRow.id).where(
+                    SkillRow.name == payload.name,
+                    SkillRow.version == payload.version,
+                )
+            )
+            if existing is not None:
+                raise Conflict("同名同版本的 skill 已存在")
+            session.add(row)
+            _commit_unique(session, "同名同版本的 skill 已存在")
+            return _skill(row)
+
+    def submit_skill_review(self, skill_id: UUID) -> Skill:
+        return self._transition(
+            skill_id,
+            SkillStatus.draft,
+            SkillStatus.in_review,
+            "只有草稿可以提交审核",
+        )
+
+    def publish_skill(self, skill_id: UUID) -> Skill:
+        return self._transition(
+            skill_id,
+            SkillStatus.in_review,
+            SkillStatus.published,
+            "只有审核中的 skill 可以发布",
+        )
+
+    def _transition(
+        self,
+        skill_id: UUID,
+        expected: SkillStatus,
+        target: SkillStatus,
+        message: str,
+    ) -> Skill:
+        with self._session() as session:
+            row = _load_skill(session, skill_id, lock=True)
+            if row.status != expected.value:
+                raise Conflict(message)
+            row.status = target.value
+            row.updated_at = clock.utcnow()
+            session.commit()
+            return _skill(row)
+
+
+def _commit_unique(session: Session, message: str) -> None:
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        if _is_unique_violation(exc):
+            raise Conflict(message) from exc
+        raise
+
+
+def _is_unique_violation(exc: IntegrityError) -> bool:
+    orig: object = exc.orig
+    seen: set[int] = set()
+    while orig is not None and id(orig) not in seen:
+        if isinstance(orig, UniqueViolation):
+            return True
+        seen.add(id(orig))
+        orig = getattr(orig, "orig", None)
+    return False
+
+
+def _load_skill(session: Session, skill_id: UUID, *, lock: bool) -> SkillRow:
+    stmt = select(SkillRow).where(SkillRow.id == skill_id).options(*_SKILL_LOAD)
+    if lock:
+        stmt = stmt.with_for_update()
+    row = session.scalars(stmt).first()
+    if row is None:
+        raise NotFound("skill 不存在")
+    return row
+
+
+def _account(row: AccountRow) -> Account:
+    roles = sorted(row.roles, key=lambda item: item.position)
+    return Account(
+        id=row.id,
+        username=row.username,
+        display_name=row.display_name,
+        email=row.email,
+        status=row.status,  # type: ignore[arg-type]
+        role_ids=[item.role_id for item in roles],
+        created_at=row.created_at,
+    )
+
+
+def _version(row: ArtifactVersionRow) -> ArtifactVersion:
+    return ArtifactVersion(
+        version=row.version,
+        checksum=Checksum(algorithm=row.checksum_algorithm, value=row.checksum_value),
+        size_bytes=row.size_bytes,
+        source=ArtifactSource(row.source),
+        created_at=row.created_at,
+    )
+
+
+def _artifact(row: ArtifactRow) -> Artifact:
+    package_type = PackageType(row.package_type)
+    versions = sorted(row.versions, key=lambda item: (item.created_at, item.version))
+    return Artifact(
+        id=row.id,
+        name=row.name,
+        group=row.group_name,
+        description=row.description,
+        package_type=package_type,
+        package_type_label=PACKAGE_LABELS[package_type],
+        versions=[_version(item) for item in versions],
+        created_at=row.created_at,
+    )
+
+
+def _skill(row: SkillRow) -> Skill:
+    inputs = sorted(row.inputs, key=lambda item: item.position)
+    steps = sorted(row.steps, key=lambda item: item.position)
+    repositories = sorted(row.allowed_repositories, key=lambda item: item.position)
+    dependencies = sorted(row.allowed_dependencies, key=lambda item: item.position)
+    return Skill(
+        id=row.id,
+        name=row.name,
+        version=row.version,
+        status=SkillStatus(row.status),
+        description=row.description,
+        inputs=[
+            SkillInput(name=item.name, description=item.description, required=item.required)
+            for item in inputs
+        ],
+        toolchain=row.toolchain,
+        environment=row.environment,
+        allowed_repositories=[item.value for item in repositories],
+        allowed_dependencies=[item.value for item in dependencies],
+        steps=[SkillStep(kind=item.kind, description=item.description) for item in steps],
+        output_spec=row.output_spec,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )

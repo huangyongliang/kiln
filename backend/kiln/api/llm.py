@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends
 
 from kiln.api.deps import get_llm, get_settings
+from kiln.auth import require_api_token
 from kiln.config import Settings
 from kiln.llm.provider import (
     ChatCompletion,
@@ -12,7 +13,11 @@ from kiln.llm.provider import (
     provider_status,
 )
 
-router = APIRouter(prefix="/llm", tags=["模型"])
+router = APIRouter(
+    prefix="/llm",
+    tags=["模型"],
+    dependencies=[Depends(require_api_token)],
+)
 
 
 @router.get("/provider", response_model=ProviderStatus, summary="查看模型提供方")

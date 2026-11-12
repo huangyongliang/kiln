@@ -3,9 +3,9 @@ import json
 import httpx
 from fastapi.testclient import TestClient
 
-from kiln.config import Settings
 from kiln.llm.provider import chat_completions_url
 from kiln.main import create_app
+from tests.support import app_settings, auth_headers
 
 
 def test_chat_completions_url() -> None:
@@ -22,10 +22,10 @@ def test_off_mode_does_not_call_network() -> None:
 
     with httpx.Client(transport=httpx.MockTransport(explode)) as http_client:
         app = create_app(
-            Settings(llm_provider="off", llm_base_url="http://llm.example/v1", _env_file=None),
+            app_settings(llm_provider="off", llm_base_url="http://llm.example/v1"),
             http_client=http_client,
         )
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             status = client.get("/api/v1/llm/provider")
             chat = client.post(
                 "/api/v1/llm/chat",
@@ -43,10 +43,10 @@ def test_mock_mode_does_not_call_network() -> None:
 
     with httpx.Client(transport=httpx.MockTransport(explode)) as http_client:
         app = create_app(
-            Settings(llm_provider="mock", llm_api_key="super-secret-value", _env_file=None),
+            app_settings(llm_provider="mock", llm_api_key="super-secret-value"),
             http_client=http_client,
         )
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             status = client.get("/api/v1/llm/provider")
             chat = client.post(
                 "/api/v1/llm/chat",
@@ -85,16 +85,15 @@ def test_openai_mode_posts_chat_completions() -> None:
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
         app = create_app(
-            Settings(
+            app_settings(
                 llm_provider="openai",
                 llm_base_url="http://llm.example/v1",
                 llm_api_key="test-key",
                 llm_model="demo-model",
-                _env_file=None,
             ),
             http_client=http_client,
         )
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.post(
                 "/api/v1/llm/chat",
                 json={"messages": [{"role": "user", "content": "ping"}]},
@@ -123,16 +122,15 @@ def test_openai_mode_omits_authorization_when_key_is_empty() -> None:
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
         app = create_app(
-            Settings(
+            app_settings(
                 llm_provider="openai",
                 llm_base_url="http://127.0.0.1:11434/v1",
                 llm_api_key="",
                 llm_model="local-model",
-                _env_file=None,
             ),
             http_client=http_client,
         )
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.post(
                 "/api/v1/llm/chat",
                 json={"messages": [{"role": "user", "content": "ping"}]},
@@ -148,15 +146,14 @@ def test_openai_upstream_status_is_not_forwarded() -> None:
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
         app = create_app(
-            Settings(
+            app_settings(
                 llm_provider="openai",
                 llm_base_url="http://llm.example/v1",
                 llm_model="demo-model",
-                _env_file=None,
             ),
             http_client=http_client,
         )
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.post(
                 "/api/v1/llm/chat",
                 json={"messages": [{"role": "user", "content": "ping"}]},
@@ -173,15 +170,14 @@ def test_openai_timeout() -> None:
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
         app = create_app(
-            Settings(
+            app_settings(
                 llm_provider="openai",
                 llm_base_url="http://llm.example/v1",
                 llm_model="demo-model",
-                _env_file=None,
             ),
             http_client=http_client,
         )
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.post(
                 "/api/v1/llm/chat",
                 json={"messages": [{"role": "user", "content": "ping"}]},
@@ -195,14 +191,13 @@ def test_openai_requires_a_model() -> None:
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
         app = create_app(
-            Settings(
+            app_settings(
                 llm_provider="openai",
                 llm_base_url="http://llm.example/v1",
-                _env_file=None,
             ),
             http_client=http_client,
         )
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.post(
                 "/api/v1/llm/chat",
                 json={"messages": [{"role": "user", "content": "ping"}]},

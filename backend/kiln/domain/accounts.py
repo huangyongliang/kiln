@@ -63,5 +63,5 @@ class Account(BaseModel):
 
 
 class AccountList(BaseModel):
-    persistence: Literal["memory"] = "memory"
+    persistence: Literal["postgres"] = "postgres"
     items: list[Account]

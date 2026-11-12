@@ -5,10 +5,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 
 from kiln.api.deps import get_store
+from kiln.auth import require_api_token
+from kiln.db.store import PostgresStore
 from kiln.domain.artifacts import RetrieveResult
-from kiln.memory import MemoryStore
 
-router = APIRouter(tags=["取包"])
+router = APIRouter(tags=["取包"], dependencies=[Depends(require_api_token)])
 
 
 @router.get(
@@ -16,5 +17,8 @@ router = APIRouter(tags=["取包"])
     response_model=RetrieveResult,
     summary="按预约取包",
 )
-def retrieve(reservation_id: UUID, store: MemoryStore = Depends(get_store)) -> RetrieveResult:
+def retrieve(
+    reservation_id: UUID,
+    store: PostgresStore = Depends(get_store),
+) -> RetrieveResult:
     return store.get_retrieve(reservation_id)

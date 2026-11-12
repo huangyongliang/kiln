@@ -8,10 +8,13 @@ version = "0.1.0"
 description = "kiln artifact platform skeleton"
 requires-python = ">=3.11"
 dependencies = [
+  "alembic>=1.14",
   "fastapi>=0.115",
   "httpx>=0.27",
+  "psycopg[binary]>=3.2",
   "pydantic>=2.9",
   "pydantic-settings>=2.6",
+  "sqlalchemy>=2.0.36",
   "uvicorn[standard]>=0.32",
 ]
 
@@ -26,6 +29,9 @@ kiln-api = "kiln.main:run"
 
 [tool.setuptools.packages.find]
 include = ["kiln*"]
+
+[tool.setuptools.package-data]
+"kiln.db" = ["migrations/versions/*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

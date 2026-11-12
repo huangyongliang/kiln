@@ -12,14 +12,20 @@ from fastapi.responses import JSONResponse
 from kiln import __version__
 from kiln.api import accounts, artifacts, health, llm, retrieve, skills
 from kiln.config import Settings, get_settings
+from kiln.db.engine import create_db_engine
+from kiln.db.migrate import upgrade_database
+from kiln.db.seed import seed_rbac
+from kiln.db.store import PostgresStore
 from kiln.errors import AppError
 from kiln.llm.provider import build_provider
-from kiln.memory import MemoryStore
 from kiln.paths import API_PREFIX
 
 DESCRIPTION = (
-    "kiln 一期骨架。账号、制品、skill 与对话接口是领域大纲："
-    "记录保存在进程内存中，不执行鉴权，不接收制品字节，不运行 skill 步骤。"
+    "kiln 一期骨架。账号、RBAC 目录、制品、版本、下载预约与 skill 保存在 PostgreSQL 中。"
+    "API 启动时自动迁移，进程重启后记录仍在。"
+    "/api/v1 需要请求头 Authorization: Bearer <KILN_API_TOKEN>。"
+    "这不是登录，也不按角色鉴权。/health 与 /docs 不接受写入。"
+    "不接收制品字节，不运行 skill 步骤。"
     "模型调用走 OpenAI 兼容协议，端点由环境变量配置；未就绪时可使用 mock 或 off。"
     "配置只从环境变量读取。"
 )
@@ -36,13 +42,17 @@ def create_app(
     else:
         client = http_client
     provider = build_provider(resolved, client)
-    store = MemoryStore()
+    engine = create_db_engine(resolved.database_url)
+    store = PostgresStore(engine)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
+            upgrade_database(resolved.database_url)
+            seed_rbac(engine)
             yield
         finally:
+            engine.dispose()
             if owns_client:
                 client.close()
 
@@ -55,6 +65,7 @@ def create_app(
     )
     app.state.settings = resolved
     app.state.http_client = client
+    app.state.engine = engine
     app.state.store = store
     app.state.llm = provider
 
@@ -62,12 +73,17 @@ def create_app(
         CORSMiddleware,
         allow_origins=resolved.cors_origins(),
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Accept", "Content-Type"],
+        allow_headers=["Accept", "Authorization", "Content-Type"],
     )
 
     @app.exception_handler(AppError)
     async def handle_app_error(_request: Request, exc: AppError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        headers = {"WWW-Authenticate": "Bearer"} if exc.status_code == 401 else None
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=headers,
+        )
 
     app.include_router(health.router)
     app.include_router(accounts.router, prefix=API_PREFIX)

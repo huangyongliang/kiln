@@ -1,3 +1,5 @@
+import { readApiToken } from "./token";
+
 function errorDetail(body, status) {
   if (!body || body.detail == null) {
     return `请求失败（${status}）`;
@@ -12,10 +14,12 @@ function errorDetail(body, status) {
 }
 
 export async function requestJson(path, options = {}) {
+  const token = readApiToken();
   const response = await fetch(path, {
     ...options,
     headers: {
       Accept: "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(options.body ? { "Content-Type": "application/json" } : {}),
       ...(options.headers || {}),
     },

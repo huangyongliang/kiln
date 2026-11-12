@@ -10,12 +10,21 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Shared by local compose, .env.example, and tests. Not a production secret.
+LOCAL_API_TOKEN = "kiln-local"
+
 
 class Settings(BaseSettings):
     """Kiln process settings.
 
-    `DATABASE_URL` is accepted so the later lab can point at Postgres. This
-    skeleton does not open a database connection.
+    `DATABASE_URL` is the PostgreSQL URL for domain data. Startup opens it,
+    applies migrations, and then reads and writes accounts, the RBAC catalog,
+    artifacts, versions, download reservations, and skills. The default URL
+    is for local use and CI only.
+
+    `KILN_API_TOKEN` is required on `/api/v1`. The default is for local use
+    and CI only. An empty token is rejected so the gate cannot be turned off
+    by leaving the variable blank.
     """
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -26,6 +35,7 @@ class Settings(BaseSettings):
     kiln_cors_origins: str = "http://localhost:5173,http://localhost:8080"
 
     database_url: str = "postgresql://kiln:kiln@localhost:5432/kiln"
+    kiln_api_token: SecretStr = SecretStr(LOCAL_API_TOKEN)
 
     llm_provider: Literal["openai", "mock", "off"] = "off"
     llm_base_url: str = ""
@@ -51,6 +61,15 @@ class Settings(BaseSettings):
     def strip_text(cls, value: str) -> str:
         return value.strip()
 
+    @field_validator("kiln_api_token", mode="before")
+    @classmethod
+    def api_token_required(cls, value: object) -> object:
+        if isinstance(value, SecretStr):
+            value = value.get_secret_value()
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("必须设置 KILN_API_TOKEN")
+        return value.strip()
+
     @model_validator(mode="after")
     def openai_requires_base_url(self) -> "Settings":
         if self.llm_provider == "openai" and not self.llm_base_url:
@@ -62,6 +81,9 @@ class Settings(BaseSettings):
 
     def llm_api_key_value(self) -> str:
         return self.llm_api_key.get_secret_value()
+
+    def api_token_value(self) -> str:
+        return self.kiln_api_token.get_secret_value()
 
 
 @lru_cache

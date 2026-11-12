@@ -35,7 +35,7 @@ function versionText(artifact) {
   <section class="panel">
     <p v-if="error" class="message error">{{ error }}</p>
     <p v-else-if="loaded && items.length === 0" class="message">
-      还没有制品。登记请调用 API。进程重启后内存目录会清空。
+      还没有制品。登记请调用 API。目录写在 PostgreSQL 里，只重启 API 进程不会清空。
     </p>
     <table v-else-if="loaded">
       <thead>
