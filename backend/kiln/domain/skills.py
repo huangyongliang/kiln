@@ -12,6 +12,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
+from kiln.domain.text import has_invisible_control
+
 
 class SkillStatus(str, Enum):
     draft = "draft"
@@ -61,7 +63,7 @@ class SkillCreate(BaseModel):
         text = value.strip()
         if len(text) < 2:
             raise ValueError("名称至少 2 个字符")
-        if any(ord(char) < 32 for char in text):
+        if any(ord(char) < 32 for char in text) or has_invisible_control(text):
             raise ValueError("名称含有非法字符")
         return text
 
@@ -97,7 +99,9 @@ class SkillReject(BaseModel):
             raise ValueError("退回原因不能为空")
         if len(text) > 500:
             raise ValueError("退回原因过长")
-        if any(char not in "\n\t" and unicodedata.category(char) == "Cc" for char in text):
+        if has_invisible_control(text) or any(
+            char not in "\n\t" and unicodedata.category(char) == "Cc" for char in text
+        ):
             raise ValueError("退回原因含有非法字符")
         return text
 

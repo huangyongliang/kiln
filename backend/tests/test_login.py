@@ -79,6 +79,9 @@ def test_local_login_rejects_wrong_and_disabled_passwords(client: TestClient, ca
     body = logged_in.json()
     assert body["account"]["username"] == "ada_login"
     assert body["account"]["role_ids"] == ["builder"]
+    assert body["account"]["source"] == "local"
+    assert "idp_issuer" not in body["account"]
+    assert "idp_subject" not in body["account"]
     assert "password" not in logged_in.text
     assert LOCAL_PASSWORD not in logged_in.text
     assert stored_hash not in logged_in.text
@@ -93,6 +96,8 @@ def test_local_login_rejects_wrong_and_disabled_passwords(client: TestClient, ca
     listed = bearer.get("/api/v1/accounts", headers={"Authorization": f"Bearer {token}"})
     assert listed.status_code == 200
     assert listed.json()["items"][0]["username"] == "ada_login"
+    assert listed.json()["items"][0]["source"] == "local"
+    assert listed.json()["items"][0] == body["account"]
 
 
 def test_session_survives_restart_and_logout_revokes(tmp_path: Path) -> None:
@@ -224,11 +229,25 @@ def test_oidc_sync_creates_and_signs_in_without_copying_roles(tmp_path: Path) ->
             assert created.status_code == 200, created.text
             body = created.json()
             assert body["account"]["role_ids"] == ["reader"]
+            assert body["account"]["source"] == "sync"
+            assert "idp_issuer" not in body["account"]
+            assert "idp_subject" not in body["account"]
             assert "password" not in created.text
             assert double.saw_pkce is True
             assert double.last_id_claims["groups"] == ["company-admin"]
             assert double.last_id_claims["roles"] == ["publisher"]
             account_id = body["account"]["id"]
+            me = client.get("/api/v1/auth/me")
+            assert me.status_code == 200
+            assert me.json()["account"]["source"] == "sync"
+            assert me.json()["account"] == body["account"]
+            assert "idp_issuer" not in me.json()["account"]
+            assert "idp_subject" not in me.json()["account"]
+            listed = client.get("/api/v1/accounts", headers=auth_headers())
+            assert listed.status_code == 200
+            synced = next(item for item in listed.json()["items"] if item["id"] == account_id)
+            assert synced["source"] == "sync"
+            assert synced == body["account"]
             with app.state.engine.connect() as connection:
                 row = connection.execute(
                     text(
@@ -287,11 +306,13 @@ def test_oidc_does_not_take_over_a_local_account_with_the_same_email(tmp_path: P
                 },
             )
             assert local.status_code == 201
+            assert local.json()["source"] == "local"
             double.identity["email"] = "person@example.com"
             double.identity["preferred_username"] = "local_ada"
             synced = _complete_oidc(client, double)
             assert synced.status_code == 200
             assert synced.json()["account"]["role_ids"] == ["reader"]
+            assert synced.json()["account"]["source"] == "sync"
             assert synced.json()["account"]["id"] != local.json()["id"]
             with app.state.engine.connect() as connection:
                 rows = connection.execute(
@@ -358,6 +379,9 @@ def test_auth_me_returns_the_principal_and_hides_secrets(client: TestClient) -> 
     body = by_cookie.json()
     expected = [code for code in catalog if code in permissions_for(account["role_ids"])]
     assert body["kind"] == "user"
+    assert account["source"] == "local"
+    assert "idp_issuer" not in account
+    assert "idp_subject" not in account
     assert body["account"] == account
     assert body["permissions"] == expected
     assert set(body["permissions"]) == permissions_for(account["role_ids"])
