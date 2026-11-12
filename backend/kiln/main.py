@@ -60,6 +60,7 @@ DESCRIPTION = (
     "代码源是可替换适配器：GIT_PROVIDER=gitea 是实验室实现，GIT_PROVIDER=gitlab 是生产代码源。"
     "这两处地址只来自环境变量。仓库不写生产 GitLab 地址。Nexus 集成还没有接上，也没有 Nexus 地址。"
     "模型调用走 OpenAI 兼容协议，端点由环境变量配置；未就绪时可使用 mock 或 off。"
+    "对话可在授权下通过工具起草 skill 草稿。"
     "配置只从环境变量读取。"
 )
 

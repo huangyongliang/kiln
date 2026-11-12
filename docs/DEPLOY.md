@@ -283,7 +283,7 @@ curl -fsS http://127.0.0.1:8000/api/v1/llm/provider \
 
 Compose 把 `LLM_BASE_URL` 原样写进 `kiln-api`。容器里的 `127.0.0.1` 是容器自己，不是宿主机。仓库没有 `extra_hosts`，也没有规定从容器访问宿主机的主机名。模型若跑在别的机器或容器网络能路由到的地址上，把那个地址填进 `LLM_BASE_URL`。进程直接跑在宿主机上时，`127.0.0.1` 才指向宿主机。
 
-对话请求是 `POST /api/v1/llm/chat`，需要 `agent.qa`，正文为 `{"messages":[{"role":"user","content":"…"}]}`。未设置 `LLM_MODEL` 且请求里也没有 `model` 时，返回 400。超时使用 `LLM_TIMEOUT_SECONDS`。
+对话请求是 `POST /api/v1/llm/chat`，需要 `agent.qa`，正文为 `{"messages":[{"role":"user","content":"…"}]}`。未设置 `LLM_MODEL` 且请求里也没有 `model` 时，返回 400。超时使用 `LLM_TIMEOUT_SECONDS`。对话可在授权下通过工具起草 skill 草稿。
 
 ## Jenkins 与代码源
 
