@@ -144,7 +144,7 @@ docker compose --profile lab up
 
 - 登录：`POST /auth/login` 校验本地口令，写入会话哈希，设置 httpOnly cookie，并返回 Bearer 令牌。`POST /auth/logout` 撤销会话。口令只以哈希保存，响应里不出现口令
 - 用户信息同步：`GET /auth/sync` 说明是否已配置。未配置时 `GET /auth/oidc/start` 与 `GET /auth/oidc/callback` 返回「用户信息同步未配置」。配置后使用授权码和 PKCE，按发行方与 subject 找到或创建 kiln 账号。新账号的默认角色是 `reader`，不设置口令，也不复制公司侧的组或角色。在职状态未通过或账号已停用时不建立会话
-- 本地账号：`GET/POST /accounts`，`GET /accounts/{id}`。列出和查看需要 `account.read`。创建账号可以带口令，调用方需要 `account.manage`
+- 本地账号：`GET/POST /accounts`，`GET /accounts/{id}`。列出和查看需要 `account.read`。创建账号可以带口令，调用方需要 `account.manage`。账号带 `source`：`local` 本地、`sync` 用户信息同步
 - RBAC 目录：`GET /rbac/roles`，`GET /rbac/permissions`
 - 制品：`GET /artifacts` 与 `GET /artifacts/{id}` 需要 `artifact.read`，`POST /artifacts` 登记制品，`POST /artifacts/{id}/versions` 登记尚无字节的版本
 - 保存字节：`PUT /artifacts/{id}/versions/{version}/content`，请求体是原始字节，并用 `X-Kiln-Checksum-Algorithm`、`X-Kiln-Checksum` 声明校验和。成功后该版本的 `content_available` 为 true

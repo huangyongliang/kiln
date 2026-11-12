@@ -668,6 +668,7 @@ def _account(row: AccountRow) -> Account:
         display_name=row.display_name,
         email=row.email,
         status=row.status,  # type: ignore[arg-type]
+        source="sync" if row.idp_subject is not None else "local",
         role_ids=[item.role_id for item in roles],
         created_at=row.created_at,
     )

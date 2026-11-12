@@ -246,6 +246,8 @@ def test_reject_reason_must_be_present_and_drafts_start_clear(client: TestClient
         kwargs = {} if payload is None else {"json": payload}
         response = client.post(path, **kwargs)
         assert response.status_code == 422, payload
+        if payload == {"reason": "字" * 501}:
+            assert "退回原因过长" in response.text
     empty = client.post(path, json={"reason": "   "})
     assert empty.status_code == 422
     assert "退回原因不能为空" in empty.text
@@ -261,6 +263,41 @@ def test_reject_reason_must_be_present_and_drafts_start_clear(client: TestClient
     spec = client.get("/openapi.json").json()
     reject = spec["paths"]["/api/v1/skills/{skill_id}/reject"]["post"]
     assert reject["summary"] == "退回草稿"
+
+
+def test_reject_reason_rejects_invisible_controls(client: TestClient) -> None:
+    draft = _draft(client, name="reject-invisible")
+    skill_id = draft["id"]
+    submitted = client.post(f"/api/v1/skills/{skill_id}/submit-review")
+    assert submitted.status_code == 200
+    path = f"/api/v1/skills/{skill_id}/reject"
+    for char in ("\u202e", "\u2066", "\u200b", "\ufeff"):
+        response = client.post(path, json={"reason": f"原因{char}说明"})
+        assert response.status_code == 422, hex(ord(char))
+        assert "退回原因含有非法字符" in response.text
+    allowed = client.post(path, json={"reason": "原因\u200d说明"})
+    assert allowed.status_code == 200
+    assert allowed.json()["status"] == "draft"
+    assert allowed.json()["review_note"] == "原因\u200d说明"
+    zwnj_draft = _draft(client, name="reject-zwnj")
+    zwnj_id = zwnj_draft["id"]
+    assert client.post(f"/api/v1/skills/{zwnj_id}/submit-review").status_code == 200
+    zwnj = client.post(f"/api/v1/skills/{zwnj_id}/reject", json={"reason": "原因\u200c说明"})
+    assert zwnj.status_code == 200
+    assert zwnj.json()["review_note"] == "原因\u200c说明"
+
+
+def test_skill_name_rejects_invisible_controls(client: TestClient) -> None:
+    for char in ("\u202e", "\u2066", "\u200b", "\ufeff"):
+        response = client.post("/api/v1/skills", json={"name": f"名称{char}甲"})
+        assert response.status_code == 422, hex(ord(char))
+        assert "名称含有非法字符" in response.text
+    allowed = client.post("/api/v1/skills", json={"name": "名称\u200d甲"})
+    assert allowed.status_code == 201
+    assert allowed.json()["name"] == "名称\u200d甲"
+    zwnj = client.post("/api/v1/skills", json={"name": "名称\u200c甲"})
+    assert zwnj.status_code == 201
+    assert zwnj.json()["name"] == "名称\u200c甲"
 
 
 LOCAL_PASSWORD = "correct-horse-1"

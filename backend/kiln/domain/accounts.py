@@ -14,6 +14,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kiln.domain.rbac import ROLE_INDEX
+from kiln.domain.text import has_invisible_control
 
 _USERNAME = re.compile(r"^[a-z][a-z0-9_-]{2,31}$")
 
@@ -33,7 +34,7 @@ class AccountCreate(BaseModel):
         text = value.strip()
         if not text:
             raise ValueError("显示名不能为空")
-        if any(ord(char) < 32 for char in text):
+        if any(ord(char) < 32 for char in text) or has_invisible_control(text):
             raise ValueError("显示名含有非法字符")
         return text
 
@@ -68,6 +69,7 @@ class Account(BaseModel):
     display_name: str
     email: str | None
     status: Literal["active", "disabled"]
+    source: Literal["local", "sync"]
     role_ids: list[str]
     created_at: datetime
 
