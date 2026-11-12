@@ -18,6 +18,9 @@ def test_version_reservation_and_stable_retrieve(client: TestClient) -> None:
     )
     assert created.status_code == 201
     artifact_id = created.json()["id"]
+    listed = client.get("/api/v1/artifacts")
+    assert listed.status_code == 200
+    assert listed.json()["persistence"] == "postgres"
     assert created.json()["versions"] == []
     assert created.json()["package_type_label"] == "Maven"
 
@@ -85,7 +88,7 @@ def test_unknown_version_cannot_be_reserved(client: TestClient) -> None:
 
 def test_expired_reservation_is_gone(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     current = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc)}
-    monkeypatch.setattr("kiln.memory.utcnow", lambda: current["now"])
+    monkeypatch.setattr("kiln.clock.utcnow", lambda: current["now"])
     created = client.post(
         "/api/v1/artifacts",
         json={"name": "timed-pkg", "package_type": "frontend"},
@@ -106,6 +109,24 @@ def test_expired_reservation_is_gone(client: TestClient, monkeypatch: pytest.Mon
     current["now"] = datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc)
     expired = client.get(path)
     assert expired.status_code == 410
+
+
+def test_artifact_name_is_unique_within_a_group(client: TestClient) -> None:
+    first = client.post(
+        "/api/v1/artifacts",
+        json={"name": "shared", "package_type": "generic"},
+    )
+    assert first.status_code == 201
+    again = client.post(
+        "/api/v1/artifacts",
+        json={"name": "shared", "package_type": "python"},
+    )
+    assert again.status_code == 409
+    other_group = client.post(
+        "/api/v1/artifacts",
+        json={"name": "shared", "group": "com.kiln", "package_type": "maven"},
+    )
+    assert other_group.status_code == 201
 
 
 def test_missing_reservation_is_404(client: TestClient) -> None:

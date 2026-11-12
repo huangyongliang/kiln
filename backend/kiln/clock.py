@@ -1,4 +1,4 @@
-"""Clock used by in-memory stubs so tests can move time."""
+"""Clock used by the domain store so tests can move time."""
 
 from datetime import datetime, timezone
 

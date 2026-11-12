@@ -14,6 +14,10 @@ def test_rbac_catalog_is_closed(client: TestClient) -> None:
 
 
 def test_create_and_read_local_account(client: TestClient) -> None:
+    empty = client.get("/api/v1/accounts")
+    assert empty.status_code == 200
+    assert empty.json() == {"persistence": "postgres", "items": []}
+
     created = client.post(
         "/api/v1/accounts",
         json={
@@ -32,7 +36,7 @@ def test_create_and_read_local_account(client: TestClient) -> None:
     listed = client.get("/api/v1/accounts")
     assert listed.status_code == 200
     payload = listed.json()
-    assert payload["persistence"] == "memory"
+    assert payload["persistence"] == "postgres"
     assert payload["items"][0]["id"] == body["id"]
 
     fetched = client.get(f"/api/v1/accounts/{body['id']}")

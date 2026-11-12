@@ -29,3 +29,13 @@ def test_compose_contract_prefixes_container_names() -> None:
     assert "jenkins/jenkins:" in text
     assert "gitea/gitea:" in text
     assert "sk-" not in text
+    published = [
+        "127.0.0.1:5432:5432",
+        "127.0.0.1:8000:8000",
+        "127.0.0.1:8080:80",
+        "127.0.0.1:18080:8080",
+        "127.0.0.1:13000:3000",
+    ]
+    for item in published:
+        assert item in text
+    assert re.findall(r'^\s+-\s+"(\d+:\d+)"\s*$', text, re.MULTILINE) == []

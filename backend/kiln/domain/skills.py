@@ -108,5 +108,5 @@ class Skill(BaseModel):
 
 
 class SkillList(BaseModel):
-    persistence: Literal["memory"] = "memory"
+    persistence: Literal["postgres"] = "postgres"
     items: list[Skill]

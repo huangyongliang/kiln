@@ -8,6 +8,11 @@ class AppError(Exception):
         super().__init__(detail)
 
 
+class Unauthorized(AppError):
+    def __init__(self) -> None:
+        super().__init__(401, "需要访问令牌")
+
+
 class NotFound(AppError):
     def __init__(self, detail: str) -> None:
         super().__init__(404, detail)

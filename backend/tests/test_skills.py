@@ -38,7 +38,7 @@ def test_draft_review_and_publish(client: TestClient) -> None:
     ]
 
     listed = client.get("/api/v1/skills")
-    assert listed.json()["persistence"] == "memory"
+    assert listed.json()["persistence"] == "postgres"
     assert listed.json()["items"][0]["id"] == draft["id"]
 
     early = client.post(f"/api/v1/skills/{draft['id']}/publish")

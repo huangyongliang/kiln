@@ -1,8 +1,22 @@
+import sys
+from collections.abc import Iterator
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
-from kiln.config import Settings, get_settings
-from kiln.main import create_app
+_BACKEND = Path(__file__).resolve().parents[1]
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+
+from kiln.config import get_settings  # noqa: E402
+from kiln.main import create_app  # noqa: E402
+from tests.support import (  # noqa: E402
+    app_settings,
+    auth_headers,
+    require_database,
+    truncate_domain,
+)
 
 ENV_KEYS = (
     "KILN_ENV",
@@ -15,7 +29,13 @@ ENV_KEYS = (
     "LLM_API_KEY",
     "LLM_MODEL",
     "LLM_TIMEOUT_SECONDS",
+    "KILN_API_TOKEN",
 )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def postgres_required() -> None:
+    require_database()
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +48,8 @@ def isolated_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def client() -> TestClient:
-    app = create_app(Settings(llm_provider="off", _env_file=None))
-    with TestClient(app) as test_client:
+def client() -> Iterator[TestClient]:
+    app = create_app(app_settings(llm_provider="off"))
+    with TestClient(app, headers=auth_headers()) as test_client:
+        truncate_domain(app.state.engine)
         yield test_client

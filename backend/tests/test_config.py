@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from kiln.config import Settings
+from kiln.config import LOCAL_API_TOKEN, Settings
 
 
 def test_defaults_leave_the_model_off() -> None:
@@ -9,6 +9,7 @@ def test_defaults_leave_the_model_off() -> None:
     assert settings.llm_provider == "off"
     assert settings.llm_api_key_value() == ""
     assert settings.database_url.startswith("postgresql://")
+    assert settings.api_token_value() == LOCAL_API_TOKEN
 
 
 def test_generic_port_variables_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -27,6 +28,11 @@ def test_explicit_provider_wins_over_environment(monkeypatch: pytest.MonkeyPatch
 def test_none_alias_is_off() -> None:
     settings = Settings(llm_provider="none", _env_file=None)
     assert settings.llm_provider == "off"
+
+
+def test_blank_api_token_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        Settings(kiln_api_token="  ", _env_file=None)
 
 
 def test_openai_requires_base_url() -> None:

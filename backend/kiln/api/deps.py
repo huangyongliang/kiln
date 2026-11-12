@@ -3,15 +3,15 @@
 from fastapi import Request
 
 from kiln.config import Settings
+from kiln.db.store import PostgresStore
 from kiln.llm.provider import LLMProvider
-from kiln.memory import MemoryStore
 
 
 def get_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
-def get_store(request: Request) -> MemoryStore:
+def get_store(request: Request) -> PostgresStore:
     return request.app.state.store
 
 

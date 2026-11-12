@@ -90,7 +90,7 @@ class Artifact(BaseModel):
 
 
 class ArtifactList(BaseModel):
-    persistence: Literal["memory"] = "memory"
+    persistence: Literal["postgres"] = "postgres"
     items: list[Artifact]
 
 

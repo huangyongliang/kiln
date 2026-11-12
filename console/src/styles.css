@@ -56,6 +56,36 @@ body {
   color: #ffffff;
 }
 
+.token-form {
+  margin-top: 28px;
+}
+
+.token-form label {
+  color: #e7edf2;
+  font-size: 13px;
+}
+
+.token-form input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #3c4c5d;
+  border-radius: 6px;
+  background: #1b2632;
+  color: #f7f8fa;
+  font: inherit;
+}
+
+.token-form button {
+  width: 100%;
+}
+
+.token-note {
+  margin: 8px 0 0;
+  color: #c5ced6;
+  font-size: 12px;
+  font-weight: 400;
+}
+
 .workspace {
   display: flex;
   flex-direction: column;

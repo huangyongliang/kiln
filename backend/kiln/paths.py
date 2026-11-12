@@ -1,4 +1,4 @@
-"""Stable HTTP paths shared by routers and in-memory records."""
+"""Stable HTTP paths shared by routers and stored records."""
 
 from uuid import UUID
 
