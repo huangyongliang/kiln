@@ -1,8 +1,8 @@
 """Product build HTTP API.
 
-Creating a build, reading it, and reading its log require a user session or
-the machine token. The build stores artifact bytes on the platform. It does
-not deploy them.
+Reading a build and its log requires a user session or the machine token.
+Creating a build also requires `executor.run`. The build stores artifact
+bytes on the platform. It does not deploy them.
 """
 
 from uuid import UUID
@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 
 from kiln.api.deps import get_build_store, get_git_source, get_jenkins, get_settings, get_store
-from kiln.auth import require_auth
+from kiln.auth import require_auth, require_permission
 from kiln.config import Settings
 from kiln.db.builds import BuildStore
 from kiln.db.store import PostgresStore
@@ -39,7 +39,13 @@ def get_builds(
     return ProductBuildList(items=[publish(builds, item) for item in items])
 
 
-@router.post("/builds", response_model=ProductBuild, status_code=201, summary="从代码仓库构建制品")
+@router.post(
+    "/builds",
+    response_model=ProductBuild,
+    status_code=201,
+    summary="从代码仓库构建制品",
+    dependencies=[Depends(require_permission("executor.run"))],
+)
 def post_build(
     payload: ProductBuildCreate,
     builds: BuildStore = Depends(get_build_store),

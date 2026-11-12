@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends
 
 from kiln.api.deps import get_llm, get_settings
-from kiln.auth import require_auth
+from kiln.auth import require_auth, require_permission
 from kiln.config import Settings
 from kiln.llm.provider import (
     ChatCompletion,
@@ -25,6 +25,11 @@ def read_provider(settings: Settings = Depends(get_settings)) -> ProviderStatus:
     return provider_status(settings)
 
 
-@router.post("/chat", response_model=ChatCompletion, summary="对话补全")
+@router.post(
+    "/chat",
+    response_model=ChatCompletion,
+    summary="对话补全",
+    dependencies=[Depends(require_permission("agent.qa"))],
+)
 def chat(payload: ChatRequest, provider: LLMProvider = Depends(get_llm)) -> ChatCompletion:
     return provider.complete(payload)
