@@ -9,6 +9,10 @@ provider name. Callers supply the base URL.
 
 Optional OIDC settings start 用户信息同步. Empty values leave local password
 login in place. The company user system is not given a default address.
+
+Optional Nexus settings are a read-only dependency proxy. Empty values leave
+product builds unchanged. Artifact bytes stay in KILN_ARTIFACT_ROOT and are
+never published to Nexus.
 """
 
 import re
@@ -42,9 +46,17 @@ class Settings(BaseSettings):
     OIDC settings are optional and empty by default. When any required OIDC
     value is set, all of them must be set. They configure 用户信息同步 only.
     Kiln accounts and kiln permissions stay on the platform.
+
+    Nexus settings are optional and empty by default. ``KILN_NEXUS_URL`` and
+    ``KILN_NEXUS_REPOSITORY`` are set together. Credentials are optional and
+    are also set together. The password is never written into a job config.
     """
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
 
     kiln_env: str = "local"
     kiln_http_host: str = "0.0.0.0"
@@ -75,6 +87,16 @@ class Settings(BaseSettings):
     git_clone_base_url: str = ""
     git_token: SecretStr = SecretStr("")
     git_timeout_seconds: float = Field(default=30, gt=0, le=120)
+
+    # Optional read-only dependency proxy. Both empty means off. Not a place
+    # artifact bytes are published.
+    kiln_nexus_url: str = ""
+    kiln_nexus_repository: str = ""
+    # Optional URL Jenkins uses. Empty means KILN_NEXUS_URL.
+    kiln_nexus_build_url: str = ""
+    kiln_nexus_username: str = ""
+    kiln_nexus_password: SecretStr = SecretStr("")
+    kiln_nexus_timeout_seconds: float = Field(default=10, gt=0, le=60)
 
     # Platform-owned local directory. Not a Nexus URL.
     kiln_artifact_root: str = "var/kiln-artifacts"
@@ -123,6 +145,8 @@ class Settings(BaseSettings):
         "jenkins_url",
         "git_base_url",
         "git_clone_base_url",
+        "kiln_nexus_url",
+        "kiln_nexus_build_url",
         "kiln_oidc_issuer_url",
         "kiln_oidc_redirect_uri",
         mode="before",
@@ -150,6 +174,33 @@ class Settings(BaseSettings):
             value = value.get_secret_value()
         if isinstance(value, str):
             return value.strip()
+        return value
+
+    @field_validator("kiln_nexus_repository")
+    @classmethod
+    def strip_nexus_repository(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("kiln_nexus_username")
+    @classmethod
+    def strip_nexus_username(cls, value: str) -> str:
+        text = value.strip()
+        if "\r" in text or "\n" in text:
+            raise ValueError("KILN_NEXUS_USERNAME 不能包含换行")
+        return text
+
+    @field_validator("kiln_nexus_password", mode="before")
+    @classmethod
+    def nexus_password(cls, value: object) -> object:
+        if isinstance(value, SecretStr):
+            value = value.get_secret_value()
+        if isinstance(value, str):
+            text = value.strip()
+            if "\r" in text or "\n" in text:
+                raise ValueError("KILN_NEXUS_PASSWORD 不能包含换行")
+            if len(text) > 256:
+                raise ValueError("KILN_NEXUS_PASSWORD 长度不能超过 256")
+            return text
         return value
 
     @field_validator("kiln_artifact_root")
@@ -214,6 +265,28 @@ class Settings(BaseSettings):
             raise ValueError("KILN_OIDC_EMPLOYMENT_ACTIVE_VALUES 不能为空")
         return self
 
+    @model_validator(mode="after")
+    def nexus_settings_are_complete(self) -> "Settings":
+        url = self.kiln_nexus_url
+        repository = self.kiln_nexus_repository
+        username = self.kiln_nexus_username
+        password = self.nexus_password_value()
+        build_url = self.kiln_nexus_build_url
+        if bool(url) != bool(repository):
+            raise ValueError("配置依赖代理时必须同时设置 KILN_NEXUS_URL 和 KILN_NEXUS_REPOSITORY")
+        if bool(username) != bool(password):
+            raise ValueError(
+                "配置依赖代理认证时必须同时设置 KILN_NEXUS_USERNAME 和 KILN_NEXUS_PASSWORD"
+            )
+        if not url and (build_url or username or password):
+            raise ValueError(
+                "未设置 KILN_NEXUS_URL 时不能设置 KILN_NEXUS_BUILD_URL、"
+                "KILN_NEXUS_USERNAME 或 KILN_NEXUS_PASSWORD"
+            )
+        if repository and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", repository) is None:
+            raise ValueError("KILN_NEXUS_REPOSITORY 格式不正确")
+        return self
+
     def cors_origins(self) -> list[str]:
         return [item.strip() for item in self.kiln_cors_origins.split(",") if item.strip()]
 
@@ -231,6 +304,9 @@ class Settings(BaseSettings):
 
     def oidc_client_secret_value(self) -> str:
         return self.kiln_oidc_client_secret.get_secret_value()
+
+    def nexus_password_value(self) -> str:
+        return self.kiln_nexus_password.get_secret_value()
 
     def oidc_employment_active_values(self) -> frozenset[str]:
         return frozenset(
@@ -259,6 +335,15 @@ class Settings(BaseSettings):
         """Base URL Jenkins uses to clone. Falls back to the API's git URL."""
 
         return self.git_clone_base_url or self.git_base_url
+
+    def nexus_build_base(self) -> str:
+        """Base URL Jenkins uses for the dependency proxy. Falls back to the API URL."""
+
+        return self.kiln_nexus_build_url or self.kiln_nexus_url
+
+    @property
+    def nexus_configured(self) -> bool:
+        return bool(self.kiln_nexus_url and self.kiln_nexus_repository)
 
     @property
     def executor_configured(self) -> bool:

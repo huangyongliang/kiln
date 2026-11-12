@@ -39,6 +39,7 @@ _GATED_GETS = (
     "/api/v1/skills",
     f"/api/v1/skills/{_MISSING}",
     "/api/v1/executor",
+    "/api/v1/dependency-proxy",
     "/api/v1/jobs",
     f"/api/v1/jobs/{_MISSING}",
     f"/api/v1/jobs/{_MISSING}/log",
@@ -51,6 +52,7 @@ _GATED_GETS = (
 )
 _EXECUTOR_GETS = (
     "/api/v1/executor",
+    "/api/v1/dependency-proxy",
     "/api/v1/jobs",
     f"/api/v1/jobs/{_MISSING}",
     f"/api/v1/jobs/{_MISSING}/log",
@@ -270,6 +272,12 @@ def test_privileged_reads_are_503_until_configured_then_200(
         assert executor.status_code == 200, role_id
         assert executor.json()["configured"] is False
         assert executor.json()["deploys_to_runtime"] is False
+        proxy = session.get("/api/v1/dependency-proxy")
+        assert proxy.status_code == 200, role_id
+        assert proxy.json()["configured"] is False
+        assert proxy.json()["kind"] == "off"
+        assert proxy.json()["reachable"] is None
+        assert proxy.json()["publishes_artifacts"] is False
         source = session.get("/api/v1/git/source")
         assert source.status_code == 200, role_id
         assert source.json()["configured"] is False
@@ -309,6 +317,7 @@ def test_privileged_reads_are_503_until_configured_then_200(
         job_id, build_id = _store_finished_rows(app, UUID(artifact.json()["id"]))
         reads = (
             "/api/v1/executor",
+            "/api/v1/dependency-proxy",
             "/api/v1/jobs",
             f"/api/v1/jobs/{job_id}",
             f"/api/v1/jobs/{job_id}/log",

@@ -84,6 +84,11 @@ GIT_SOURCE_UNCONFIGURED_DETAIL = (
     "代码源未配置。请将 GIT_PROVIDER 设为 gitea（实验室）或 gitlab（生产代码源），"
     "并设置 GIT_BASE_URL 与 GIT_TOKEN。"
 )
+# GET /dependency-proxy returns this with configured false. No route requires Nexus.
+NEXUS_UNCONFIGURED_DETAIL = (
+    "依赖代理未配置。可选设置 KILN_NEXUS_URL 与 KILN_NEXUS_REPOSITORY。"
+    "制品不会发布到 Nexus。"
+)
 
 
 class NotConfigured(AppError):

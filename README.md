@@ -31,7 +31,8 @@
 | kiln API 与控制台 | 现在需要 | 本地构建 `kiln-api:local`（`python:3.11-slim`）和 `kiln-console:local`（构建阶段 `node:22-alpine`，运行阶段 `nginx:1.27-alpine`）。没有现成的远程应用镜像 |
 | Jenkins 兼容执行器与产品构建 | 现在可以接线 | 配置 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN` 后，API 能创建兼容任务并跟踪日志，也能从代码仓库检出提交、在 Jenkins 上运行该提交里的 `kiln-build.sh`，把产出的字节写入 `KILN_ARTIFACT_ROOT`。不把制品部署到运行环境。仓库 compose 的 profile `lab` 仍是占位，不是共享实验机上已经在跑的 Jenkins |
 | Git 远端 | 可替换适配器 | `GIT_PROVIDER=gitea` 是实验室实现，对着配置的 `GIT_BASE_URL` 调用 Gitea HTTP API。`GIT_PROVIDER=gitlab` 是生产代码源，调用 GitLab HTTP API。仓库不写生产 GitLab 地址。compose 里的 `gitea/gitea:1.22` 仍是未作为生产源的占位 |
-| 制品目录 | 目录、版本和字节由平台保存 | 元数据在 PostgreSQL。字节在平台自管的本地目录 `KILN_ARTIFACT_ROOT`（compose 命名卷 `kiln-artifact-data`）。版本保存字节后 `content_available` 为 true，`GET /api/v1/retrieve/{reservation_id}/content` 返回这些字节。Nexus 集成仍属于一期，这一版没有 Nexus 地址或客户端 |
+| 制品目录 | 目录、版本和字节由平台保存 | 元数据在 PostgreSQL。字节在平台自管的本地目录 `KILN_ARTIFACT_ROOT`（compose 命名卷 `kiln-artifact-data`）。版本保存字节后 `content_available` 为 true，`GET /api/v1/retrieve/{reservation_id}/content` 返回这些字节。制品不发布到 Nexus |
+| 可选依赖代理对接，默认关闭；制品不发布到 Nexus | 现在可以接线 | 配置 `KILN_NEXUS_URL` 与 `KILN_NEXUS_REPOSITORY` 后，`GET /api/v1/dependency-proxy` 只读探测连通性，产品构建把地址经 Jenkins 参数传给 `kiln-build.sh`。未设置时，任务配置和 `POST /job/<name>/build` 与现在相同，并且不向外连接。仓库 compose 不启动 Nexus |
 | OpenAI 兼容模型端点 | 可选 | `LLM_PROVIDER` 默认 `off`。设为 `openai` 时必须提供 `LLM_BASE_URL` |
 | 本地登录与用户信息同步 | 这一版已接上起步 | 平台自身具备完整的账号与权限能力。本地账号、口令哈希、会话和 RBAC 目录在 Postgres。控制台有登录页。未配置公司用户系统时使用本地口令登录。`KILN_API_TOKEN` 仍是必填的机器和开发访问令牌，拥有目录中的全部权限。公司用户系统的对接是可选的。可选对接之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上 |
 | Harbor、Kubernetes、专用镜像仓库 | 不属于一期 | 仓库中没有对应清单或配置项。架构方案把镜像构建放在后面 |
@@ -115,6 +116,12 @@ docker compose --profile lab up
 | `GIT_CLONE_BASE_URL` | 空 | Jenkins 用来克隆的代码源根地址。留空则使用 `GIT_BASE_URL`。API 和 Jenkins 不在同一网络视角时才需要，例如容器网络里的地址。不能带用户名或口令，也不是生产地址 |
 | `GIT_TOKEN` | 空 | 代码源访问令牌。`gitea` 或 `gitlab` 时必填。只从环境读取 |
 | `GIT_TIMEOUT_SECONDS` | `30` | 单次代码源 HTTP 调用超时，最大 120 |
+| `KILN_NEXUS_URL` | 空 | 可选依赖代理根地址。与 `KILN_NEXUS_REPOSITORY` 一起设置。空则不连接。不能在地址里带用户名或口令 |
+| `KILN_NEXUS_REPOSITORY` | 空 | 依赖代理的仓库名，通常是 group。与 URL 一起设置 |
+| `KILN_NEXUS_BUILD_URL` | 空 | Jenkins 看到的依赖代理根地址。留空则使用 `KILN_NEXUS_URL` |
+| `KILN_NEXUS_USERNAME` | 空 | 可选。与口令一起设置。留空表示匿名读取 |
+| `KILN_NEXUS_PASSWORD` | 空 | 可选口令。只从环境读取，不写入仓库、数据库或任务 `config.xml` |
+| `KILN_NEXUS_TIMEOUT_SECONDS` | `10` | 单次依赖代理 HTTP 调用超时，最大 60 |
 | `KILN_ARTIFACT_ROOT` | `var/kiln-artifacts` | 平台自管制品字节的本地目录。相对路径按进程工作目录解析。不是 Nexus 地址 |
 | `KILN_ARTIFACT_MAX_BYTES` | `67108864` | 单次保存的字节上限 |
 | `KILN_OIDC_ISSUER_URL` | 空 | 用户信息同步的发行方地址。留空则只使用本地口令。不要把公司用户系统的地址写进仓库 |
@@ -133,7 +140,7 @@ docker compose --profile lab up
 
 ## API 大纲
 
-前缀 `/api/v1`。账号、RBAC 目录、制品、版本、下载预约、skill 和用户会话保存在 PostgreSQL，API 进程重启后仍然在。登录、退出、用户信息同步的开始与回调，以及「是否已配置」探测不需要事先持有令牌。其余路由接受会话 cookie、登录返回的 Bearer 令牌，或机器令牌 `KILN_API_TOKEN`。没有这些凭证时返回 401，不会改库。`/health` 和 `/docs` 不需要令牌；说明页本身不能绕过这道门去写入。已登录用户的写入会按现有权限目录校验。`POST /jobs` 和 `POST /builds` 需要 `executor.run`，`POST /llm/chat` 需要 `agent.qa`。只读角色不能调用这三处写入。读取账号、制品和 skill 分别需要 `account.read`、`artifact.read` 和 `skill.read`。读取执行器状态、任务、产品构建及其日志需要 `executor.read`。读取代码源适配器、仓库列表并解析引用需要 `git.read`。只读角色可以查看账号、skill 与制品，不能查看任务、构建或代码源清单。`GET /llm/provider`、`GET /rbac/roles`、`GET /rbac/permissions` 和取包元数据仍只需会话或机器令牌。取包字节需要 `artifact.download`。权限不足时返回 403，正文是「没有权限」，并且先于未配置检查。机器令牌拥有目录中的全部权限。
+前缀 `/api/v1`。账号、RBAC 目录、制品、版本、下载预约、skill 和用户会话保存在 PostgreSQL，API 进程重启后仍然在。登录、退出、用户信息同步的开始与回调，以及「是否已配置」探测不需要事先持有令牌。其余路由接受会话 cookie、登录返回的 Bearer 令牌，或机器令牌 `KILN_API_TOKEN`。没有这些凭证时返回 401，不会改库。`/health` 和 `/docs` 不需要令牌；说明页本身不能绕过这道门去写入。已登录用户的写入会按现有权限目录校验。`POST /jobs` 和 `POST /builds` 需要 `executor.run`，`POST /llm/chat` 需要 `agent.qa`。只读角色不能调用这三处写入。读取账号、制品和 skill 分别需要 `account.read`、`artifact.read` 和 `skill.read`。读取执行器状态、依赖代理、任务、产品构建及其日志需要 `executor.read`。读取代码源适配器、仓库列表并解析引用需要 `git.read`。只读角色可以查看账号、skill 与制品，不能查看任务、构建或代码源清单。`GET /llm/provider`、`GET /rbac/roles`、`GET /rbac/permissions` 和取包元数据仍只需会话或机器令牌。取包字节需要 `artifact.download`。权限不足时返回 403，正文是「没有权限」，并且先于未配置检查。机器令牌拥有目录中的全部权限。
 
 - 登录：`POST /auth/login` 校验本地口令，写入会话哈希，设置 httpOnly cookie，并返回 Bearer 令牌。`POST /auth/logout` 撤销会话。口令只以哈希保存，响应里不出现口令
 - 用户信息同步：`GET /auth/sync` 说明是否已配置。未配置时 `GET /auth/oidc/start` 与 `GET /auth/oidc/callback` 返回「用户信息同步未配置」。配置后使用授权码和 PKCE，按发行方与 subject 找到或创建 kiln 账号。新账号的默认角色是 `reader`，不设置口令，也不复制公司侧的组或角色。在职状态未通过或账号已停用时不建立会话
@@ -147,6 +154,7 @@ docker compose --profile lab up
 - 模型：`GET /llm/provider` 仍只需会话或机器令牌，`POST /llm/chat`。对话写入需要 `agent.qa`。只读角色不能调用。对话可在授权下通过工具起草 skill 草稿，或发起与 POST /builds 相同的产品构建。
 - 执行器：`GET /executor`，`POST /jobs`（需要 `executor.run`），`GET /jobs`，`GET /jobs/{id}`，`GET /jobs/{id}/log`。任务记录在 PostgreSQL。状态和日志来自 Jenkins。响应里 `deploys_to_runtime` 为 false。兼容任务只打印调用方给出的标记。读取执行器状态、任务和日志需要 `executor.read`。只读角色没有这项权限
 - 产品构建：`POST /builds`（需要 `executor.run`），`GET /builds`，`GET /builds/{id}`，`GET /builds/{id}/log`。请求体给出 `repository`、`ref`、`artifact_name`、`version`、`package_type`。kiln 用当前代码源适配器解析提交，Jenkins 克隆该提交并运行仓库根目录的 `kiln-build.sh`。脚本必须写出 `kiln-dist/artifact.bin`。构建成功后，这些字节写入 `KILN_ARTIFACT_ROOT`，对应版本的 `content_available` 为 true，`source` 为 `build`。取包接口返回同一组字节。响应里 `deploys_to_runtime` 为 false。读取构建和日志需要 `executor.read`
+- 依赖代理：`GET /dependency-proxy` 需要 `executor.read`。未配置时 `configured` 为 false，`publishes_artifacts` 为 false，并且不向外连接。配置后探测是否可达；失败仍返回 200，`reachable` 为 false。响应不包含口令。制品不发布到 Nexus
 - 代码源：`GET /git/source`，`GET /git/repositories`，`GET /git/commits?repository=owner/name&ref=main`。这三处需要 `git.read`
 
 Skill 步骤不会被执行。kiln 进程本身不运行 shell。产品构建的 shell 跑在 Jenkins 上。
@@ -178,15 +186,15 @@ python -m pytest backend
 cd console && npm run build
 ```
 
-GitHub Actions 会跑后端测试、控制台构建，以及 `docker compose config`。
+依赖代理对接测试在 `backend/tests/test_nexus_docking.py`。未设置 `KILN_TEST_NEXUS_URL` 时会跳过。`KILN_REQUIRE_NEXUS_TESTS=1` 时缺少配置会失败，并且不理会 `KILN_SKIP_EXTERNAL_TESTS`。
+
+GitHub Actions 会跑后端测试、控制台构建、`docker compose config`，以及单独的 `nexus-docking` 作业。该作业在 `127.0.0.1:28081` 启动一次性容器 `kiln-ci-depproxy`，不进入 compose。
 
 本地登录，以及用户信息同步的起步已经接上：控制台有登录页，口令只保存哈希，会话写在 Postgres。未配置公司用户系统时使用本地口令。配置之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。`KILN_API_TOKEN` 仍是必填的机器和开发访问令牌。
 
 ## 这一版还没有，但仍属于一期
 
-骨架如何在一台机器上启动，见 [部署说明](docs/DEPLOY.md)。制品目录、版本、权限目录和取包接口由平台持有。版本字节保存在平台本地目录里，取包会返回这些字节。下面这些按架构方案仍是一期要完成的事，但不是这一版：
-
-- Nexus 集成
+骨架如何在一台机器上启动，见 [部署说明](docs/DEPLOY.md)。制品目录、版本、权限目录和取包接口由平台持有。版本字节保存在平台本地目录里，取包会返回这些字节。
 
 没有令牌或会话时不能改领域数据，也不能读取这些接口，也不能保存或下载制品字节。平台自身具备完整的账号与权限能力。
 

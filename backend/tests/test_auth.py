@@ -89,6 +89,7 @@ def test_anonymous_requests_do_not_change_durable_rows(client: TestClient) -> No
             "/api/v1/auth/me",
             "/api/v1/llm/provider",
             "/api/v1/executor",
+            "/api/v1/dependency-proxy",
             "/api/v1/jobs",
             "/api/v1/jobs/00000000-0000-0000-0000-000000000001",
             "/api/v1/jobs/00000000-0000-0000-0000-000000000001/log",

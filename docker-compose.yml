@@ -3,7 +3,7 @@
 # 也不是共享实验机上已经在跑的那套。执行器和代码源地址来自环境变量。
 # 容器名使用 kiln- 前缀。发布端口只绑在 127.0.0.1。容器内 API 仍监听 0.0.0.0。
 # 这里的数据库口令和 KILN_API_TOKEN 默认值 kiln-local 只用于本地，不是生产密钥。
-# 不要在这个文件里填写 Jenkins 或 Git 令牌。
+# 不要在这个文件里填写 Jenkins、Git 或依赖代理口令。
 
 name: kiln
 
@@ -51,6 +51,13 @@ services:
       GIT_CLONE_BASE_URL: ${GIT_CLONE_BASE_URL:-}
       GIT_TOKEN: ${GIT_TOKEN:-}
       GIT_TIMEOUT_SECONDS: ${GIT_TIMEOUT_SECONDS:-30}
+      # 可选依赖代理。留空则不连接。不要把口令写进这个文件。制品不发布到 Nexus。
+      KILN_NEXUS_URL: ${KILN_NEXUS_URL:-}
+      KILN_NEXUS_REPOSITORY: ${KILN_NEXUS_REPOSITORY:-}
+      KILN_NEXUS_BUILD_URL: ${KILN_NEXUS_BUILD_URL:-}
+      KILN_NEXUS_USERNAME: ${KILN_NEXUS_USERNAME:-}
+      KILN_NEXUS_PASSWORD: ${KILN_NEXUS_PASSWORD:-}
+      KILN_NEXUS_TIMEOUT_SECONDS: ${KILN_NEXUS_TIMEOUT_SECONDS:-10}
       # 平台自管制品字节。这不是 Nexus，也不发布新的宿主机端口。
       KILN_ARTIFACT_ROOT: /var/lib/kiln/artifacts
       KILN_ARTIFACT_MAX_BYTES: ${KILN_ARTIFACT_MAX_BYTES:-67108864}

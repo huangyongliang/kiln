@@ -14,7 +14,8 @@
 | 控制台 | 现在需要 | 服务 `console`，本地镜像 `kiln-console:local`，容器 `kiln-console`。构建阶段 `node:22-alpine`，运行阶段 `nginx:1.27-alpine`，容器内 `80` 映射到宿主机 `8080` |
 | Jenkins 兼容执行器与产品构建 | 按环境变量接线 | API 在 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN` 都有值时，向该 Jenkins 创建兼容任务并读取状态和日志。再配上代码源后，产品构建会检出仓库、运行 `kiln-build.sh`，并把 `kiln-dist/artifact.bin` 写入平台目录。不部署到运行环境。profile `lab` 的 `jenkins/jenkins:lts-jdk17`、容器 `kiln-jenkins`、卷 `kiln-jenkins-home`、端口 `127.0.0.1:18080` 仍是本仓库里的占位，不是共享实验机上的实例 |
 | Git 远端 | 可替换适配器 | `GIT_PROVIDER=gitlab` 是生产代码源，`GIT_PROVIDER=gitea` 是实验室实现。地址只来自 `GIT_BASE_URL`，令牌只来自 `GIT_TOKEN`。仓库不写生产 GitLab 地址。profile `lab` 的 `gitea/gitea:1.22`（容器 `kiln-gitea`）仍是占位，不是生产代码源 |
-| 制品存储 | 目录在 PostgreSQL，字节在平台本地目录 | 制品、版本和下载预约写在 Postgres。字节写在 `KILN_ARTIFACT_ROOT`。compose 把它挂到命名卷 `kiln-artifact-data`，容器内路径是 `/var/lib/kiln/artifacts`。版本保存字节后 `content_available` 为 true，`GET /api/v1/retrieve/{reservation_id}/content` 返回这些字节。包类型字段有 `maven`、`python`、`generic`、`frontend`。Nexus 集成还没有写入配置，仓库里没有 Nexus 地址 |
+| 制品存储 | 目录在 PostgreSQL，字节在平台本地目录 | 制品、版本和下载预约写在 Postgres。字节写在 `KILN_ARTIFACT_ROOT`。compose 把它挂到命名卷 `kiln-artifact-data`，容器内路径是 `/var/lib/kiln/artifacts`。版本保存字节后 `content_available` 为 true，`GET /api/v1/retrieve/{reservation_id}/content` 返回这些字节。包类型字段有 `maven`、`python`、`generic`、`frontend`。制品不发布到 Nexus |
+| 可选依赖代理对接，默认关闭；制品不发布到 Nexus | 现在可以接线 | 默认关闭。设置 `KILN_NEXUS_URL` 与 `KILN_NEXUS_REPOSITORY` 后，产品构建可通过该代理解析依赖。`GET /api/v1/dependency-proxy` 需要 `executor.read`。未配置时不向外连接。制品不发布到 Nexus，字节仍在 `KILN_ARTIFACT_ROOT`。compose 只透传环境变量，不增加 Nexus 服务 |
 | OpenAI 兼容模型端点 | 可选 | `LLM_PROVIDER` 默认 `off`。`openai` 会 `POST {LLM_BASE_URL}/chat/completions`。`mock` 不访问网络 |
 | 本地登录与用户信息同步 | 这一版已接上起步 | 平台自身具备完整的账号与权限能力。本地账号、口令哈希、会话和 RBAC 目录在 Postgres 中。控制台有登录页。未配置公司用户系统时使用本地口令登录。`KILN_API_TOKEN` 仍是必填的机器和开发访问令牌，拥有目录中的全部权限。公司用户系统的对接是可选的。可选对接之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上 |
 | Harbor、Kubernetes、专用镜像仓库 | 不属于一期 | 没有清单、没有镜像推送。架构方案把镜像构建放在一期之后 |
@@ -104,6 +105,12 @@ cp .env.example .env
 | `GIT_CLONE_BASE_URL` | 空 | Jenkins 用来克隆的代码源根地址。留空则使用 `GIT_BASE_URL`。compose 原样传入。不能带用户名或口令，也没有生产默认值 |
 | `GIT_TOKEN` | 空 | `gitea` 或 `gitlab` 时必填。只从环境读取 |
 | `GIT_TIMEOUT_SECONDS` | `30` | 单次调用超时，大于 0 且不超过 120 |
+| `KILN_NEXUS_URL` | 空 | 可选依赖代理根地址。与 `KILN_NEXUS_REPOSITORY` 一起设置。compose 原样传入。不能带用户名或口令 |
+| `KILN_NEXUS_REPOSITORY` | 空 | 依赖代理仓库名。与 URL 一起设置。compose 原样传入 |
+| `KILN_NEXUS_BUILD_URL` | 空 | Jenkins 看到的依赖代理根地址。留空则使用 `KILN_NEXUS_URL`。compose 原样传入 |
+| `KILN_NEXUS_USERNAME` | 空 | 可选。与口令一起设置。compose 原样传入 |
+| `KILN_NEXUS_PASSWORD` | 空 | 可选口令。只从环境读取，不能提交 |
+| `KILN_NEXUS_TIMEOUT_SECONDS` | `10` | 单次调用超时，大于 0 且不超过 60。compose 未设置时传入 10 |
 | `KILN_ARTIFACT_ROOT` | 进程方式默认 `var/kiln-artifacts`；compose 固定为 `/var/lib/kiln/artifacts` | 平台自管制品字节的本地目录。compose 不读取 `.env` 里的这一行，而是写死容器内路径并挂载命名卷 `kiln-artifact-data` |
 | `KILN_ARTIFACT_MAX_BYTES` | `67108864` | 单次保存的字节上限。compose 在未设置时传入这个值 |
 | `KILN_OIDC_ISSUER_URL` | 空 | 用户信息同步的发行方地址。留空则只使用本地口令。compose 原样传入。不要把公司用户系统的地址写进仓库 |
@@ -118,7 +125,7 @@ cp .env.example .env
 
 已经导出的同名环境变量会覆盖 `.env`。Compose 插值是这样，pydantic-settings 也是这样。
 
-`JENKINS_URL` 和 `GIT_BASE_URL` 由这一版的 API 读取。`GIT_CLONE_BASE_URL` 只在 Jenkins 看到的代码源地址和 API 不同时才填，留空则克隆地址与 `GIT_BASE_URL` 相同。GitLab 仍是生产代码源，Gitea 是实验室适配器，两者都只使用你填入的地址。制品字节由平台写到 `KILN_ARTIFACT_ROOT`，不依赖 Nexus。Nexus 集成仍属于一期，这一版没有 Nexus 客户端，也没有 Nexus 地址。本地登录，以及用户信息同步的起步已经接上。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的。可选对接之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。Harbor、Kubernetes 和专用镜像仓库不属于一期。平台不把制品部署到运行环境。
+`JENKINS_URL` 和 `GIT_BASE_URL` 由这一版的 API 读取。`GIT_CLONE_BASE_URL` 只在 Jenkins 看到的代码源地址和 API 不同时才填，留空则克隆地址与 `GIT_BASE_URL` 相同。GitLab 仍是生产代码源，Gitea 是实验室适配器，两者都只使用你填入的地址。制品字节由平台写到 `KILN_ARTIFACT_ROOT`。可选依赖代理对接，默认关闭；制品不发布到 Nexus。本地登录，以及用户信息同步的起步已经接上。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的。可选对接之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。Harbor、Kubernetes 和专用镜像仓库不属于一期。平台不把制品部署到运行环境。
 
 `LLM_PROVIDER=openai` 且 `LLM_BASE_URL` 为空或只有空白时，进程在加载配置时失败。校验错误中包含 `LLM_PROVIDER=openai 时必须设置 LLM_BASE_URL`。保持示例里的 `off` 即可先把骨架启动。
 
@@ -297,6 +304,28 @@ Compose 把 `LLM_BASE_URL` 原样写进 `kiln-api`。容器里的 `127.0.0.1` �
 
 产品构建的请求体是 `{"repository":"owner/name","ref":"main","artifact_name":"sample-pkg","version":"1.0.0","package_type":"generic"}`。仓库根目录要有 `kiln-build.sh`，成功时写出 `kiln-dist/artifact.bin`。kiln 先用当前适配器把 `ref` 解析成提交，再让 Jenkins 克隆该提交并运行脚本。`GIT_CLONE_BASE_URL` 留空时，克隆根地址就是 `GIT_BASE_URL`。构建成功后，`GET /api/v1/builds/{id}` 里 `content_available` 为 true，字节在 `KILN_ARTIFACT_ROOT`。预约之后，`GET /api/v1/retrieve/{reservation_id}/content` 返回同一组字节。响应里 `deploys_to_runtime` 为 false。令牌只放在环境里，不写入数据库，也不出现在返回的日志里。
 
+### 可选依赖代理
+
+默认关闭。`KILN_NEXUS_URL` 与 `KILN_NEXUS_REPOSITORY` 都留空时，产品构建的 `config.xml` 与未配置时相同，触发仍是 `POST /job/<name>/build`，kiln 不会连接依赖代理。两项都设置后，任务增加四个空默认值的 Jenkins 核心参数。构建时 `KILN_NEXUS_URL` 使用 `KILN_NEXUS_BUILD_URL`，留空则用 `KILN_NEXUS_URL`。口令用核心 `PasswordParameterDefinition`，只出现在这次构建的表单正文里，不写入 `config.xml`，不进数据库，也不出现在接口返回的日志里。用户名和口令可以都不填。
+
+`GET /api/v1/dependency-proxy` 需要 `executor.read`。未配置时返回 200，`configured` 为 false，并且不向外发起调用。已配置时去探测；连不上仍返回 200，`reachable` 为 false。`publishes_artifacts` 始终为 false。制品字节仍然只在 `KILN_ARTIFACT_ROOT`。
+
+kiln 不写 `pip.conf`、`.npmrc` 或 `settings.xml`，也不设置 `PIP_INDEX_URL`。仓库里的 `kiln-build.sh` 自己读取 `KILN_NEXUS_URL`、`KILN_NEXUS_REPOSITORY`、`KILN_NEXUS_USERNAME`、`KILN_NEXUS_PASSWORD`。Jenkins 核心不会遮盖口令参数，脚本里不要执行 `set -x`。需要关掉命令回显时用 `set +x`。
+
+```sh
+#!/bin/sh
+set +x
+set -eu
+# 示例由构建脚本配置工具。口令只从环境读取，不要写进仓库，也不要执行 set -x。
+if [ -n "${KILN_NEXUS_URL}" ]; then
+  base="${KILN_NEXUS_URL%/}/repository/${KILN_NEXUS_REPOSITORY}"
+  mkdir -p "${HOME}/.pip"
+  umask 077
+  printf '[global]\nindex-url = %s/simple\n' "$base" > "${HOME}/.pip/pip.conf"
+  printf 'registry=%s/\n' "$base" > "${HOME}/.npmrc"
+fi
+```
+
 解析代码引用是 `GET /api/v1/git/commits?repository=owner/name&ref=main`。`gitea` 走 Gitea 的 `/api/v1/`，`gitlab` 走 GitLab 的 `/api/v4/`。Gitea 1.24 解析单个提交用的是 `/git/commits/{ref}`，响应字段是 `sha`。
 
 ### 共享实验机上已经在跑的实验室
@@ -405,10 +434,6 @@ docker compose logs api
 本地登录，以及用户信息同步的起步已经接上。控制台有登录页，口令只保存哈希。未配置公司用户系统时使用本地口令。配置之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。`KILN_API_TOKEN` 仍是必填的机器和开发访问令牌。
 
 ## 这一版还没有，但仍属于一期
-
-下面这些按架构方案仍是一期要完成的事。这一版没有做它们，本文也不给出虚构的接入步骤。
-
-- **Nexus。** 现网制品库。没有地址、仓库名或同步。平台自己的本地目录已经能保存并取回字节。
 
 产品构建、Jenkins 兼容执行器和可替换的代码源适配器在这一版。产品构建从代码仓库检出提交，在 Jenkins 上运行 `kiln-build.sh`，把字节存进平台目录，取包返回这些字节。生产代码源适配器的类型是 GitLab，实验室实现是 Gitea。两边的地址都只来自环境变量。兼容任务仍然只打印标记。
 

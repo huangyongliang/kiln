@@ -15,6 +15,46 @@ from kiln.git.refs import parse_ref
 # Jenkins archives this workspace-relative file after `kiln-build.sh` runs.
 WORKSPACE_ARTIFACT = "src/kiln-dist/artifact.bin"
 
+# Core Jenkins parameter names. Defaults in config.xml stay empty. The password
+# is sent only on the build request, never written into this file.
+NEXUS_PARAMETER_NAMES = (
+    "KILN_NEXUS_URL",
+    "KILN_NEXUS_REPOSITORY",
+    "KILN_NEXUS_USERNAME",
+    "KILN_NEXUS_PASSWORD",
+)
+
+_NEXUS_PROPERTIES = """  <properties>
+    <hudson.model.ParametersDefinitionProperty>
+      <parameterDefinitions>
+        <hudson.model.StringParameterDefinition>
+          <name>KILN_NEXUS_URL</name>
+          <description></description>
+          <defaultValue></defaultValue>
+          <trim>false</trim>
+        </hudson.model.StringParameterDefinition>
+        <hudson.model.StringParameterDefinition>
+          <name>KILN_NEXUS_REPOSITORY</name>
+          <description></description>
+          <defaultValue></defaultValue>
+          <trim>false</trim>
+        </hudson.model.StringParameterDefinition>
+        <hudson.model.StringParameterDefinition>
+          <name>KILN_NEXUS_USERNAME</name>
+          <description></description>
+          <defaultValue></defaultValue>
+          <trim>false</trim>
+        </hudson.model.StringParameterDefinition>
+        <hudson.model.PasswordParameterDefinition>
+          <name>KILN_NEXUS_PASSWORD</name>
+          <description></description>
+          <defaultValue></defaultValue>
+        </hudson.model.PasswordParameterDefinition>
+      </parameterDefinitions>
+    </hudson.model.ParametersDefinitionProperty>
+  </properties>
+"""
+
 _USER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _TOKEN = re.compile(r"^[A-Za-z0-9._~+/-]{8,256}$")
 _SHA = re.compile(r"^[0-9a-f]{7,64}$")
@@ -110,15 +150,22 @@ def product_build_command(
     )
 
 
-def product_job_config(command: str) -> str:
+def product_job_config(command: str, *, nexus_parameters: bool = False) -> str:
+    """Freestyle job XML. Unset Nexus leaves this byte-identical to the original.
+
+    When ``nexus_parameters`` is true the job declares four core parameters with
+    empty defaults. The password value is not an argument of this function.
+    """
+
     escaped = escape(command)
     archived = escape(WORKSPACE_ARTIFACT)
+    properties = _NEXUS_PROPERTIES if nexus_parameters else "  <properties/>\n"
     return (
         "<?xml version='1.1' encoding='UTF-8'?>\n"
         "<project>\n"
         "  <description>kiln product build</description>\n"
         "  <keepDependencies>false</keepDependencies>\n"
-        "  <properties/>\n"
+        f"{properties}"
         '  <scm class="hudson.scm.NullSCM"/>\n'
         "  <canRoam>true</canRoam>\n"
         "  <disabled>false</disabled>\n"
