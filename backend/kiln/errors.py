@@ -13,6 +13,11 @@ class Unauthorized(AppError):
         super().__init__(401, "需要访问令牌")
 
 
+class BadRequest(AppError):
+    def __init__(self, detail: str) -> None:
+        super().__init__(400, detail)
+
+
 class NotFound(AppError):
     def __init__(self, detail: str) -> None:
         super().__init__(404, detail)
@@ -49,3 +54,13 @@ class ModelUpstreamError(AppError):
 class ModelTimeout(AppError):
     def __init__(self) -> None:
         super().__init__(504, "模型端点超时。")
+
+
+class UpstreamFailure(AppError):
+    def __init__(self, detail: str) -> None:
+        super().__init__(502, detail)
+
+
+class NotConfigured(AppError):
+    def __init__(self, detail: str) -> None:
+        super().__init__(503, detail)

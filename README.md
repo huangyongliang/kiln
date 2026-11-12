@@ -29,8 +29,8 @@
 | Docker Engine 与 Compose V2 | 现在需要（Compose 部署） | `docker-compose.yml`。CI 执行 `docker compose config`。直接跑进程的开发方式不依赖 Docker，但 API 仍然需要 PostgreSQL |
 | PostgreSQL | 现在需要 | 镜像 `postgres:16-alpine`，默认库 `kiln`。配置项为 `DATABASE_URL`、`POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_DB`。API 启动时连接该库并执行迁移。账号、RBAC 目录、制品、版本、下载预约和 skill 都写在这里。没有可连接的数据库时 API 起不来 |
 | kiln API 与控制台 | 现在需要 | 本地构建 `kiln-api:local`（`python:3.11-slim`）和 `kiln-console:local`（构建阶段 `node:22-alpine`，运行阶段 `nginx:1.27-alpine`）。没有现成的远程应用镜像 |
-| Jenkins 兼容执行器 | 一期要做，这一版尚未接线 | 仅 `docker compose --profile lab`。镜像 `jenkins/jenkins:lts-jdk17` 是占位。代码里没有 Jenkins 地址或任务配置 |
-| Git 远端 | 计划。lab 中有未接入的 Gitea | 架构方案把 GitLab 保留为生产代码源。当前代码不读取 Git 远端。compose 里与之相邻的只有 `gitea/gitea:1.22`（sqlite3）占位 |
+| Jenkins 兼容执行器 | 现在可以接线 | 配置 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN` 后，API 能在 Jenkins 上创建任务、跟踪状态并读取日志。不把制品部署到运行环境。仓库 compose 的 profile `lab` 仍是占位，不是共享实验机上已经在跑的 Jenkins |
+| Git 远端 | 可替换适配器 | `GIT_PROVIDER=gitea` 是实验室实现，对着配置的 `GIT_BASE_URL` 调用 Gitea HTTP API。`GIT_PROVIDER=gitlab` 是生产代码源，调用 GitLab HTTP API。仓库不写生产 GitLab 地址。compose 里的 `gitea/gitea:1.22` 仍是未作为生产源的占位 |
 | 制品目录 | 元数据已在 PostgreSQL。Nexus 与制品字节仍是一期要做的事 | 制品、版本、校验和与下载预约写在 Postgres。`GET /api/v1/retrieve/{reservation_id}` 的 `content_available` 为 false。仓库没有 Nexus 地址或客户端 |
 | OpenAI 兼容模型端点 | 可选 | `LLM_PROVIDER` 默认 `off`。设为 `openai` 时必须提供 `LLM_BASE_URL` |
 | 本地登录与身份联邦 | 一期要做，这一版还没有 | 本地账号和 RBAC 目录在 Postgres。`/api/v1` 需要本地令牌 `KILN_API_TOKEN`。没有登录页、口令，也没有外部身份源 |
@@ -83,13 +83,13 @@ docker compose up --build
 
 这个文件供开发机使用。不要在共享实验机上启动，以免占用宿主机端口。容器名都带 `kiln-` 前缀。
 
-Jenkins 和 Gitea 不随默认命令启动，容器名是 `kiln-jenkins` 和 `kiln-gitea`。Gitea 只是 lab 占位，不是生产代码源；生产代码源仍是 GitLab。仓库里还没有 Git 客户端，以后接入时应做成可替换的适配器。Jenkins 容器同样只是占位；兼容执行器仍是一期要做的事，这一版还没有接上：
+不要在共享实验机上启动这个文件。那台机器上已经有 `kiln-postgres`、`kiln-gitea`、`kiln-jenkins`，Jenkins 占用了宿主机 `8080`，和本文件的控制台端口冲突。
+
+Jenkins 和 Gitea 不随默认命令启动。profile `lab` 里的 `kiln-jenkins`、`kiln-gitea` 仍是占位，端口是 `18080` 和 `13000`，而且没有预置令牌。kiln 不靠启动这组占位来工作。执行器和代码源看 `JENKINS_*`、`GIT_*`。Gitea 只是实验室适配器，生产代码源是 GitLab，地址由 `GIT_BASE_URL` 提供，仓库里不写。
 
 ```bash
 docker compose --profile lab up
 ```
-
-占位端口是 Jenkins `18080`、Gitea `13000`。
 
 ## 环境变量
 
@@ -106,8 +106,18 @@ docker compose --profile lab up
 | `LLM_API_KEY` | 空 | 仅从环境读取。无鉴权的本地端点可以留空 |
 | `LLM_MODEL` | 空 | 默认模型。请求里也可以传 `model` |
 | `LLM_TIMEOUT_SECONDS` | `30` | 调用超时 |
+| `JENKINS_URL` | 空 | Jenkins 根地址，例如共享实验机上的 `http://127.0.0.1:8080`。空则不连接。不能在地址里带用户名或口令 |
+| `JENKINS_USER` | 空 | Jenkins 用户。与 URL、令牌一起设置 |
+| `JENKINS_API_TOKEN` | 空 | Jenkins API 令牌或该用户的口令。只从环境读取，不能写入仓库 |
+| `JENKINS_TIMEOUT_SECONDS` | `30` | 单次 Jenkins HTTP 调用超时，最大 120 |
+| `GIT_PROVIDER` | `off` | `gitea`（实验室）、`gitlab`（生产代码源）或 `off`。`none`、`disabled` 和空值视为 `off` |
+| `GIT_BASE_URL` | 空 | 代码源根地址。`gitea` 或 `gitlab` 时必填。仓库不提供生产默认值 |
+| `GIT_TOKEN` | 空 | 代码源访问令牌。`gitea` 或 `gitlab` 时必填。只从环境读取 |
+| `GIT_TIMEOUT_SECONDS` | `30` | 单次代码源 HTTP 调用超时，最大 120 |
 
 `LLM_PROVIDER=openai` 时，聊天请求会 `POST {LLM_BASE_URL}/chat/completions`。模拟模式和关闭模式不会访问网络。
+
+`GIT_PROVIDER=gitea` 时，列表和解析引用走 `{GIT_BASE_URL}/api/v1/`。`GIT_PROVIDER=gitlab` 时走 `{GIT_BASE_URL}/api/v4/`。两种适配器实现同一组 kiln 接口，按配置替换，不把 Gitea 写成生产代码源。
 
 ## API 大纲
 
@@ -120,12 +130,30 @@ docker compose --profile lab up
 - 稳定取包：`GET /retrieve/{reservation_id}`（本期只返回预约契约，`content_available` 为 false）
 - Skill：`POST /skills` 创建草稿，`POST /skills/{id}/submit-review`，`POST /skills/{id}/publish`
 - 模型：`GET /llm/provider`，`POST /llm/chat`
+- 执行器：`GET /executor`，`POST /jobs`，`GET /jobs`，`GET /jobs/{id}`，`GET /jobs/{id}/log`。任务记录在 PostgreSQL。状态和日志来自 Jenkins。响应里 `deploys_to_runtime` 为 false
+- 代码源：`GET /git/source`，`GET /git/repositories`，`GET /git/commits?repository=owner/name&ref=main`
 
-Skill 步骤不会被执行。接口不会运行 shell。
+Skill 步骤不会被执行。kiln 进程本身不运行 shell。Jenkins 上的兼容任务只打印调用方给出的标记，用来核对日志。
 
 ## 测试
 
 后端测试连接真实 PostgreSQL，不使用内存库、SQLite 或假的持久层。默认连接串是 `postgresql://kiln:kiln@127.0.0.1:5432/kiln`，可用环境变量 `KILN_TEST_DATABASE_URL` 覆盖。GitHub Actions 的 backend 作业会启动 `postgres:16`。`backend/tests/test_persistence.py` 里的 `test_records_survive_api_process_restart` 通过 HTTP 写入记录，结束 API 进程，确认库里仍有这些行，再启动一个新进程读回同一条记录。`backend/tests/test_auth.py` 里的 `test_anonymous_requests_do_not_change_durable_rows` 确认未带令牌的客户端得到 401，并且账号与版本行数不变。`backend/tests/test_boundaries.py` 确认 compose 发布端口都带 `127.0.0.1`。
+
+执行器和代码源测试同样不使用假的 Jenkins 或 Gitea。它们读取：
+
+| 变量 | 含义 |
+| --- | --- |
+| `KILN_TEST_JENKINS_URL` | 真实 Jenkins 根地址 |
+| `KILN_TEST_JENKINS_USER` | Jenkins 用户 |
+| `KILN_TEST_JENKINS_API_TOKEN` | Jenkins API 令牌或口令 |
+| `KILN_TEST_GIT_BASE_URL` | 真实 Gitea 根地址 |
+| `KILN_TEST_GIT_TOKEN` | Gitea 访问令牌，需要能创建并读取仓库 |
+| `KILN_TEST_GIT_PROVIDER` | 省略时按 `gitea`。实验室测试要求这个值是 `gitea` |
+| `KILN_SKIP_EXTERNAL_TESTS` | 设为 `1` 才跳过。未设置且上面的地址缺失时，测试失败 |
+
+CI 在作业里启动一次性容器，名字是 `kiln-ci-jenkins`、`kiln-ci-gitea`，卷是 `kiln-ci-jenkins-data`、`kiln-ci-gitea-data`，宿主机端口是 `127.0.0.1:28080` 和 `127.0.0.1:23000`。这些和共享实验机上的 `kiln-jenkins`、`kiln-gitea` 以及 `5432`、`3000`、`2222`、`8080`、`50000` 都不相同。口令在作业里生成，不写入仓库。镜像与共享实验机一致：`jenkins/jenkins:2.580.2-lts-alpine`、`gitea/gitea:1.24.7`。
+
+要让同一批测试指向已经在跑的实验室，把上表的变量设成那台机器上的地址和令牌，不要设置 `KILN_SKIP_EXTERNAL_TESTS`。令牌只放在环境里。
 
 ```bash
 source .venv/bin/activate
@@ -138,14 +166,15 @@ GitHub Actions 会跑后端测试、控制台构建，以及 `docker compose con
 
 ## 这一版还没有，但仍属于一期
 
-骨架如何在一台机器上启动，见 [部署说明](docs/DEPLOY.md)。下面这些还没有写进当前骨架，按架构方案仍是一期要完成的事：
+骨架如何在一台机器上启动，见 [部署说明](docs/DEPLOY.md)。下面这些按架构方案仍是一期要完成的事，但不是这一版：
 
 - Nexus 集成
-- Jenkins 兼容执行器
 - 本地登录，以及身份联邦的起步
 - 制品字节和真正的取包（现在 `content_available` 仍是 false）
 
 `/api/v1` 已经有本地访问令牌。没有令牌不能改领域数据，也不能读取这些接口。这还不是登录，也不是身份联邦。
+
+这一版交付的是 Jenkins 兼容执行器，以及可替换的代码源适配器。实验室适配器是 Gitea，生产代码源是 GitLab。生产 GitLab 的地址不在仓库里。
 
 ## 不属于一期
 
@@ -154,4 +183,4 @@ GitHub Actions 会跑后端测试、控制台构建，以及 `docker compose con
 - 专用镜像仓库
 - 把制品发布到运行环境。平台仍然不把制品部署到运行环境。
 
-GitLab 仍是生产代码源。compose 里的 Gitea 只是 profile `lab` 的占位。仓库里还没有 Git 客户端；以后如果接入，应做成可替换的适配器，而不是把某一个产品写死。任意 shell 执行不在平台能力内。
+完整的端到端产品构建、控制台视觉重做，也不在这一版里。Jenkins 上的兼容任务只打印标记并回传日志，不代替以后的产品构建。

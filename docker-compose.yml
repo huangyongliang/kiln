@@ -1,9 +1,9 @@
-# 本地与后续实验室的 compose 契约。
-# 默认只启动 Postgres、API 和控制台。Jenkins 与 Gitea 是 profile `lab` 下的占位，
-# 不会随 `docker compose up` 启动。容器名使用 kiln- 前缀，避免和共享机器上的实例重名。
-# 这里的数据库口令是本地开发默认值，不是生产密钥。
-# 发布端口只绑在 127.0.0.1。容器内 API 仍监听 0.0.0.0。
-# KILN_API_TOKEN 的默认值 kiln-local 只用于本地，不是生产密钥。
+# 本地开发用的 compose。默认只启动 Postgres、API 和控制台。
+# profile `lab` 里的 Jenkins 与 Gitea 仍是占位，不会随 `docker compose up` 启动，
+# 也不是共享实验机上已经在跑的那套。执行器和代码源地址来自环境变量。
+# 容器名使用 kiln- 前缀。发布端口只绑在 127.0.0.1。容器内 API 仍监听 0.0.0.0。
+# 这里的数据库口令和 KILN_API_TOKEN 默认值 kiln-local 只用于本地，不是生产密钥。
+# 不要在这个文件里填写 Jenkins 或 Git 令牌。
 
 name: kiln
 
@@ -40,6 +40,15 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
+      # 留空表示不连接。不要把令牌写进仓库。gitlab 是生产代码源，gitea 是实验室适配器。
+      JENKINS_URL: ${JENKINS_URL:-}
+      JENKINS_USER: ${JENKINS_USER:-}
+      JENKINS_API_TOKEN: ${JENKINS_API_TOKEN:-}
+      JENKINS_TIMEOUT_SECONDS: ${JENKINS_TIMEOUT_SECONDS:-30}
+      GIT_PROVIDER: ${GIT_PROVIDER:-off}
+      GIT_BASE_URL: ${GIT_BASE_URL:-}
+      GIT_TOKEN: ${GIT_TOKEN:-}
+      GIT_TIMEOUT_SECONDS: ${GIT_TIMEOUT_SECONDS:-30}
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:

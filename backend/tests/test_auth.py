@@ -40,6 +40,7 @@ def test_anonymous_requests_do_not_change_durable_rows(client: TestClient) -> No
     engine = client.app.state.engine
     with engine.connect() as connection:
         before_accounts = connection.execute(text("SELECT count(*) FROM accounts")).scalar_one()
+        before_jobs = connection.execute(text("SELECT count(*) FROM executor_jobs")).scalar_one()
 
     anon_app = create_app(app_settings(llm_provider="off"))
     with TestClient(anon_app) as anon:
@@ -66,6 +67,13 @@ def test_anonymous_requests_do_not_change_durable_rows(client: TestClient) -> No
             "/api/v1/skills",
             f"/api/v1/skills/{skill.json()['id']}",
             "/api/v1/llm/provider",
+            "/api/v1/executor",
+            "/api/v1/jobs",
+            "/api/v1/jobs/00000000-0000-0000-0000-000000000001",
+            "/api/v1/jobs/00000000-0000-0000-0000-000000000001/log",
+            "/api/v1/git/source",
+            "/api/v1/git/repositories",
+            "/api/v1/git/commits?repository=ada/demo&ref=main",
         ]
         for path in protected_reads:
             response = anon.get(path)
@@ -88,6 +96,7 @@ def test_anonymous_requests_do_not_change_durable_rows(client: TestClient) -> No
             (f"/api/v1/skills/{skill.json()['id']}/submit-review", None),
             (f"/api/v1/skills/{skill.json()['id']}/publish", None),
             ("/api/v1/llm/chat", {"messages": [{"role": "user", "content": "你好"}]}),
+            ("/api/v1/jobs", {"marker": "anonblocked"}),
         ]
         for path, payload in writes:
             kwargs = {"json": payload} if payload is not None else {}
@@ -113,6 +122,7 @@ def test_anonymous_requests_do_not_change_durable_rows(client: TestClient) -> No
 
     with engine.connect() as connection:
         after_accounts = connection.execute(text("SELECT count(*) FROM accounts")).scalar_one()
+        after_jobs = connection.execute(text("SELECT count(*) FROM executor_jobs")).scalar_one()
         intruders = connection.execute(
             text("SELECT count(*) FROM accounts WHERE username = 'intruder'")
         ).scalar_one()
@@ -120,6 +130,7 @@ def test_anonymous_requests_do_not_change_durable_rows(client: TestClient) -> No
             text("SELECT count(*) FROM artifact_versions")
         ).scalar_one()
     assert after_accounts == before_accounts
+    assert after_jobs == before_jobs == 0
     assert intruders == 0
     assert versions == 1
     listed = client.get("/api/v1/accounts")

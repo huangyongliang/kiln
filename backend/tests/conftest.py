@@ -11,6 +11,7 @@ if str(_BACKEND) not in sys.path:
 
 from kiln.config import get_settings  # noqa: E402
 from kiln.main import create_app  # noqa: E402
+from tests.external import ExternalTargets, load_external_targets  # noqa: E402
 from tests.support import (  # noqa: E402
     app_settings,
     auth_headers,
@@ -30,6 +31,14 @@ ENV_KEYS = (
     "LLM_MODEL",
     "LLM_TIMEOUT_SECONDS",
     "KILN_API_TOKEN",
+    "JENKINS_URL",
+    "JENKINS_USER",
+    "JENKINS_API_TOKEN",
+    "JENKINS_TIMEOUT_SECONDS",
+    "GIT_PROVIDER",
+    "GIT_BASE_URL",
+    "GIT_TOKEN",
+    "GIT_TIMEOUT_SECONDS",
 )
 
 
@@ -45,6 +54,11 @@ def isolated_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(scope="session")
+def external_targets() -> ExternalTargets:
+    return load_external_targets()
 
 
 @pytest.fixture

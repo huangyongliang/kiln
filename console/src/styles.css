@@ -178,13 +178,27 @@ label {
   font-weight: 600;
 }
 
-textarea {
+textarea,
+.panel input[type="text"] {
   width: 100%;
+  max-width: 420px;
   padding: 10px 12px;
   border: 1px solid #c5ced6;
   border-radius: 6px;
   font: inherit;
+}
+
+textarea {
+  max-width: none;
   resize: vertical;
+}
+
+.panel form label {
+  margin-top: 12px;
+}
+
+.job-status {
+  margin-top: 16px;
 }
 
 button {
