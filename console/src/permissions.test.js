@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { canDo, canSee, permsFrom, requiredCode } from "./permissions.js";
+import { ACTION_GATES, canDo, canSee, GATE_DOCS, permsFrom, requiredCode } from "./permissions.js";
 
 const ROUTES = [
   "overview",
@@ -14,6 +14,7 @@ const ROUTES = [
   "skills",
   "skill",
   "skill-detail",
+  "skill-new",
   "access",
   "chat",
 ];
@@ -29,12 +30,20 @@ const ACTIONS = [
   "agent.build_artifact",
   "skill.submit",
   "skill.publish",
+  "skill.create",
+  "skill.reject",
   "artifact.read",
   "skill.read",
   "account.read",
+  "account.create",
   "overview.builds",
   "overview.skills",
   "overview.artifacts",
+  "build.create",
+  "artifact.create",
+  "artifact.upload",
+  "artifact.reserve",
+  "retrieve.download",
 ];
 
 test("unknown permissions show every route and action", () => {
@@ -179,6 +188,64 @@ test("artifact, skill, and account pages use their read codes", () => {
 });
 
 test("unknown actions stay hidden once permissions are known", () => {
-  assert.equal(canDo("account.manage", new Set(["account.manage"])), false);
+  assert.equal(canDo("not-a-real-action", new Set(["account.manage"])), false);
   assert.equal(canDo("not-a-gate", null), true);
+});
+
+test("creating an account needs account.manage", () => {
+  assert.equal(canDo("account.create", new Set(["account.manage"])), true);
+  assert.equal(canDo("account.create", new Set(["account.read"])), false);
+});
+
+test("creating a skill needs skill.use", () => {
+  assert.equal(canDo("skill.create", new Set(["skill.use"])), true);
+  assert.equal(canDo("skill.create", new Set(["skill.read", "skill.submit"])), false);
+});
+
+test("rejecting a skill needs skill.publish and not skill.submit", () => {
+  assert.equal(canDo("skill.reject", new Set(["skill.publish"])), true);
+  assert.equal(canDo("skill.reject", new Set(["skill.submit"])), false);
+  assert.equal(canDo("skill.reject", new Set(["skill.use"])), false);
+});
+
+test("reserving or retrieving bytes needs artifact.download", () => {
+  assert.equal(canDo("artifact.reserve", new Set(["artifact.download"])), true);
+  assert.equal(canDo("artifact.reserve", new Set(["artifact.upload", "artifact.read"])), false);
+  assert.equal(canDo("retrieve.download", new Set(["artifact.download"])), true);
+  assert.equal(canDo("artifact.upload", new Set(["artifact.upload"])), true);
+  assert.equal(canDo("artifact.create", new Set(["artifact.upload"])), true);
+  assert.equal(canDo("build.create", new Set(["executor.run"])), true);
+  assert.equal(canDo("build.create", new Set(["executor.read"])), false);
+});
+
+test("the new skill route needs skill.use", () => {
+  assert.equal(requiredCode("skill-new"), "skill.use");
+  assert.equal(canSee("skill-new", new Set(["skill.use"])), true);
+  assert.equal(canSee("skill-new", new Set(["skill.read", "skill.submit"])), false);
+});
+
+test("GATE_DOCS covers every write action and repeats its codes", () => {
+  const reads = new Set([
+    "executor.read",
+    "git.read",
+    "agent.qa",
+    "artifact.read",
+    "skill.read",
+    "account.read",
+    "overview.builds",
+    "overview.skills",
+    "overview.artifacts",
+  ]);
+  const covered = new Set(GATE_DOCS.map((item) => item.action));
+  for (const action of Object.keys(ACTION_GATES)) {
+    if (reads.has(action)) {
+      continue;
+    }
+    assert.equal(covered.has(action), true, action);
+  }
+  for (const item of GATE_DOCS) {
+    assert.deepEqual(item.codes, ACTION_GATES[item.action], item.action);
+    assert.equal(typeof item.label, "string");
+    assert.ok(item.label.length > 0);
+  }
 });

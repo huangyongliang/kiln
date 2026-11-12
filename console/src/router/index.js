@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory } from "vue-router";
 
-import { getJson } from "../api";
+import { ensureAccess } from "../access";
 import AccessView from "../views/AccessView.vue";
 import ArtifactDetailView from "../views/ArtifactDetailView.vue";
 import ArtifactsView from "../views/ArtifactsView.vue";
@@ -34,11 +34,13 @@ router.beforeEach(async (to) => {
     return true;
   }
   try {
-    await getJson("/api/v1/accounts");
-    return true;
-  } catch {
-    return { name: "login" };
+    await ensureAccess();
+  } catch (caught) {
+    if (caught?.status === 401) {
+      return { name: "login" };
+    }
   }
+  return true;
 });
 
 export default router;
