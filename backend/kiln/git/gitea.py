@@ -5,7 +5,6 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from kiln.domain.git import GitRepository, ResolvedCommit
-from kiln.errors import NotFound
 from kiln.git.http import as_list, as_object, read_json, require_sha
 
 
@@ -43,51 +42,31 @@ class GiteaSource:
         return found
 
     def resolve_ref(self, owner: str, name: str, ref: str) -> ResolvedCommit:
-        # Gitea has no GitHub-style /commits/{branch}. A branch lives at
-        # /branches/{ref} (commit.id). A sha lives at /git/commits/{sha}.
-        # A tag lives at /tags/{ref} (commit.sha).
-        for path, nested in (
-            (branch_path(owner, name, ref), True),
-            (git_commit_path(owner, name, ref), False),
-            (tag_path(owner, name, ref), True),
-        ):
-            try:
-                payload = read_json(self._client, f"{self._base}{path}", self._headers)
-            except NotFound:
-                continue
-            body = as_object(payload, self._netloc)
-            source = body.get("commit") if nested else body
-            if not isinstance(source, dict):
-                source = {}
-            return ResolvedCommit(
-                provider=self.provider,
-                role=self.role,
-                owner=owner,
-                name=name,
-                ref=ref,
-                sha=require_sha(source.get("id") or source.get("sha"), self._netloc),
-            )
-        raise NotFound("仓库或引用不存在")
+        # Gitea 1.24 has no GitHub-style /commits/{ref} (that path is 404).
+        # The single-commit route is /git/commits/{ref} and its body has `sha`.
+        payload = read_json(
+            self._client,
+            f"{self._base}{commit_path(owner, name, ref)}",
+            self._headers,
+        )
+        body = as_object(payload, self._netloc)
+        return ResolvedCommit(
+            provider=self.provider,
+            role=self.role,
+            owner=owner,
+            name=name,
+            ref=ref,
+            sha=require_sha(body.get("sha"), self._netloc),
+        )
 
 
-def branch_path(owner: str, name: str, ref: str) -> str:
-    """Gitea branch path. The commit id is `commit.id`."""
+def commit_path(owner: str, name: str, ref: str) -> str:
+    """Gitea single-commit path. Response field is `sha`."""
 
-    return f"{_repo_path(owner, name)}/branches/{quote(ref, safe='')}"
-
-
-def git_commit_path(owner: str, name: str, ref: str) -> str:
-    """Gitea git commit path. The commit id is `sha`."""
-
-    return f"{_repo_path(owner, name)}/git/commits/{quote(ref, safe='')}"
-
-
-def tag_path(owner: str, name: str, ref: str) -> str:
-    return f"{_repo_path(owner, name)}/tags/{quote(ref, safe='')}"
-
-
-def _repo_path(owner: str, name: str) -> str:
-    return f"/api/v1/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
+    return (
+        f"/api/v1/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
+        f"/git/commits/{quote(ref, safe='')}"
+    )
 
 
 def _repository(item: object) -> GitRepository | None:
