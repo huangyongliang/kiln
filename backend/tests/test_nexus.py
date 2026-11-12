@@ -241,6 +241,49 @@ def test_probe_falls_back_when_the_list_omits_the_repository() -> None:
     assert _PASSWORD not in caught.value.detail
 
 
+def test_group_root_400_is_reachable_and_404_is_not() -> None:
+    def root_400(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/service/rest/v1/status":
+            return httpx.Response(200, json={})
+        if request.url.path == "/service/rest/v1/repositories":
+            return httpx.Response(403)
+        if request.url.path == f"/repository/{_REPO}/":
+            return httpx.Response(400, content=b"group root")
+        raise AssertionError(request.url.path)
+
+    reached = _status(root_400)
+    assert reached["reachable"] is True
+    assert reached["detail"] is None
+
+    def root_404(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/service/rest/v1/status":
+            return httpx.Response(200, content=b"")
+        if request.url.path == "/service/rest/v1/repositories":
+            return httpx.Response(200, json=[{"name": "other-repo"}])
+        if request.url.path == f"/repository/{_REPO}/":
+            return httpx.Response(404, text=f"gone {_PASSWORD}")
+        raise AssertionError(request.url.path)
+
+    missing = _status(root_404)
+    assert missing["reachable"] is False
+    assert "没有这个仓库" in str(missing["detail"])
+    assert _PASSWORD not in str(missing)
+
+    def root_401(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/service/rest/v1/status":
+            return httpx.Response(200, json={})
+        if request.url.path == "/service/rest/v1/repositories":
+            return httpx.Response(404)
+        if request.url.path == f"/repository/{_REPO}/":
+            return httpx.Response(401, text=f"denied {_PASSWORD}")
+        raise AssertionError(request.url.path)
+
+    denied = _status(root_401)
+    assert denied["reachable"] is False
+    assert "拒绝访问" in str(denied["detail"])
+    assert _PASSWORD not in str(denied)
+
+
 def test_probe_sends_basic_auth_only_when_credentials_are_set() -> None:
     seen: dict[str, str | None] = {}
 

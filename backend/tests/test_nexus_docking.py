@@ -263,8 +263,9 @@ def _build_script(fixture_path: str) -> str:
         'url="${KILN_NEXUS_URL%/}/repository/${KILN_NEXUS_REPOSITORY}/'
         f'{fixture_path}"\n'
         'if [ -n "${KILN_NEXUS_USERNAME}" ]; then\n'
-        '  curl -fsS --user "${KILN_NEXUS_USERNAME}:${KILN_NEXUS_PASSWORD}" '
-        '-o kiln-dist/artifact.bin "$url"\n'
+        "  printf 'user = \"%s:%s\"\\n' "
+        '"$KILN_NEXUS_USERNAME" "$KILN_NEXUS_PASSWORD" | '
+        'curl -K - -fsS -o kiln-dist/artifact.bin "$url"\n'
         "else\n"
         '  curl -fsS -o kiln-dist/artifact.bin "$url"\n'
         "fi\n"

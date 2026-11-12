@@ -84,9 +84,11 @@ class NexusClient:
         return names
 
     def _require_repository_root(self) -> None:
+        """Count 200 and 400 as present. Nexus 3.98 returns 400 for a group root."""
+
         path = "/repository/" + quote(self._repository, safe="") + "/"
         response = self._request("GET", path)
-        if response.status_code == 200:
+        if response.status_code in {200, 400}:
             return
         if response.status_code == 404:
             raise self._missing_repository()
