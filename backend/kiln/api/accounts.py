@@ -1,7 +1,9 @@
 """Local accounts and the RBAC catalog.
 
-Calls require a user session or the machine token. Creating an account
-requires `account.manage`. The response never includes a password.
+Calls require a user session or the machine token. Listing and reading an
+account require `account.read`. Creating an account requires `account.manage`.
+The response never includes a password. Role and permission catalog reads
+stay session or machine-token only.
 """
 
 from uuid import UUID
@@ -17,7 +19,12 @@ from kiln.domain.rbac import PermissionList, RoleList
 router = APIRouter(tags=["账号与权限"], dependencies=[Depends(require_auth)])
 
 
-@router.get("/accounts", response_model=AccountList, summary="列出本地账号")
+@router.get(
+    "/accounts",
+    response_model=AccountList,
+    summary="列出本地账号",
+    dependencies=[Depends(require_permission("account.read"))],
+)
 def list_accounts(store: PostgresStore = Depends(get_store)) -> AccountList:
     return AccountList(items=store.list_accounts())
 
@@ -36,7 +43,12 @@ def create_account(
     return store.create_account(payload)
 
 
-@router.get("/accounts/{account_id}", response_model=Account, summary="查看本地账号")
+@router.get(
+    "/accounts/{account_id}",
+    response_model=Account,
+    summary="查看本地账号",
+    dependencies=[Depends(require_permission("account.read"))],
+)
 def get_account(account_id: UUID, store: PostgresStore = Depends(get_store)) -> Account:
     return store.get_account(account_id)
 

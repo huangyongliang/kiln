@@ -1,8 +1,8 @@
 """Product build HTTP API.
 
-Reading a build and its log requires a user session or the machine token.
-Creating a build also requires `executor.run`. The build stores artifact
-bytes on the platform. It does not deploy them.
+Reading a build and its log requires `executor.read`. Creating a build also
+requires `executor.run`. The build stores artifact bytes on the platform.
+It does not deploy them.
 """
 
 from uuid import UUID
@@ -28,7 +28,12 @@ from kiln.git.source import GitSource
 router = APIRouter(tags=["产品构建"], dependencies=[Depends(require_auth)])
 
 
-@router.get("/builds", response_model=ProductBuildList, summary="列出产品构建")
+@router.get(
+    "/builds",
+    response_model=ProductBuildList,
+    summary="列出产品构建",
+    dependencies=[Depends(require_permission("executor.read"))],
+)
 def get_builds(
     builds: BuildStore = Depends(get_build_store),
     catalog: PostgresStore = Depends(get_store),
@@ -58,7 +63,12 @@ def post_build(
     return publish(builds, stored)
 
 
-@router.get("/builds/{build_id}", response_model=ProductBuild, summary="查看产品构建")
+@router.get(
+    "/builds/{build_id}",
+    response_model=ProductBuild,
+    summary="查看产品构建",
+    dependencies=[Depends(require_permission("executor.read"))],
+)
 def get_build(
     build_id: UUID,
     builds: BuildStore = Depends(get_build_store),
@@ -70,7 +80,12 @@ def get_build(
     return publish(builds, stored)
 
 
-@router.get("/builds/{build_id}/log", response_model=BuildLog, summary="读取产品构建日志")
+@router.get(
+    "/builds/{build_id}/log",
+    response_model=BuildLog,
+    summary="读取产品构建日志",
+    dependencies=[Depends(require_permission("executor.read"))],
+)
 def get_build_log(
     build_id: UUID,
     builds: BuildStore = Depends(get_build_store),

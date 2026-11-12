@@ -1,4 +1,7 @@
-"""Skill draft, review, and publish outline. Steps are stored and never executed."""
+"""Skill draft, review, and publish outline. Steps are stored and never executed.
+
+Listing and reading a skill require `skill.read`.
+"""
 
 from uuid import UUID
 
@@ -16,7 +19,12 @@ router = APIRouter(
 )
 
 
-@router.get("", response_model=SkillList, summary="列出 skill")
+@router.get(
+    "",
+    response_model=SkillList,
+    summary="列出 skill",
+    dependencies=[Depends(require_permission("skill.read"))],
+)
 def list_skills(
     status: SkillStatus | None = Query(default=None),
     store: PostgresStore = Depends(get_store),
@@ -35,7 +43,12 @@ def create_skill(payload: SkillCreate, store: PostgresStore = Depends(get_store)
     return store.create_skill(payload)
 
 
-@router.get("/{skill_id}", response_model=Skill, summary="查看 skill")
+@router.get(
+    "/{skill_id}",
+    response_model=Skill,
+    summary="查看 skill",
+    dependencies=[Depends(require_permission("skill.read"))],
+)
 def get_skill(skill_id: UUID, store: PostgresStore = Depends(get_store)) -> Skill:
     return store.get_skill(skill_id)
 

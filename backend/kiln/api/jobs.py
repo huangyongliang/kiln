@@ -1,8 +1,8 @@
 """Jenkins compat executor HTTP API.
 
-Reading executor status, a job, and its log requires a user session or the
-machine token. Creating a job also requires `executor.run`. These routes do
-not deploy to a runtime.
+Reading executor status, a job, and its log requires `executor.read`.
+Creating a job also requires `executor.run`. These routes do not deploy to
+a runtime.
 """
 
 from uuid import UUID
@@ -20,7 +20,12 @@ from kiln.executor.service import create_job, job_log, list_tracked, tracked_job
 router = APIRouter(tags=["执行器"], dependencies=[Depends(require_auth)])
 
 
-@router.get("/executor", response_model=ExecutorInfo, summary="执行器状态")
+@router.get(
+    "/executor",
+    response_model=ExecutorInfo,
+    summary="执行器状态",
+    dependencies=[Depends(require_permission("executor.read"))],
+)
 def executor_info(settings: Settings = Depends(get_settings)) -> ExecutorInfo:
     configured = settings.executor_configured
     return ExecutorInfo(
@@ -31,7 +36,12 @@ def executor_info(settings: Settings = Depends(get_settings)) -> ExecutorInfo:
     )
 
 
-@router.get("/jobs", response_model=JobList, summary="列出 Jenkins 任务")
+@router.get(
+    "/jobs",
+    response_model=JobList,
+    summary="列出 Jenkins 任务",
+    dependencies=[Depends(require_permission("executor.read"))],
+)
 def list_jobs(
     store: JobStore = Depends(get_job_store),
     jenkins: JenkinsClient = Depends(get_jenkins),
@@ -54,7 +64,12 @@ def post_job(
     return create_job(store, jenkins, payload).public()
 
 
-@router.get("/jobs/{job_id}", response_model=Job, summary="查看任务状态")
+@router.get(
+    "/jobs/{job_id}",
+    response_model=Job,
+    summary="查看任务状态",
+    dependencies=[Depends(require_permission("executor.read"))],
+)
 def get_job(
     job_id: UUID,
     store: JobStore = Depends(get_job_store),
@@ -63,7 +78,12 @@ def get_job(
     return tracked_job(store, jenkins, job_id).public()
 
 
-@router.get("/jobs/{job_id}/log", response_model=JobLog, summary="读取 Jenkins 日志")
+@router.get(
+    "/jobs/{job_id}/log",
+    response_model=JobLog,
+    summary="读取 Jenkins 日志",
+    dependencies=[Depends(require_permission("executor.read"))],
+)
 def get_job_log(
     job_id: UUID,
     store: JobStore = Depends(get_job_store),

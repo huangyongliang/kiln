@@ -1,11 +1,12 @@
 """Local RBAC catalog.
 
 The catalog is who may manage accounts, use or publish skills, upload or
-download artifacts, and start a job or product build on a compat executor,
-plus which in-platform agent abilities can be granted. Write routes that
-match one of these codes check the signed-in user's roles. `KILN_API_TOKEN`
-is a machine credential and has every code. Optional company user-system sync
-does not copy groups or roles into this catalog.
+download artifacts, read executor, job, build, and git-source state, and
+start a job or product build on a compat executor, plus which in-platform
+agent abilities can be granted. Routes that match one of these codes check
+the signed-in user's roles. `KILN_API_TOKEN` is a machine credential and has
+every code. Optional company user-system sync does not copy groups or roles
+into this catalog.
 """
 
 from pydantic import BaseModel, ConfigDict
@@ -21,7 +22,9 @@ _BUILDER = _READER + (
     "artifact.download",
     "agent.qa",
     "agent.build_artifact",
+    "executor.read",
     "executor.run",
+    "git.read",
 )
 _PUBLISHER = _BUILDER + (
     "skill.publish",
@@ -65,7 +68,12 @@ PERMISSIONS: tuple[Permission, ...] = (
     Permission(code="agent.qa", description="使用平台内问答"),
     Permission(code="agent.draft_skill", description="使用对话起草 skill"),
     Permission(code="agent.build_artifact", description="使用对话制作制品"),
+    Permission(
+        code="executor.read",
+        description="查看兼容执行器状态、任务与产品构建及其日志",
+    ),
     Permission(code="executor.run", description="在兼容执行器上发起任务或产品构建"),
+    Permission(code="git.read", description="查看代码源适配器、仓库列表并解析引用"),
 )
 
 _PERMISSION_CODES = {item.code for item in PERMISSIONS}

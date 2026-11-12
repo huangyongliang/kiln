@@ -245,7 +245,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/v1/accounts
 
 ## 账号
 
-控制台有登录页。创建账号时可以设置口令，库里只保存哈希。会话写在 Postgres，退出时撤销。未配置公司用户系统时使用本地口令。配置 `KILN_OIDC_*` 之后，用户信息同步按发行方和 subject 找到或创建 kiln 账号，新账号默认角色是 `reader`，不复制公司侧的组或角色。在职状态未通过或账号已停用时不建立会话。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的。可选对接之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。`KILN_API_TOKEN` 仍是机器和开发用的访问令牌，拥有目录中的全部权限。侧栏里的令牌输入不再是主要入口。控制台「账号与权限」在 API 尚未创建账号时显示「还没有账号」，并列出角色目录：`reader`（只读）、`builder`（构建者）、`publisher`（发布者）、`admin`（管理员）。这些角色参与写入鉴权。没有对应权限时返回 403。发起任务和产品构建需要 `executor.run`，对话需要 `agent.qa`。只读角色没有这两项，调用 `POST /api/v1/jobs`、`POST /api/v1/builds` 或 `POST /api/v1/llm/chat` 会返回 403。
+控制台有登录页。创建账号时可以设置口令，库里只保存哈希。会话写在 Postgres，退出时撤销。未配置公司用户系统时使用本地口令。配置 `KILN_OIDC_*` 之后，用户信息同步按发行方和 subject 找到或创建 kiln 账号，新账号默认角色是 `reader`，不复制公司侧的组或角色。在职状态未通过或账号已停用时不建立会话。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的。可选对接之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。`KILN_API_TOKEN` 仍是机器和开发用的访问令牌，拥有目录中的全部权限。侧栏里的令牌输入不再是主要入口。控制台「账号与权限」在 API 尚未创建账号时显示「还没有账号」，并列出角色目录：`reader`（只读）、`builder`（构建者）、`publisher`（发布者）、`admin`（管理员）。这些角色参与写入鉴权。没有对应权限时返回 403。发起任务和产品构建需要 `executor.run`，对话需要 `agent.qa`。只读角色没有这两项，调用 `POST /api/v1/jobs`、`POST /api/v1/builds` 或 `POST /api/v1/llm/chat` 会返回 403。列出和查看账号、制品、skill 分别需要 `account.read`、`artifact.read`、`skill.read`，只读角色已有这三项。查看执行器状态、任务、产品构建及其日志需要 `executor.read`，查看代码源适配器、仓库列表并解析引用需要 `git.read`。这两项授给构建者、发布者和管理员，不授给只读角色。
 
 需要一条账号时，可以向 API 登记。用户名须匹配 `^[a-z][a-z0-9_-]{2,31}$`。记录写在 Postgres 里，只重启 API 进程不会消失。上文 Postgres 一节有一组创建后重启再读取的命令。
 
@@ -287,9 +287,9 @@ Compose 把 `LLM_BASE_URL` 原样写进 `kiln-api`。容器里的 `127.0.0.1` �
 
 ## Jenkins 与代码源
 
-执行器只在 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN` 都非空时工作。代码源只在 `GIT_PROVIDER` 为 `gitea` 或 `gitlab` 且 `GIT_BASE_URL`、`GIT_TOKEN` 都有值时工作。缺任何一项时，API 仍然启动。已具备 `executor.run` 时，`POST /api/v1/jobs` 返回 503；代码源未配置时，`GET /api/v1/git/repositories` 返回 503。只读角色调用 `POST /api/v1/jobs` 或 `POST /api/v1/builds` 返回 403，即使 Jenkins 或代码源未配置，也不会写入任务或构建记录。`GET /api/v1/executor` 和 `GET /api/v1/git/source` 返回未配置，并且代码源响应里的 `production_provider` 固定为 `gitlab`。读取任务和构建仍只需会话或机器令牌。
+执行器只在 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN` 都非空时工作。代码源只在 `GIT_PROVIDER` 为 `gitea` 或 `gitlab` 且 `GIT_BASE_URL`、`GIT_TOKEN` 都有值时工作。缺任何一项时，API 仍然启动。已具备 `executor.run` 时，`POST /api/v1/jobs` 返回 503；已具备 `git.read` 且代码源未配置时，`GET /api/v1/git/repositories` 返回 503。只读角色调用 `POST /api/v1/jobs` 或 `POST /api/v1/builds` 返回 403，即使 Jenkins 或代码源未配置，也不会写入任务或构建记录。读取执行器状态、任务、产品构建及其日志需要 `executor.read`，读取代码源需要 `git.read`。只读角色没有这两项，这些 GET 返回 403，正文是「没有权限」，不含 `JENKINS_URL` 或「代码源未配置」。构建者、发布者、管理员和机器令牌在未配置时，任务、构建、仓库列表和解析引用返回 503。`GET /api/v1/executor` 和 `GET /api/v1/git/source` 对具备对应读取权限的调用返回未配置（`configured` 为 false），并且代码源响应里的 `production_provider` 固定为 `gitlab`。
 
-这些调用接受会话 cookie、登录返回的 Bearer 令牌，或 `Authorization: Bearer <KILN_API_TOKEN>`。`POST /api/v1/jobs` 与 `POST /api/v1/builds` 还需要 `executor.run`。没有凭证时返回 401，不会到 Jenkins 或代码源上去创建任务。机器令牌拥有目录中的全部权限。
+这些调用接受会话 cookie、登录返回的 Bearer 令牌，或 `Authorization: Bearer <KILN_API_TOKEN>`。`POST /api/v1/jobs` 与 `POST /api/v1/builds` 还需要 `executor.run`。读取任务、构建和执行器状态还需要 `executor.read`，读取代码源还需要 `git.read`。没有凭证时返回 401，不会到 Jenkins 或代码源上去创建任务。机器令牌拥有目录中的全部权限。
 
 进程直接跑在宿主机上时，`JENKINS_URL=http://127.0.0.1:8080` 指向这台机器的 8080。API 若跑在 compose 的 `kiln-api` 里，容器内的 `127.0.0.1` 是容器自己，不是宿主机。把 Jenkins 或 Gitea 填成从该容器能路由到的地址。
 
