@@ -86,6 +86,7 @@ def test_anonymous_requests_do_not_change_durable_rows(client: TestClient) -> No
             reservation.json()["retrieve_path"],
             "/api/v1/skills",
             f"/api/v1/skills/{skill.json()['id']}",
+            "/api/v1/auth/me",
             "/api/v1/llm/provider",
             "/api/v1/executor",
             "/api/v1/jobs",

@@ -1,6 +1,7 @@
 """Login and 用户信息同步 responses. Passwords are not included."""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,3 +27,13 @@ class SyncStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     configured: bool
+
+
+class SessionPrincipal(BaseModel):
+    """Current principal. No token, password, session hash, or expiry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["user", "machine"]
+    account: Account | None
+    permissions: list[str]

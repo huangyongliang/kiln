@@ -11,6 +11,8 @@ import httpx
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from kiln.config import LOCAL_API_TOKEN
+from kiln.domain.rbac import PERMISSIONS, permissions_for
 from kiln.main import create_app
 from tests.oidc_double import OidcDouble
 from tests.support import app_settings, auth_headers, truncate_domain
@@ -320,6 +322,151 @@ def test_disabled_synced_account_gets_no_session(tmp_path: Path) -> None:
             assert second.status_code == 401
             assert second.json()["detail"] == "账号已停用"
             assert _session_count(app.state.engine) == before
+
+
+def test_auth_me_returns_the_principal_and_hides_secrets(client: TestClient) -> None:
+    anonymous = TestClient(client.app)
+    denied = anonymous.get("/api/v1/auth/me")
+    assert denied.status_code == 401
+    assert denied.json()["detail"] == "需要访问令牌"
+    assert denied.headers["www-authenticate"] == "Bearer"
+    assert denied.headers["cache-control"] == "no-store"
+    assert "password" not in denied.text
+    assert "token" not in denied.text
+
+    spec = client.get("/openapi.json").json()
+    me_schema = spec["components"]["schemas"]["SessionPrincipal"]
+    assert set(me_schema["properties"]) == {"kind", "account", "permissions"}
+    assert spec["paths"]["/api/v1/auth/me"]["get"].get("security")
+    for path, method in (
+        ("/api/v1/auth/login", "post"),
+        ("/api/v1/auth/logout", "post"),
+        ("/api/v1/auth/sync", "get"),
+        ("/api/v1/auth/oidc/start", "get"),
+        ("/api/v1/auth/oidc/callback", "get"),
+    ):
+        assert "security" not in spec["paths"][path][method], path
+
+    catalog = [item.code for item in PERMISSIONS]
+    listed = [item["code"] for item in client.get("/api/v1/rbac/permissions").json()["items"]]
+    assert listed == catalog
+
+    cookie_client, token, account = _login_user(client, "ada_me", ["builder"])
+    by_cookie = cookie_client.get("/api/v1/auth/me")
+    assert by_cookie.status_code == 200
+    assert by_cookie.headers["cache-control"] == "no-store"
+    body = by_cookie.json()
+    expected = [code for code in catalog if code in permissions_for(account["role_ids"])]
+    assert body["kind"] == "user"
+    assert body["account"] == account
+    assert body["permissions"] == expected
+    assert set(body["permissions"]) == permissions_for(account["role_ids"])
+    assert "skill.submit" in body["permissions"]
+    assert "skill.publish" not in body["permissions"]
+    _assert_me_hides_secrets(by_cookie, token, client.app.state.engine, account["id"])
+
+    bearer = TestClient(client.app)
+    by_bearer = bearer.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert by_bearer.status_code == 200
+    assert by_bearer.headers["cache-control"] == "no-store"
+    assert by_bearer.json() == body
+    _assert_me_hides_secrets(by_bearer, token, client.app.state.engine, account["id"])
+
+    machine = client.get("/api/v1/auth/me")
+    assert machine.status_code == 200
+    assert machine.headers["cache-control"] == "no-store"
+    assert machine.json() == {"kind": "machine", "account": None, "permissions": catalog}
+    assert LOCAL_API_TOKEN not in machine.text
+    assert "password" not in machine.text
+    assert "expires_at" not in machine.text
+    assert "token_hash" not in machine.text
+
+    logged_out = bearer.post(
+        "/api/v1/auth/logout",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert logged_out.status_code == 204
+    revoked = bearer.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert revoked.status_code == 401
+    assert revoked.headers["cache-control"] == "no-store"
+    assert token not in revoked.text
+    assert cookie_client.get("/api/v1/auth/me").status_code == 401
+
+    disabled_client, disabled_token, disabled_account = _login_user(
+        client, "ada_me_off", ["reader"]
+    )
+    engine = client.app.state.engine
+    with engine.begin() as connection:
+        connection.execute(
+            text("UPDATE accounts SET status = 'disabled' WHERE id::text = :id"),
+            {"id": disabled_account["id"]},
+        )
+    disabled = disabled_client.get("/api/v1/auth/me")
+    assert disabled.status_code == 401
+    assert disabled.headers["cache-control"] == "no-store"
+    assert disabled_token not in disabled.text
+    assert LOCAL_PASSWORD not in disabled.text
+
+    expired_client, expired_token, expired_account = _login_user(client, "ada_me_old", ["reader"])
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE sessions SET created_at = now() - interval '2 hours', "
+                "expires_at = now() - interval '1 hour' WHERE account_id::text = :id"
+            ),
+            {"id": expired_account["id"]},
+        )
+    expired = expired_client.get("/api/v1/auth/me")
+    assert expired.status_code == 401
+    assert expired.headers["cache-control"] == "no-store"
+    assert expired_token not in expired.text
+
+
+def _login_user(
+    client: TestClient,
+    username: str,
+    role_ids: list[str],
+) -> tuple[TestClient, str, dict]:
+    created = client.post(
+        "/api/v1/accounts",
+        json={
+            "username": username,
+            "display_name": "当前用户",
+            "password": LOCAL_PASSWORD,
+            "role_ids": role_ids,
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert "password" not in created.text
+    session = TestClient(client.app)
+    logged_in = session.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": LOCAL_PASSWORD},
+    )
+    assert logged_in.status_code == 200, logged_in.text
+    body = logged_in.json()
+    return session, body["token"], body["account"]
+
+
+def _assert_me_hides_secrets(response, token: str, engine, account_id: str) -> None:
+    assert set(response.json()) == {"kind", "account", "permissions"}
+    assert "password" not in response.text
+    assert "expires_at" not in response.text
+    assert "token_hash" not in response.text
+    assert "password_hash" not in response.text
+    assert token not in response.text
+    assert LOCAL_PASSWORD not in response.text
+    with engine.connect() as connection:
+        stored = connection.execute(
+            text(
+                "SELECT sessions.token_hash, accounts.password_hash "
+                "FROM sessions JOIN accounts ON accounts.id = sessions.account_id "
+                "WHERE accounts.id::text = :id"
+            ),
+            {"id": account_id},
+        ).one()
+    assert stored.token_hash not in response.text
+    assert stored.password_hash not in response.text
 
 
 def _oidc_settings(tmp_path: Path, double: OidcDouble):
