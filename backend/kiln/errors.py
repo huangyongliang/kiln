@@ -76,6 +76,16 @@ class UpstreamFailure(AppError):
         super().__init__(502, detail)
 
 
+# Same detail get_jenkins and get_git_source raise when that endpoint is unset.
+JENKINS_UNCONFIGURED_DETAIL = (
+    "执行器未配置。请设置 JENKINS_URL、JENKINS_USER 和 JENKINS_API_TOKEN。"
+)
+GIT_SOURCE_UNCONFIGURED_DETAIL = (
+    "代码源未配置。请将 GIT_PROVIDER 设为 gitea（实验室）或 gitlab（生产代码源），"
+    "并设置 GIT_BASE_URL 与 GIT_TOKEN。"
+)
+
+
 class NotConfigured(AppError):
     def __init__(self, detail: str) -> None:
         super().__init__(503, detail)

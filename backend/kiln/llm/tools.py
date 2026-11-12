@@ -7,6 +7,9 @@ never enter the loop, so they neither invent nor execute tools.
 A caller missing a tool's permission codes does not write. The tool result is
 「没有权限」, and the loop continues until the model returns content or the
 round cap is reached. The cap is a code constant, not an environment variable.
+
+``build_artifact`` starts a product build the same way as POST /builds. It
+needs both ``agent.build_artifact`` and ``executor.run``.
 """
 
 import json
@@ -17,10 +20,24 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from kiln.auth import Principal
+from kiln.config import Settings
+from kiln.db.builds import BuildStore
 from kiln.db.store import PostgresStore
+from kiln.domain.builds import ProductBuildCreate
 from kiln.domain.rbac import ALL_PERMISSIONS
 from kiln.domain.skills import SkillCreate, SkillList, SkillStatus
-from kiln.errors import Conflict, ModelUpstreamError
+from kiln.errors import (
+    GIT_SOURCE_UNCONFIGURED_DETAIL,
+    JENKINS_UNCONFIGURED_DETAIL,
+    BadRequest,
+    Conflict,
+    ModelUpstreamError,
+    NotConfigured,
+    UpstreamFailure,
+)
+from kiln.executor.jenkins import JenkinsClient
+from kiln.executor.product import create_product_build, publish
+from kiln.git.source import GitSource
 from kiln.llm.provider import (
     ChatCompletion,
     ChatRequest,
@@ -34,7 +51,23 @@ MAX_MODEL_ROUNDS = 4
 TOOL_DENIED = "没有权限"
 ROUND_CAP_CONTENT = "已达到对话工具轮次上限。"
 
-_Handler = Callable[[object, PostgresStore], str]
+@dataclass(frozen=True)
+class ToolContext:
+    """Catalog plus the same build dependencies POST /builds already uses.
+
+    ``jenkins`` and ``git_source`` stay None when those endpoints are not
+    configured. The tool reports that as text. It does not turn the chat
+    request into 503.
+    """
+
+    catalog: PostgresStore
+    builds: BuildStore
+    jenkins: JenkinsClient | None
+    git_source: GitSource | None
+    settings: Settings
+
+
+_Handler = Callable[[object, ToolContext], str]
 
 
 class ListSkillsArguments(BaseModel):
@@ -58,15 +91,34 @@ def _json(model: BaseModel) -> str:
     return json.dumps(jsonable_encoder(model), ensure_ascii=False, separators=(",", ":"))
 
 
-def _list_skills(payload: object, store: PostgresStore) -> str:
+def _list_skills(payload: object, context: ToolContext) -> str:
     parsed = ListSkillsArguments.model_validate(payload)
-    listed = SkillList(items=store.list_skills(parsed.status))
+    listed = SkillList(items=context.catalog.list_skills(parsed.status))
     return _json(listed)
 
 
-def _draft_skill(payload: object, store: PostgresStore) -> str:
-    created = store.create_skill(SkillCreate.model_validate(payload))
+def _draft_skill(payload: object, context: ToolContext) -> str:
+    created = context.catalog.create_skill(SkillCreate.model_validate(payload))
     return _json(created)
+
+
+def _build_artifact(payload: object, context: ToolContext) -> str:
+    created = ProductBuildCreate.model_validate(payload)
+    jenkins = context.jenkins
+    source = context.git_source
+    if jenkins is None:
+        raise NotConfigured(JENKINS_UNCONFIGURED_DETAIL)
+    if source is None:
+        raise NotConfigured(GIT_SOURCE_UNCONFIGURED_DETAIL)
+    stored = create_product_build(
+        context.builds,
+        context.catalog,
+        jenkins,
+        source,
+        context.settings,
+        created,
+    )
+    return _json(publish(context.builds, stored))
 
 
 _TOOLS: tuple[_Tool, ...] = (
@@ -89,6 +141,17 @@ _TOOLS: tuple[_Tool, ...] = (
         permissions=frozenset({"agent.draft_skill", "skill.use"}),
         parameters=SkillCreate,
         handler=_draft_skill,
+    ),
+    _Tool(
+        name="build_artifact",
+        description=(
+            "发起与 POST /builds 相同的产品构建。"
+            "参数是仓库、引用、制品名、版本、包类型，以及可选名称。"
+            "只开始构建，不等待结束，不下载或保存制品字节，不执行 skill 步骤。"
+        ),
+        permissions=frozenset({"agent.build_artifact", "executor.run"}),
+        parameters=ProductBuildCreate,
+        handler=_build_artifact,
     ),
 )
 
@@ -149,7 +212,7 @@ def run_tool_loop(
     request: ChatRequest,
     provider: OpenAICompatibleProvider,
     principal: Principal,
-    store: PostgresStore,
+    context: ToolContext,
 ) -> ChatCompletion:
     """Call the model at most MAX_MODEL_ROUNDS times, executing only known tools."""
 
@@ -179,7 +242,7 @@ def run_tool_loop(
                 {
                     "role": "tool",
                     "tool_call_id": call.id,
-                    "content": execute_tool(call.name, call.arguments, principal, store),
+                    "content": execute_tool(call.name, call.arguments, principal, context),
                 }
             )
     if turn is None:
@@ -197,7 +260,7 @@ def execute_tool(
     name: str,
     arguments: str,
     principal: Principal,
-    store: PostgresStore,
+    context: ToolContext,
 ) -> str:
     """Run one closed-registry tool, or refuse without writing."""
 
@@ -211,10 +274,10 @@ def execute_tool(
     except ValueError as exc:
         return f"参数不符合要求。{exc}"
     try:
-        return tool.handler(payload, store)
+        return tool.handler(payload, context)
     except ValidationError as exc:
         return _format_validation(exc)
-    except Conflict as exc:
+    except (BadRequest, Conflict, NotConfigured, UpstreamFailure) as exc:
         return exc.detail
 
 
