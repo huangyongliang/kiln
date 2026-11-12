@@ -5,8 +5,6 @@ The adapter is selected by GIT_PROVIDER: gitea for the lab, gitlab for
 production. The base URL is not hard-coded.
 """
 
-import re
-
 from fastapi import APIRouter, Depends, Query
 
 from kiln.api.deps import get_git_source, get_settings
@@ -14,12 +12,10 @@ from kiln.auth import require_api_token
 from kiln.config import Settings
 from kiln.domain.git import GitRepositoryList, GitSourceInfo, ResolvedCommit
 from kiln.errors import BadRequest
+from kiln.git.refs import parse_ref, parse_repository
 from kiln.git.source import GitSource, role_for_provider
 
 router = APIRouter(prefix="/git", tags=["代码源"], dependencies=[Depends(require_api_token)])
-
-_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
 
 
 @router.get("/source", response_model=GitSourceInfo, summary="代码源适配器")
@@ -49,31 +45,9 @@ def resolve_commit(
     ref: str = Query(min_length=1, max_length=255),
     source: GitSource = Depends(get_git_source),
 ) -> ResolvedCommit:
-    owner, name = _repository(repository)
-    resolved_ref = _ref(ref)
+    owner, name = parse_repository(repository)
+    resolved_ref = parse_ref(ref)
     return source.resolve_ref(owner, name, resolved_ref)
-
-
-def _repository(value: str) -> tuple[str, str]:
-    parts = value.strip().split("/")
-    if len(parts) < 2 or any(_SEGMENT.fullmatch(part) is None for part in parts):
-        raise BadRequest("仓库必须是 owner/name")
-    name = parts[-1]
-    owner = "/".join(parts[:-1])
-    return owner, name
-
-
-def _ref(value: str) -> str:
-    text = value.strip()
-    if (
-        _REF.fullmatch(text) is None
-        or text.startswith("/")
-        or text.endswith("/")
-        or ".." in text
-        or "//" in text
-    ):
-        raise BadRequest("引用无效")
-    return text
 
 
 def _provider(source: GitSource) -> str:

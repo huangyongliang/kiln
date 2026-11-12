@@ -26,6 +26,10 @@ class GitSource(Protocol):
 
     def resolve_ref(self, owner: str, name: str, ref: str) -> ResolvedCommit: ...
 
+    def authenticated_username(self) -> str:
+        """Git HTTP username for clone. Not a secret."""
+        ...
+
 
 def role_for_provider(provider: str) -> GitRole:
     if provider == LAB_GIT_PROVIDER:

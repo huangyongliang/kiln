@@ -47,6 +47,16 @@ def as_object(payload: object, netloc: str) -> dict[str, object]:
     return payload
 
 
+def require_username(body: dict[str, object], netloc: str) -> str:
+    for key in ("login", "username"):
+        value = body.get(key)
+        if isinstance(value, str):
+            text = value.strip()
+            if text and not any(char.isspace() for char in text):
+                return text
+    raise UpstreamFailure(f"代码源没有返回用户名（{netloc}）")
+
+
 def require_sha(value: object, netloc: str) -> str:
     if not isinstance(value, str) or not value or any(char.isspace() for char in value):
         raise UpstreamFailure(f"代码源没有返回提交号（{netloc}）")

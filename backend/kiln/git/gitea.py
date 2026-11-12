@@ -5,7 +5,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from kiln.domain.git import GitRepository, ResolvedCommit
-from kiln.git.http import as_list, as_object, read_json, require_sha
+from kiln.git.http import as_list, as_object, read_json, require_sha, require_username
 
 
 class GiteaSource:
@@ -58,6 +58,14 @@ class GiteaSource:
             ref=ref,
             sha=require_sha(body.get("sha"), self._netloc),
         )
+
+    def authenticated_username(self) -> str:
+        payload = read_json(
+            self._client,
+            f"{self._base}/api/v1/user",
+            self._headers,
+        )
+        return require_username(as_object(payload, self._netloc), self._netloc)
 
 
 def commit_path(owner: str, name: str, ref: str) -> str:

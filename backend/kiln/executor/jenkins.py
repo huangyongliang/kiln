@@ -1,16 +1,19 @@
 """HTTP client for a real Jenkins controller.
 
-Talks to the Jenkins remote API. Job configuration is a freestyle shell step
-that prints a validated marker. This client does not deploy anywhere.
+Talks to the Jenkins remote API. The compat job prints a validated marker.
+A product build checks out git and archives one file. This client does not
+deploy anywhere.
 """
 
 import re
+import time
 from urllib.parse import quote, urlsplit
 from xml.sax.saxutils import escape
 
 import httpx
 
-from kiln.errors import BadRequest, NotFound, UpstreamFailure
+from kiln.errors import BadRequest, NotFound, PayloadTooLarge, UpstreamFailure
+from kiln.executor.script import product_build_command, product_job_config
 
 _MARKER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 _LOG_LIMIT = 200_000
@@ -50,6 +53,58 @@ class JenkinsClient:
         if response.status_code == 400 and "already exists" in response.text.lower():
             raise UpstreamFailure(f"Jenkins 上已有同名任务（{self._netloc}）")
         raise UpstreamFailure(_failure(response, self._netloc))
+
+    def create_product_job(
+        self,
+        job_name: str,
+        *,
+        clone_url: str,
+        ref: str,
+        sha: str,
+        git_user: str,
+        git_token: str,
+    ) -> None:
+        command = product_build_command(
+            clone_url=clone_url,
+            ref=ref,
+            sha=sha,
+            git_user=git_user,
+            git_token=git_token,
+        )
+        response = self._request(
+            "POST",
+            "/createItem",
+            params={"name": job_name},
+            content=product_job_config(command).encode("utf-8"),
+            headers={"Content-Type": "application/xml; charset=utf-8"},
+        )
+        if response.status_code in {200, 201, 302}:
+            return
+        if response.status_code == 400 and "already exists" in response.text.lower():
+            raise UpstreamFailure(f"Jenkins 上已有同名任务（{self._netloc}）")
+        raise UpstreamFailure(_failure(response, self._netloc))
+
+    def download_artifact(
+        self,
+        job_name: str,
+        build_number: int,
+        relative_path: str,
+        max_bytes: int,
+    ) -> bytes:
+        path = "/".join(quote(part, safe="") for part in relative_path.split("/"))
+        target = f"/job/{quote(job_name, safe='')}/{build_number}/artifact/{path}"
+        last_status = 0
+        for attempt in range(5):
+            response = self._request("GET", target)
+            last_status = response.status_code
+            if response.status_code == 200:
+                return _bounded(response, max_bytes, self._netloc)
+            if response.status_code != 404 or attempt == 4:
+                break
+            time.sleep(0.5)
+        if last_status == 404:
+            raise UpstreamFailure(f"Jenkins 没有这个制品文件（{self._netloc}）")
+        raise UpstreamFailure(f"Jenkins 调用失败（{self._netloc}，HTTP {last_status}）")
 
     def trigger_build(self, job_name: str) -> str | None:
         response = self._request("POST", f"/job/{quote(job_name, safe='')}/build")
@@ -288,6 +343,18 @@ def _object(response: httpx.Response, netloc: str) -> dict[str, object]:
     if not isinstance(body, dict):
         raise UpstreamFailure(f"Jenkins 返回的不是 JSON 对象（{netloc}）")
     return body
+
+
+def _bounded(response: httpx.Response, max_bytes: int, netloc: str) -> bytes:
+    declared = response.headers.get("content-length")
+    if declared is not None and declared.strip().isdigit() and int(declared) > max_bytes:
+        raise PayloadTooLarge(f"制品字节超过上限（{max_bytes} 字节）")
+    data = response.content
+    if len(data) > max_bytes:
+        raise PayloadTooLarge(f"制品字节超过上限（{max_bytes} 字节）")
+    if not data:
+        raise UpstreamFailure(f"Jenkins 产出的制品是空文件（{netloc}）")
+    return data
 
 
 def _failure(response: httpx.Response, netloc: str) -> str:

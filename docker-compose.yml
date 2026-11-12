@@ -47,6 +47,8 @@ services:
       JENKINS_TIMEOUT_SECONDS: ${JENKINS_TIMEOUT_SECONDS:-30}
       GIT_PROVIDER: ${GIT_PROVIDER:-off}
       GIT_BASE_URL: ${GIT_BASE_URL:-}
+      # Jenkins 看到的代码源地址。留空则与 GIT_BASE_URL 相同。不是生产地址。
+      GIT_CLONE_BASE_URL: ${GIT_CLONE_BASE_URL:-}
       GIT_TOKEN: ${GIT_TOKEN:-}
       GIT_TIMEOUT_SECONDS: ${GIT_TIMEOUT_SECONDS:-30}
       # 平台自管制品字节。这不是 Nexus，也不发布新的宿主机端口。

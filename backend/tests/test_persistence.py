@@ -43,6 +43,7 @@ def test_schema_is_postgresql(client: TestClient) -> None:
         "skill_allowed_repositories",
         "skill_allowed_dependencies",
         "executor_jobs",
+        "product_builds",
     } <= names
     columns = {column["name"] for column in inspect(engine).get_columns("artifact_versions")}
     assert {"content_available", "blob_key"} <= columns
@@ -345,6 +346,7 @@ def _api_env(database_url: str, artifact_root: str) -> dict[str, str]:
     env["JENKINS_API_TOKEN"] = ""
     env["GIT_PROVIDER"] = "off"
     env["GIT_BASE_URL"] = ""
+    env["GIT_CLONE_BASE_URL"] = ""
     env["GIT_TOKEN"] = ""
     env["KILN_ARTIFACT_ROOT"] = artifact_root
     env["KILN_ARTIFACT_MAX_BYTES"] = str(64 * 1024 * 1024)

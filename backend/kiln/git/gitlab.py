@@ -8,7 +8,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from kiln.domain.git import GitRepository, ResolvedCommit
-from kiln.git.http import as_list, as_object, read_json, require_sha
+from kiln.git.http import as_list, as_object, read_json, require_sha, require_username
 
 
 class GitLabSource:
@@ -66,6 +66,10 @@ class GitLabSource:
             ref=ref,
             sha=require_sha(body.get("id"), self._netloc),
         )
+
+    def authenticated_username(self) -> str:
+        payload = read_json(self._client, f"{self._base}/api/v4/user", self._headers)
+        return require_username(as_object(payload, self._netloc), self._netloc)
 
 
 def project_commit_path(owner: str, name: str, ref: str) -> str:

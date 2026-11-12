@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     # The base URL is never defaulted to a production host.
     git_provider: Literal["gitea", "gitlab", "off"] = "off"
     git_base_url: str = ""
+    # Optional URL Jenkins uses to clone. Empty means GIT_BASE_URL. Set this
+    # when the API and Jenkins do not see the git server at the same address.
+    # It is not a production host.
+    git_clone_base_url: str = ""
     git_token: SecretStr = SecretStr("")
     git_timeout_seconds: float = Field(default=30, gt=0, le=120)
 
@@ -95,7 +99,7 @@ class Settings(BaseSettings):
             return "off"
         return text
 
-    @field_validator("jenkins_url", "git_base_url", mode="before")
+    @field_validator("jenkins_url", "git_base_url", "git_clone_base_url", mode="before")
     @classmethod
     def normalize_service_url(cls, value: object) -> object:
         if not isinstance(value, str):
@@ -164,6 +168,11 @@ class Settings(BaseSettings):
 
     def git_token_value(self) -> str:
         return self.git_token.get_secret_value()
+
+    def git_clone_base(self) -> str:
+        """Base URL Jenkins uses to clone. Falls back to the API's git URL."""
+
+        return self.git_clone_base_url or self.git_base_url
 
     @property
     def executor_configured(self) -> bool:

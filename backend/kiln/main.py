@@ -11,8 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from kiln import __version__
-from kiln.api import accounts, artifacts, git, health, jobs, llm, retrieve, skills
+from kiln.api import accounts, artifacts, builds, git, health, jobs, llm, retrieve, skills
 from kiln.config import Settings, get_settings
+from kiln.db.builds import BuildStore
 from kiln.db.engine import create_db_engine
 from kiln.db.jobs import JobStore
 from kiln.db.migrate import upgrade_database
@@ -27,8 +28,10 @@ from kiln.storage.local import LocalBlobStore
 
 DESCRIPTION = (
     "kiln 一期骨架。账号、RBAC 目录、制品、版本、下载预约、skill 与 Jenkins 任务"
-    "保存在 PostgreSQL 中。制品字节保存在平台自管的本地目录，进程重启后仍可取回。"
+    "和产品构建保存在 PostgreSQL 中。制品字节保存在平台自管的本地目录，进程重启后仍可取回。"
     "版本保存字节后 content_available 为 true。"
+    "产品构建从已配置的代码源检出提交，在 Jenkins 上运行该提交里的 kiln-build.sh，"
+    "再把产出的 kiln-dist/artifact.bin 写入平台目录。这不会把制品部署到运行环境。"
     "API 启动时自动迁移。"
     "/api/v1 需要请求头 Authorization: Bearer <KILN_API_TOKEN>。"
     "这不是登录，也不按角色鉴权。/health 与 /docs 不接受写入。"
@@ -56,6 +59,7 @@ def create_app(
     blobs = LocalBlobStore(Path(resolved.kiln_artifact_root))
     store = PostgresStore(engine, blobs)
     jobs_store = JobStore(engine)
+    build_store = BuildStore(engine)
     jenkins_http = httpx.Client(timeout=resolved.jenkins_timeout_seconds, trust_env=False)
     git_http = httpx.Client(timeout=resolved.git_timeout_seconds, trust_env=False)
     jenkins = (
@@ -97,6 +101,7 @@ def create_app(
     app.state.store = store
     app.state.blobs = blobs
     app.state.jobs = jobs_store
+    app.state.builds = build_store
     app.state.jenkins = jenkins
     app.state.git_source = git_source
     app.state.llm = provider
@@ -124,6 +129,7 @@ def create_app(
     app.include_router(skills.router, prefix=API_PREFIX)
     app.include_router(llm.router, prefix=API_PREFIX)
     app.include_router(jobs.router, prefix=API_PREFIX)
+    app.include_router(builds.router, prefix=API_PREFIX)
     app.include_router(git.router, prefix=API_PREFIX)
     return app
 

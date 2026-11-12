@@ -65,6 +65,28 @@ def test_git_provider_requires_base_url_and_token() -> None:
         Settings(git_provider="gitlab", git_base_url="http://127.0.0.1:9", _env_file=None)
 
 
+def test_git_clone_base_falls_back_and_rejects_credentials() -> None:
+    with pytest.raises(ValidationError):
+        Settings(git_clone_base_url="http://user:secret@127.0.0.1:9", _env_file=None)
+    empty = Settings(_env_file=None)
+    assert empty.git_clone_base() == ""
+    configured = Settings(
+        git_provider="gitea",
+        git_base_url="http://127.0.0.1:9",
+        git_token="local-only",
+        git_clone_base_url="http://git.internal:3000",
+        _env_file=None,
+    )
+    assert configured.git_clone_base() == "http://git.internal:3000"
+    fallback = Settings(
+        git_provider="gitlab",
+        git_base_url="http://127.0.0.1:9",
+        git_token="local-only",
+        _env_file=None,
+    )
+    assert fallback.git_clone_base() == "http://127.0.0.1:9"
+
+
 def test_blank_git_provider_is_off() -> None:
     settings = Settings(git_provider="disabled", _env_file=None)
     assert settings.git_provider == "off"
