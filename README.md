@@ -31,9 +31,9 @@
 | kiln API 与控制台 | 现在需要 | 本地构建 `kiln-api:local`（`python:3.11-slim`）和 `kiln-console:local`（构建阶段 `node:22-alpine`，运行阶段 `nginx:1.27-alpine`）。没有现成的远程应用镜像 |
 | Jenkins 兼容执行器 | 现在可以接线 | 配置 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN` 后，API 能在 Jenkins 上创建任务、跟踪状态并读取日志。不把制品部署到运行环境。仓库 compose 的 profile `lab` 仍是占位，不是共享实验机上已经在跑的 Jenkins |
 | Git 远端 | 可替换适配器 | `GIT_PROVIDER=gitea` 是实验室实现，对着配置的 `GIT_BASE_URL` 调用 Gitea HTTP API。`GIT_PROVIDER=gitlab` 是生产代码源，调用 GitLab HTTP API。仓库不写生产 GitLab 地址。compose 里的 `gitea/gitea:1.22` 仍是未作为生产源的占位 |
-| 制品目录 | 元数据已在 PostgreSQL。Nexus 与制品字节仍是一期要做的事 | 制品、版本、校验和与下载预约写在 Postgres。`GET /api/v1/retrieve/{reservation_id}` 的 `content_available` 为 false。仓库没有 Nexus 地址或客户端 |
+| 制品目录 | 目录、版本和字节由平台保存 | 元数据在 PostgreSQL。字节在平台自管的本地目录 `KILN_ARTIFACT_ROOT`（compose 命名卷 `kiln-artifact-data`）。版本保存字节后 `content_available` 为 true，`GET /api/v1/retrieve/{reservation_id}/content` 返回这些字节。Nexus 集成仍属于一期，这一版没有 Nexus 地址或客户端 |
 | OpenAI 兼容模型端点 | 可选 | `LLM_PROVIDER` 默认 `off`。设为 `openai` 时必须提供 `LLM_BASE_URL` |
-| 本地登录与身份联邦 | 一期要做，这一版还没有 | 本地账号和 RBAC 目录在 Postgres。`/api/v1` 需要本地令牌 `KILN_API_TOKEN`。没有登录页、口令，也没有外部身份源 |
+| 本地登录与身份联邦 | 一期要做，这一版还没有 | 平台自身具备完整的账号与权限能力。本地账号和 RBAC 目录在 Postgres。`/api/v1` 需要本地令牌 `KILN_API_TOKEN`。没有登录页和口令。公司用户系统的对接是可选的，不属于一期；可选对接之后，公司系统只确认身份和在职状态，kiln 的授权仍留在平台上 |
 | Harbor、Kubernetes、专用镜像仓库 | 不属于一期 | 仓库中没有对应清单或配置项。架构方案把镜像构建放在后面 |
 
 ## 本地运行
@@ -114,6 +114,8 @@ docker compose --profile lab up
 | `GIT_BASE_URL` | 空 | 代码源根地址。`gitea` 或 `gitlab` 时必填。仓库不提供生产默认值 |
 | `GIT_TOKEN` | 空 | 代码源访问令牌。`gitea` 或 `gitlab` 时必填。只从环境读取 |
 | `GIT_TIMEOUT_SECONDS` | `30` | 单次代码源 HTTP 调用超时，最大 120 |
+| `KILN_ARTIFACT_ROOT` | `var/kiln-artifacts` | 平台自管制品字节的本地目录。相对路径按进程工作目录解析。不是 Nexus 地址 |
+| `KILN_ARTIFACT_MAX_BYTES` | `67108864` | 单次保存的字节上限 |
 
 `LLM_PROVIDER=openai` 时，聊天请求会 `POST {LLM_BASE_URL}/chat/completions`。模拟模式和关闭模式不会访问网络。
 
@@ -125,9 +127,10 @@ docker compose --profile lab up
 
 - 本地账号：`GET/POST /accounts`，`GET /accounts/{id}`
 - RBAC 目录：`GET /rbac/roles`，`GET /rbac/permissions`
-- 制品：`GET/POST /artifacts`，`POST /artifacts/{id}/versions`
+- 制品：`GET/POST /artifacts`，`POST /artifacts/{id}/versions` 登记尚无字节的版本
+- 保存字节：`PUT /artifacts/{id}/versions/{version}/content`，请求体是原始字节，并用 `X-Kiln-Checksum-Algorithm`、`X-Kiln-Checksum` 声明校验和。成功后该版本的 `content_available` 为 true
 - 下载预约：`POST /artifacts/{id}/versions/{version}/download-reservations`
-- 稳定取包：`GET /retrieve/{reservation_id}`（本期只返回预约契约，`content_available` 为 false）
+- 取包：`GET /retrieve/{reservation_id}` 返回预约信息。字节已保存时 `content_available` 为 true，`GET /retrieve/{reservation_id}/content` 返回这些字节
 - Skill：`POST /skills` 创建草稿，`POST /skills/{id}/submit-review`，`POST /skills/{id}/publish`
 - 模型：`GET /llm/provider`，`POST /llm/chat`
 - 执行器：`GET /executor`，`POST /jobs`，`GET /jobs`，`GET /jobs/{id}`，`GET /jobs/{id}/log`。任务记录在 PostgreSQL。状态和日志来自 Jenkins。响应里 `deploys_to_runtime` 为 false
@@ -137,7 +140,7 @@ Skill 步骤不会被执行。kiln 进程本身不运行 shell。Jenkins 上的�
 
 ## 测试
 
-后端测试连接真实 PostgreSQL，不使用内存库、SQLite 或假的持久层。默认连接串是 `postgresql://kiln:kiln@127.0.0.1:5432/kiln`，可用环境变量 `KILN_TEST_DATABASE_URL` 覆盖。GitHub Actions 的 backend 作业会启动 `postgres:16`。`backend/tests/test_persistence.py` 里的 `test_records_survive_api_process_restart` 通过 HTTP 写入记录，结束 API 进程，确认库里仍有这些行，再启动一个新进程读回同一条记录。`backend/tests/test_auth.py` 里的 `test_anonymous_requests_do_not_change_durable_rows` 确认未带令牌的客户端得到 401，并且账号与版本行数不变。`backend/tests/test_boundaries.py` 确认 compose 发布端口都带 `127.0.0.1`。
+后端测试连接真实 PostgreSQL，不使用内存库、SQLite 或假的持久层。制品字节测试把文件写进临时目录，不用模拟存储。默认连接串是 `postgresql://kiln:kiln@127.0.0.1:5432/kiln`，可用环境变量 `KILN_TEST_DATABASE_URL` 覆盖。GitHub Actions 的 backend 作业会启动 `postgres:16`。`backend/tests/test_persistence.py` 里的 `test_records_survive_api_process_restart` 通过 HTTP 写入记录，结束 API 进程，确认库里仍有这些行，再启动一个新进程读回同一条记录。`test_artifact_bytes_survive_api_process_restart` 把字节写进临时目录，结束 API 进程，再由新进程从同一目录取回相同字节。`backend/tests/test_auth.py` 确认未带令牌的客户端得到 401，不能写入账号或版本，也不能保存或下载制品字节。`backend/tests/test_boundaries.py` 确认 compose 发布端口都带 `127.0.0.1`。
 
 执行器和代码源测试同样不使用假的 Jenkins 或 Gitea。它们读取：
 
@@ -166,21 +169,23 @@ GitHub Actions 会跑后端测试、控制台构建，以及 `docker compose con
 
 ## 这一版还没有，但仍属于一期
 
-骨架如何在一台机器上启动，见 [部署说明](docs/DEPLOY.md)。下面这些按架构方案仍是一期要完成的事，但不是这一版：
+骨架如何在一台机器上启动，见 [部署说明](docs/DEPLOY.md)。制品目录、版本、权限目录和取包接口由平台持有。版本字节保存在平台本地目录里，取包会返回这些字节。下面这些按架构方案仍是一期要完成的事，但不是这一版：
 
 - Nexus 集成
 - 本地登录，以及身份联邦的起步
-- 制品字节和真正的取包（现在 `content_available` 仍是 false）
 
-`/api/v1` 已经有本地访问令牌。没有令牌不能改领域数据，也不能读取这些接口。这还不是登录，也不是身份联邦。
+`/api/v1` 已经有本地访问令牌。没有令牌不能改领域数据，也不能读取这些接口，也不能保存或下载制品字节。这还不是登录，也不是身份联邦。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的，不属于一期。可选对接之后，公司系统只确认身份和在职状态，kiln 的授权仍留在平台上。
 
-这一版交付的是 Jenkins 兼容执行器，以及可替换的代码源适配器。实验室适配器是 Gitea，生产代码源是 GitLab。生产 GitLab 的地址不在仓库里。
+这一版同时保留 Jenkins 兼容执行器，以及可替换的代码源适配器。实验室适配器是 Gitea，生产代码源是 GitLab。生产 GitLab 的地址不在仓库里。
 
 ## 不属于一期
 
 - Harbor
 - Kubernetes 镜像构建
 - 专用镜像仓库
-- 把制品发布到运行环境。平台仍然不把制品部署到运行环境。
+- 把制品发布到运行环境。平台仍然不把制品部署到运行环境。响应里 `deploys_to_runtime` 为 false
+- 登录与可选的公司用户系统对接的实现
+- 控制台视觉重做
+- 第一条完整的产品流水线端到端构建
 
-完整的端到端产品构建、控制台视觉重做，也不在这一版里。Jenkins 上的兼容任务只打印标记并回传日志，不代替以后的产品构建。
+Jenkins 上的兼容任务只打印标记并回传日志，不代替以后的产品构建。

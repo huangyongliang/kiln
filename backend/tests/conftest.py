@@ -39,6 +39,8 @@ ENV_KEYS = (
     "GIT_BASE_URL",
     "GIT_TOKEN",
     "GIT_TIMEOUT_SECONDS",
+    "KILN_ARTIFACT_ROOT",
+    "KILN_ARTIFACT_MAX_BYTES",
 )
 
 
@@ -62,8 +64,11 @@ def external_targets() -> ExternalTargets:
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
-    app = create_app(app_settings(llm_provider="off"))
+def client(tmp_path: Path) -> Iterator[TestClient]:
+    root = tmp_path / "artifacts"
+    app = create_app(
+        app_settings(llm_provider="off", kiln_artifact_root=str(root)),
+    )
     with TestClient(app, headers=auth_headers()) as test_client:
         truncate_domain(app.state.engine)
         yield test_client

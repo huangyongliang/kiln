@@ -1,8 +1,11 @@
 """PostgreSQL store for the domain HTTP API.
 
-Records stay in the database when the API process exits.
+Records stay in the database when the API process exits. Artifact bytes stay
+in the platform-owned blob store, which also outlives the process.
 """
 
+import hashlib
+import re
 from datetime import timedelta
 from uuid import UUID, uuid4
 
@@ -30,6 +33,7 @@ from kiln.db.models import (
 from kiln.domain.accounts import Account, AccountCreate
 from kiln.domain.artifacts import (
     PACKAGE_LABELS,
+    VERSION_PATTERN,
     Artifact,
     ArtifactCreate,
     ArtifactSource,
@@ -39,6 +43,7 @@ from kiln.domain.artifacts import (
     DownloadReservationCreate,
     PackageType,
     Reservation,
+    RetrievedBytes,
     RetrieveResult,
 )
 from kiln.domain.rbac import Permission, Role
@@ -49,8 +54,11 @@ from kiln.domain.skills import (
     SkillStatus,
     SkillStep,
 )
-from kiln.errors import Conflict, Gone, NotFound
-from kiln.paths import retrieve_path
+from kiln.errors import BadRequest, Conflict, Gone, NotFound, StorageError
+from kiln.paths import retrieve_content_path, retrieve_path
+from kiln.storage.local import LocalBlobStore
+
+_VERSION = re.compile(VERSION_PATTERN)
 
 _SKILL_LOAD = (
     selectinload(SkillRow.inputs),
@@ -61,8 +69,9 @@ _SKILL_LOAD = (
 
 
 class PostgresStore:
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, blobs: LocalBlobStore) -> None:
         self.engine = engine
+        self.blobs = blobs
 
     def _session(self) -> Session:
         return Session(self.engine, expire_on_commit=False)
@@ -198,6 +207,8 @@ class PostgresStore:
                 checksum_value=payload.checksum.value,
                 size_bytes=payload.size_bytes,
                 source=payload.source.value,
+                content_available=False,
+                blob_key=None,
                 created_at=created_at,
             )
             session.add(row)
@@ -252,13 +263,66 @@ class PostgresStore:
                 retrieve_path=retrieve_path(reservation_id),
             )
 
+    def store_version_bytes(
+        self,
+        artifact_id: UUID,
+        version: str,
+        data: bytes,
+        checksum: Checksum,
+        source: ArtifactSource,
+    ) -> tuple[ArtifactVersion, bool]:
+        if _VERSION.fullmatch(version) is None:
+            raise BadRequest("版本号不正确")
+        actual = hashlib.new(checksum.algorithm, data).hexdigest()
+        if actual != checksum.value:
+            raise BadRequest("校验和与制品字节不一致")
+        key = LocalBlobStore.key_for(checksum.algorithm, checksum.value)
+        with self._session() as session:
+            artifact = session.scalar(
+                select(ArtifactRow).where(ArtifactRow.id == artifact_id).with_for_update()
+            )
+            if artifact is None:
+                raise NotFound("制品不存在")
+            row = session.scalar(
+                select(ArtifactVersionRow)
+                .where(
+                    ArtifactVersionRow.artifact_id == artifact_id,
+                    ArtifactVersionRow.version == version,
+                )
+                .with_for_update()
+            )
+            if row is not None and not _same_version_bytes(row, checksum, len(data), key):
+                raise Conflict("版本已存在且不可变")
+            self.blobs.write(checksum.algorithm, checksum.value, data)
+            if row is None:
+                created_at = clock.utcnow()
+                row = ArtifactVersionRow(
+                    artifact_id=artifact_id,
+                    version=version,
+                    checksum_algorithm=checksum.algorithm,
+                    checksum_value=checksum.value,
+                    size_bytes=len(data),
+                    source=source.value,
+                    content_available=True,
+                    blob_key=key,
+                    created_at=created_at,
+                )
+                session.add(row)
+                _commit_unique(session, "版本已存在且不可变")
+                return _version(row), True
+            if row.content_available:
+                return _version(row), False
+            row.size_bytes = len(data)
+            row.content_available = True
+            row.blob_key = key
+            session.commit()
+            return _version(row), True
+
     def get_retrieve(self, reservation_id: UUID) -> RetrieveResult:
         with self._session() as session:
-            row = session.get(ReservationRow, reservation_id)
-            if row is None:
-                raise NotFound("取包预约不存在")
-            if row.expires_at <= clock.utcnow():
-                raise Gone("取包预约已过期")
+            row = _load_reservation(session, reservation_id)
+            version = session.get(ArtifactVersionRow, (row.artifact_id, row.version))
+            available = bool(version is not None and version.content_available and version.blob_key)
             package_type = PackageType(row.package_type)
             return RetrieveResult(
                 reservation_id=row.id,
@@ -271,7 +335,31 @@ class PostgresStore:
                     algorithm=row.checksum_algorithm,
                     value=row.checksum_value,
                 ),
-                detail="一期骨架只登记取包预约，不提供制品字节。",
+                content_available=available,
+                content_path=retrieve_content_path(row.id) if available else None,
+                detail=(
+                    "制品字节已由平台保存，可从 content_path 取回。"
+                    if available
+                    else "该版本尚未保存制品字节。"
+                ),
+            )
+
+    def read_reserved_bytes(self, reservation_id: UUID) -> RetrievedBytes:
+        with self._session() as session:
+            row = _load_reservation(session, reservation_id)
+            version = session.get(ArtifactVersionRow, (row.artifact_id, row.version))
+            if version is None or not version.content_available or not version.blob_key:
+                raise Conflict("该版本还没有制品字节")
+            data = self.blobs.read(version.blob_key)
+            digest = hashlib.new(version.checksum_algorithm, data).hexdigest()
+            if digest != version.checksum_value or len(data) != version.size_bytes:
+                raise StorageError("制品字节与登记的校验和不一致")
+            return RetrievedBytes(
+                data=data,
+                name=row.artifact_name,
+                version=row.version,
+                algorithm=version.checksum_algorithm,
+                digest=version.checksum_value,
             )
 
     def list_skills(self, status: SkillStatus | None) -> list[Skill]:
@@ -369,6 +457,30 @@ class PostgresStore:
             return _skill(row)
 
 
+def _same_version_bytes(
+    row: ArtifactVersionRow,
+    checksum: Checksum,
+    size: int,
+    key: str,
+) -> bool:
+    if row.checksum_algorithm != checksum.algorithm or row.checksum_value != checksum.value:
+        return False
+    if row.size_bytes is not None and row.size_bytes != size:
+        return False
+    if row.content_available and row.blob_key != key:
+        return False
+    return True
+
+
+def _load_reservation(session: Session, reservation_id: UUID) -> ReservationRow:
+    row = session.get(ReservationRow, reservation_id)
+    if row is None:
+        raise NotFound("取包预约不存在")
+    if row.expires_at <= clock.utcnow():
+        raise Gone("取包预约已过期")
+    return row
+
+
 def _commit_unique(session: Session, message: str) -> None:
     try:
         session.commit()
@@ -419,6 +531,7 @@ def _version(row: ArtifactVersionRow) -> ArtifactVersion:
         checksum=Checksum(algorithm=row.checksum_algorithm, value=row.checksum_value),
         size_bytes=row.size_bytes,
         source=ArtifactSource(row.source),
+        content_available=row.content_available,
         created_at=row.created_at,
     )
 

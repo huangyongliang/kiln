@@ -42,6 +42,22 @@ def test_compose_contract_prefixes_container_names() -> None:
     assert "JENKINS_URL:" in text
     assert "GIT_PROVIDER:" in text
     assert "GIT_BASE_URL:" in text
+    assert "KILN_ARTIFACT_ROOT:" in text
+    assert "kiln-artifact-data:" in text
+    assert "127.0.0.1:2222" not in text
+    assert "127.0.0.1:3000:" not in text
+    assert "127.0.0.1:50000" not in text
+
+
+def test_api_image_drops_to_the_kiln_user_for_artifact_storage() -> None:
+    dockerfile = (BACKEND / "Dockerfile").read_text(encoding="utf-8")
+    script = (BACKEND / "docker-entrypoint.py").read_text(encoding="utf-8")
+    assert "--uid 10001" in dockerfile
+    assert "--gid 10001" in dockerfile
+    assert "kiln-entrypoint" in dockerfile
+    assert "KILN_ARTIFACT_ROOT" in script
+    assert "os.setuid(KILN_UID)" in script
+    assert "subprocess" not in script
 
 
 def test_repository_does_not_invent_a_production_gitlab_or_nexus_url() -> None:

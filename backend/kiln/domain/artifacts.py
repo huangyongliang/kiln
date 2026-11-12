@@ -1,15 +1,19 @@
 """Artifact catalog models.
 
-Versions are immutable and carry a checksum. Download reservations point at a
-stable retrieve path. File bytes and repository integration are not implemented.
+Versions are immutable and carry a checksum. Bytes live in platform-owned
+local storage. Download reservations point at a stable retrieve path.
+`content_available` is true only after those bytes are stored.
 """
 
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+VERSION_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
 
 
 class PackageType(str, Enum):
@@ -60,7 +64,7 @@ class ArtifactCreate(BaseModel):
 class ArtifactVersionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
+    version: str = Field(pattern=VERSION_PATTERN)
     checksum: Checksum
     size_bytes: int | None = Field(default=None, ge=0)
     source: ArtifactSource = ArtifactSource.build
@@ -73,6 +77,7 @@ class ArtifactVersion(BaseModel):
     checksum: Checksum
     size_bytes: int | None
     source: ArtifactSource
+    content_available: bool
     created_at: datetime
 
 
@@ -118,7 +123,7 @@ class Reservation(BaseModel):
 
 
 class RetrieveResult(BaseModel):
-    """Stable retrieve contract. `content_available` stays false until bytes exist."""
+    """Retrieve metadata. Bytes are downloaded from `content_path` when stored."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -130,5 +135,15 @@ class RetrieveResult(BaseModel):
     package_type_label: str
     checksum: Checksum
     status: Literal["reserved"] = "reserved"
-    content_available: bool = False
+    content_available: bool
+    content_path: str | None = None
     detail: str
+
+
+@dataclass(frozen=True)
+class RetrievedBytes:
+    data: bytes
+    name: str
+    version: str
+    algorithm: str
+    digest: str

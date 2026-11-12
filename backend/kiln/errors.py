@@ -33,6 +33,16 @@ class Gone(AppError):
         super().__init__(410, detail)
 
 
+class PayloadTooLarge(AppError):
+    def __init__(self, detail: str) -> None:
+        super().__init__(413, detail)
+
+
+class StorageError(AppError):
+    def __init__(self, detail: str) -> None:
+        super().__init__(500, detail)
+
+
 class ModelDisabled(AppError):
     def __init__(self) -> None:
         super().__init__(

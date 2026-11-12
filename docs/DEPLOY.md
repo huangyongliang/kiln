@@ -14,9 +14,9 @@
 | 控制台 | 现在需要 | 服务 `console`，本地镜像 `kiln-console:local`，容器 `kiln-console`。构建阶段 `node:22-alpine`，运行阶段 `nginx:1.27-alpine`，容器内 `80` 映射到宿主机 `8080` |
 | Jenkins 兼容执行器 | 按环境变量接线 | API 在 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN` 都有值时，向该 Jenkins 创建任务并读取状态和日志。不部署到运行环境。profile `lab` 的 `jenkins/jenkins:lts-jdk17`、容器 `kiln-jenkins`、卷 `kiln-jenkins-home`、端口 `127.0.0.1:18080` 仍是本仓库里的占位，不是共享实验机上的实例 |
 | Git 远端 | 可替换适配器 | `GIT_PROVIDER=gitlab` 是生产代码源，`GIT_PROVIDER=gitea` 是实验室实现。地址只来自 `GIT_BASE_URL`，令牌只来自 `GIT_TOKEN`。仓库不写生产 GitLab 地址。profile `lab` 的 `gitea/gitea:1.22`（容器 `kiln-gitea`）仍是占位，不是生产代码源 |
-| 制品存储 | 元数据已在 PostgreSQL。Nexus 与制品字节仍是一期要做的事 | 制品、版本和下载预约写在 Postgres，API 进程重启后仍在。取包响应里 `content_available` 为 false。包类型字段有 `maven`、`python`、`generic`、`frontend`，没有对应的仓库客户端。现网 Nexus 集成还没有写入配置 |
+| 制品存储 | 目录在 PostgreSQL，字节在平台本地目录 | 制品、版本和下载预约写在 Postgres。字节写在 `KILN_ARTIFACT_ROOT`。compose 把它挂到命名卷 `kiln-artifact-data`，容器内路径是 `/var/lib/kiln/artifacts`。版本保存字节后 `content_available` 为 true，`GET /api/v1/retrieve/{reservation_id}/content` 返回这些字节。包类型字段有 `maven`、`python`、`generic`、`frontend`。Nexus 集成还没有写入配置，仓库里没有 Nexus 地址 |
 | OpenAI 兼容模型端点 | 可选 | `LLM_PROVIDER` 默认 `off`。`openai` 会 `POST {LLM_BASE_URL}/chat/completions`。`mock` 不访问网络 |
-| 本地登录与身份联邦 | 一期要做，这一版还没有 | 本地账号和 RBAC 目录在 Postgres 中。`/api/v1` 需要本地令牌 `KILN_API_TOKEN`。没有登录页、口令，也没有外部身份系统的产品名或地址 |
+| 本地登录与身份联邦 | 一期要做，这一版还没有 | 平台自身具备完整的账号与权限能力。本地账号和 RBAC 目录在 Postgres 中。`/api/v1` 需要本地令牌 `KILN_API_TOKEN`。没有登录页和口令。公司用户系统的对接是可选的，不属于一期；可选对接之后，公司系统只确认身份和在职状态，kiln 的授权仍留在平台上 |
 | Harbor、Kubernetes、专用镜像仓库 | 不属于一期 | 没有清单、没有镜像推送。架构方案把镜像构建放在一期之后 |
 
 默认命令 `docker compose up` 只启动 Postgres、API、控制台。profile `lab` 里的 Jenkins 和 Gitea 仍是占位。不要在共享实验机上加 `--profile lab`，也不要在那台机器上启动这份 compose。执行器和代码源通过环境变量指向已经在跑的服务。
@@ -35,7 +35,7 @@ Compose 文件没有 `cpus`、`mem_limit`、`deploy.resources`。Jenkins 服务�
 - 默认三个容器不设内存上限。小实验室档的 4 GB 主要留给同机镜像构建：控制台镜像会拉取 `node:22-alpine`，并执行 `npm ci` 与 `npm run build`。运行时的 Postgres、API 和 nginx 比这一步轻。本仓库没有做过占用测量。
 - 仓库没有现成的 `kiln-api` / `kiln-console` 远程镜像，部署这台机器要自己构建。未写仓库前缀的基础镜像按守护进程的默认规则拉取：`python:3.11-slim`、`node:22-alpine`、`nginx:1.27-alpine`、`postgres:16-alpine`。lab 另加 `jenkins/jenkins:lts-jdk17` 和 `gitea/gitea:1.22`。仓库没有配置镜像加速。
 - Jenkins 服务没有 `JAVA_OPTS`，compose 也没有给它设内存上限。JVM 堆由上游镜像和 JDK 的默认值决定，本仓库没有测量。建议档的 8 GB 是把这个占位和默认栈放在一起时的起步值。
-- 磁盘要放下镜像层、构建缓存，以及命名卷。项目名是 `kiln`，卷在 Docker 里通常显示为 `kiln_kiln-postgres-data`、`kiln_kiln-jenkins-home`、`kiln_kiln-gitea-data`。API 把账号、权限目录、制品、预约和 skill 写进 Postgres。数据库卷里是这些表，外加迁移记录。Jenkins 数据卷只在启动过 lab 之后出现。
+- 磁盘要放下镜像层、构建缓存，以及命名卷。项目名是 `kiln`，卷在 Docker 里通常显示为 `kiln_kiln-postgres-data`、`kiln_kiln-artifact-data`、`kiln_kiln-jenkins-home`、`kiln_kiln-gitea-data`。API 把账号、权限目录、制品元数据、预约和 skill 写进 Postgres。制品字节写进 `kiln-artifact-data`。数据库卷里是这些表，外加迁移记录。Jenkins 数据卷只在启动过 lab 之后出现。
 
 系统与 Docker：
 
@@ -103,10 +103,12 @@ cp .env.example .env
 | `GIT_BASE_URL` | 空 | `gitea` 或 `gitlab` 时必填。compose 原样传入。没有生产默认值 |
 | `GIT_TOKEN` | 空 | `gitea` 或 `gitlab` 时必填。只从环境读取 |
 | `GIT_TIMEOUT_SECONDS` | `30` | 单次调用超时，大于 0 且不超过 120 |
+| `KILN_ARTIFACT_ROOT` | 进程方式默认 `var/kiln-artifacts`；compose 固定为 `/var/lib/kiln/artifacts` | 平台自管制品字节的本地目录。compose 不读取 `.env` 里的这一行，而是写死容器内路径并挂载命名卷 `kiln-artifact-data` |
+| `KILN_ARTIFACT_MAX_BYTES` | `67108864` | 单次保存的字节上限。compose 在未设置时传入这个值 |
 
 已经导出的同名环境变量会覆盖 `.env`。Compose 插值是这样，pydantic-settings 也是这样。
 
-`JENKINS_URL` 和 `GIT_BASE_URL` 由这一版的 API 读取。GitLab 仍是生产代码源，Gitea 是实验室适配器，两者都只使用你填入的地址。Nexus、本地登录和身份联邦的起步仍属于一期，这一版没有客户端，也没有 Nexus 地址。Harbor、Kubernetes 和专用镜像仓库不属于一期。平台不把制品部署到运行环境。
+`JENKINS_URL` 和 `GIT_BASE_URL` 由这一版的 API 读取。GitLab 仍是生产代码源，Gitea 是实验室适配器，两者都只使用你填入的地址。制品字节由平台写到 `KILN_ARTIFACT_ROOT`，不依赖 Nexus。Nexus 集成、本地登录和身份联邦的起步仍属于一期，这一版没有 Nexus 客户端，也没有 Nexus 地址。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的，不属于一期；可选对接之后，公司系统只确认身份和在职状态，kiln 的授权仍留在平台上。Harbor、Kubernetes 和专用镜像仓库不属于一期。平台不把制品部署到运行环境。
 
 `LLM_PROVIDER=openai` 且 `LLM_BASE_URL` 为空或只有空白时，进程在加载配置时失败。校验错误中包含 `LLM_PROVIDER=openai 时必须设置 LLM_BASE_URL`。保持示例里的 `off` 即可先把骨架启动。
 
@@ -127,7 +129,7 @@ docker compose up --build -d
 - 先等 `kiln-postgres` 健康，再启动 `kiln-api`，然后启动 `kiln-console`
 - `kiln-api` 启动时连接数据库并执行迁移，然后写入 RBAC 目录。不需要单独的迁移命令
 
-API 镜像以 uid `10001` 的用户 `kiln` 运行。镜像构建不包含 `backend/tests`（见 `backend/.dockerignore`）。控制台构建使用 `npm ci`。
+API 镜像的入口先保证 `KILN_ARTIFACT_ROOT` 可由 uid `10001` 写入，再以用户 `kiln` 运行 API 进程。镜像构建不包含 `backend/tests`（见 `backend/.dockerignore`）。控制台构建使用 `npm ci`。
 
 `kiln-console` 的 `depends_on` 只等待 API 容器启动，不等待 API 健康。API 健康检查有 `start_period: 10s`，间隔 5 秒，最多 20 次。控制台先起来时，经 `8080` 访问 `/health` 可能短暂失败，等 `kiln-api` 变为 healthy 后再查。
 
@@ -185,7 +187,7 @@ docker exec kiln-postgres pg_isready -U kiln -d kiln
 
 若改过 `.env` 的 `POSTGRES_USER` 或 `POSTGRES_DB`，这里换成相同的值。成功时输出中含有 `accepting connections`。
 
-这只说明数据库容器在接受连接。API 使用这条连接保存领域数据。重启 API 容器后，账号、制品、预约和 skill 仍在这个库里；`docker compose down -v` 会连数据卷一起删除。
+这只说明数据库容器在接受连接。API 使用这条连接保存领域数据。制品字节在命名卷 `kiln-artifact-data` 里。重启 API 容器后，账号、制品元数据、预约、skill 和已保存的字节都还在；`docker compose down -v` 会连这些数据卷一起删除。
 
 可以这样核对重启后记录还在。下面的用户名须匹配 `^[a-z][a-z0-9_-]{2,31}$`。
 
@@ -204,7 +206,28 @@ curl -fsS http://127.0.0.1:8000/api/v1/accounts \
   -H 'Authorization: Bearer kiln-local'
 ```
 
-不带令牌再查一次，应得到 401，库里的 `ada` 不会因此消失。
+不带令牌再查一次，应得到 401，库里的 `ada` 不会因此消失。未带令牌也不能保存或下载制品字节。
+
+保存并取回一组字节时，先登记制品，再 `PUT` 原始字节。校验和是这组字节的 sha256。下面的示例只说明调用形状；`kiln-local` 只用于本地。
+
+```bash
+printf 'kiln' > /tmp/kiln-sample.bin
+SUM=$(sha256sum /tmp/kiln-sample.bin | awk '{print $1}')
+ART=$(curl -fsS http://127.0.0.1:8000/api/v1/artifacts \
+  -H 'Authorization: Bearer kiln-local' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"sample-pkg","package_type":"generic"}')
+ART_ID=$(printf '%s' "$ART" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+curl -fsS "http://127.0.0.1:8000/api/v1/artifacts/${ART_ID}/versions/1/content" \
+  -X PUT \
+  -H 'Authorization: Bearer kiln-local' \
+  -H 'Content-Type: application/octet-stream' \
+  -H 'X-Kiln-Checksum-Algorithm: sha256' \
+  -H "X-Kiln-Checksum: ${SUM}" \
+  --data-binary @/tmp/kiln-sample.bin
+```
+
+响应里 `content_available` 为 true。预约之后，`GET /api/v1/retrieve/{reservation_id}/content` 返回同一组字节。只重启 API 进程不会丢掉这个文件；删掉 `kiln-artifact-data` 才会。
 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/v1/accounts
@@ -212,7 +235,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/v1/accounts
 
 ## 账号
 
-没有引导账号，没有登录页，也没有口令字段。控制台侧栏可以填访问令牌，请求 `/api` 时放在 `Authorization` 头。本地登录和身份联邦的起步仍属于一期，这一版还没有接上。控制台「账号与权限」在 API 尚未创建账号时显示「还没有账号」，并列出角色目录：`reader`（只读）、`builder`（构建者）、`publisher`（发布者）、`admin`（管理员）。这些角色目前不参与鉴权。
+没有引导账号，没有登录页，也没有口令字段。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的，不属于一期；可选对接之后，公司系统只确认身份和在职状态，kiln 的授权仍留在平台上。控制台侧栏可以填访问令牌，请求 `/api` 时放在 `Authorization` 头。本地登录和身份联邦的起步仍属于一期，这一版还没有接上。控制台「账号与权限」在 API 尚未创建账号时显示「还没有账号」，并列出角色目录：`reader`（只读）、`builder`（构建者）、`publisher`（发布者）、`admin`（管理员）。这些角色目前不参与请求鉴权。
 
 需要一条账号时，可以向 API 登记。用户名须匹配 `^[a-z][a-z0-9_-]{2,31}$`。记录写在 Postgres 里，只重启 API 进程不会消失。上文 Postgres 一节有一组创建后重启再读取的命令。
 
@@ -334,13 +357,13 @@ npm run dev
 docker compose --profile lab down
 ```
 
-同时删除命名卷（Postgres 数据目录；若启动过 lab，还包括 Jenkins home 和 Gitea 数据）：
+同时删除命名卷（Postgres 数据目录和制品字节；若启动过 lab，还包括 Jenkins home 和 Gitea 数据）：
 
 ```bash
 docker compose --profile lab down -v
 ```
 
-只停容器或只重建 API 时，Postgres 卷里的账号、制品、预约和 skill 还在。加上 `-v` 才会删掉这些数据。
+只停容器或只重建 API 时，Postgres 卷里的账号、制品元数据、预约和 skill 还在，制品字节卷里的文件也还在。加上 `-v` 才会删掉这些数据。
 
 ## 常见失败
 
@@ -354,7 +377,7 @@ docker compose --profile lab down -v
 - **控制台短暂不可用。** `kiln-console` 不等待 API 健康。nginx 反代的上游是 Docker DNS 名 `api`。API 尚未监听时，`http://127.0.0.1:8080/health` 会失败；直接看 `8000`，或等 `docker compose ps` 里的 API 变为 healthy。
 - **把 `/health` 当成全量依赖检查。** 返回 `ok` 只表示 API 进程在应答。它不重新探测 Postgres，也不代表模型端点可达。进程若从未变成 healthy，先看启动日志里的迁移或连接错误。
 - **数据库未就绪或迁移失败。** API 启动时执行迁移。Postgres 未接受连接、口令不对或库不存在时，进程退出，健康检查不会变为 healthy。看 `docker compose logs api`。
-- **重启 API 后数据还在，删卷后才消失。** 账号、制品、预约和 skill 在 Postgres 卷里。`docker compose restart api` 不会清掉它们。`docker compose down -v` 会。
+- **重启 API 后数据还在，删卷后才消失。** 账号、制品元数据、预约和 skill 在 Postgres 卷里。制品字节在 `kiln-artifact-data`。`docker compose restart api` 不会清掉它们。`docker compose down -v` 会。
 - **改了源码但容器行为不变。** 运行中的镜像在构建时复制代码。`backend/Dockerfile` 复制 `pyproject.toml` 和 `kiln/`，`console/Dockerfile` 复制控制台源码后执行 `npm run build`。需要 `docker compose up --build`。
 - **浏览器跨域。** 直接打开 API 时，来源必须落在 `KILN_CORS_ORIGINS` 里。容器内写死为 `http://localhost:8080` 和 `http://localhost:5173`。经控制台同源访问 `8080` 上的页面时，由 nginx 转发，不依赖这组 CORS。
 - **共享机器。** 端口和容器名都是固定值，一套实例会占住这台 Docker 宿主机上的对应资源。
@@ -369,9 +392,8 @@ docker compose logs api
 
 下面这些按架构方案仍是一期要完成的事。这一版没有做它们，本文也不给出虚构的接入步骤。
 
-- **Nexus。** 现网制品库。没有地址、仓库名或同步。
-- **本地登录，以及身份联邦的起步。** 没有登录页和口令。外部身份系统的产品名和地址尚未进入仓库。`/api/v1` 只有一把本地访问令牌。
-- **制品字节和真正的取包。** 取包接口只返回预约契约，`content_available` 为 false。
+- **Nexus。** 现网制品库。没有地址、仓库名或同步。平台自己的本地目录已经能保存并取回字节。
+- **本地登录，以及身份联邦的起步。** 没有登录页和口令。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的，不属于一期；可选对接之后，公司系统只确认身份和在职状态，kiln 的授权仍留在平台上。`/api/v1` 仍用本地访问令牌。
 
 Jenkins 兼容执行器和可替换的代码源适配器在这一版。生产代码源适配器的类型是 GitLab，实验室实现是 Gitea。两边的地址都只来自环境变量。
 
@@ -381,5 +403,8 @@ Jenkins 兼容执行器和可替换的代码源适配器在这一版。生产代
 - **Kubernetes 镜像构建。** 仓库中没有清单。
 - **专用镜像仓库。** 没有镜像推送。
 - **把制品发布到运行环境。** 平台不把制品部署到运行环境。执行器响应里的 `deploys_to_runtime` 为 false。
+- **登录与可选的公司用户系统对接的实现。**
+- **控制台视觉重做。**
+- **第一条完整的产品流水线端到端构建。**
 
-第一次完整的产品构建、控制台视觉重做，也不在这一版。兼容任务只在 Jenkins 上打印标记并回传日志。
+兼容任务只在 Jenkins 上打印标记并回传日志。
