@@ -81,6 +81,7 @@ stop_proxy() {
     /tmp/kiln-nexus-fixture-got \
     /tmp/kiln-nexus-pass \
     /tmp/kiln-nexus-user.json \
+    /tmp/kiln-nexus-eula.json \
     /tmp/kiln-nexus-repos.json \
     /tmp/kiln-ci-nexus.env
 }
@@ -146,6 +147,38 @@ expect() {
   exit 1
 }
 
+accept_eula() {
+  local code
+  code="$(api GET "/service/rest/v1/system/eula" "$ADMIN_USER" "$ADMIN_PASSWORD")"
+  if [[ "$code" != "200" ]]; then
+    echo "Nexus EULA status failed HTTP ${code}" >&2
+    redact "$(cat /tmp/kiln-nexus-body 2>/dev/null || true)" >&2
+    exit 1
+  fi
+  python3 - <<'PY'
+import json
+import sys
+
+with open("/tmp/kiln-nexus-body", encoding="utf-8") as handle:
+    body = json.load(handle)
+if body.get("accepted") is True:
+    sys.exit(0)
+disclaimer = body.get("disclaimer")
+if not isinstance(disclaimer, str) or not disclaimer:
+    sys.exit("Nexus EULA response has no disclaimer")
+with open("/tmp/kiln-nexus-eula.json", "w", encoding="utf-8") as handle:
+    json.dump({"accepted": True, "disclaimer": disclaimer}, handle)
+PY
+  if [[ ! -s /tmp/kiln-nexus-eula.json ]]; then
+    echo "Nexus Community Edition EULA was already accepted."
+    return 0
+  fi
+  expect POST "/service/rest/v1/system/eula" \
+    "$ADMIN_USER" "$ADMIN_PASSWORD" "application/json" /tmp/kiln-nexus-eula.json 200 204
+  rm -f /tmp/kiln-nexus-eula.json
+  echo "Accepted the Nexus Community Edition EULA."
+}
+
 ensure_jenkins_curl() {
   if ! docker inspect "$JENKINS_NAME" >/dev/null 2>&1; then
     echo "Jenkins container ${JENKINS_NAME} is not running; start scripts/ci-external-services.sh first" >&2
@@ -204,6 +237,8 @@ start_proxy() {
 EOF
   expect PUT "/service/rest/v1/security/anonymous" \
     "$ADMIN_USER" "$ADMIN_PASSWORD" "application/json" /tmp/kiln-nexus-body.json 200 204
+
+  accept_eula
 
   cat >/tmp/kiln-nexus-body.json <<EOF
 {
