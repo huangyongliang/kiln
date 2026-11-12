@@ -27,20 +27,39 @@ const showBuilds = computed(() => canDo("overview.builds", perms.value));
 const showSkills = computed(() => canDo("overview.skills", perms.value));
 const showArtifacts = computed(() => canDo("overview.artifacts", perms.value));
 const topCount = computed(() => Number(showBuilds.value) + Number(showSkills.value));
+const metricCount = computed(() => {
+  let count = 0;
+  if (showBuilds.value && buildsState.value !== "hidden") {
+    count += 1;
+  }
+  if (showSkills.value && skillsState.value !== "hidden") {
+    count += 1;
+  }
+  if (showArtifacts.value && artifactsState.value !== "hidden") {
+    count += 1;
+  }
+  return count;
+});
 
 const runningCount = computed(
   () => builds.value.filter((item) => item.status === "queued" || item.status === "running").length,
 );
 const skillMetric = computed(() => {
-  if (perms.value != null && !canDo("skill.publish", perms.value)) {
+  if (perms.value == null || canDo("skill.publish", perms.value)) {
+    return {
+      label: "审核中",
+      value: skills.value.filter((item) => item.status === "in_review").length,
+    };
+  }
+  if (canDo("skill.submit", perms.value)) {
     return {
       label: "草稿",
       value: skills.value.filter((item) => item.status === "draft").length,
     };
   }
   return {
-    label: "审核中",
-    value: skills.value.filter((item) => item.status === "in_review").length,
+    label: "已发布 Skill",
+    value: skills.value.filter((item) => item.status === "published").length,
   };
 });
 const reviewSkills = computed(() =>
@@ -101,7 +120,7 @@ async function loadSkills() {
       return;
     }
     skillsState.value = "error";
-    skillsError.value = errorText(caught, "无法读取 skill");
+    skillsError.value = errorText(caught, "无法读取 Skill");
   }
 }
 
@@ -124,8 +143,8 @@ async function loadArtifacts() {
 </script>
 
 <template>
-  <PageIntro title="概览" lead="进行中的构建、skill 草稿和最近制品。" :note="note" />
-  <section v-if="showBuilds || showSkills || showArtifacts" class="metrics">
+  <PageIntro title="概览" lead="进行中的构建、Skill 草稿和最近制品。" :note="note" />
+  <section v-if="metricCount" class="metrics" :style="{ '--n': metricCount }">
     <RouterLink v-if="showBuilds && buildsState !== 'hidden'" class="metric" to="/builds">
       <span class="v">{{ buildsState === "ready" || buildsState === "empty" ? runningCount : "—" }}</span>
       <span class="k">进行中的构建</span>
@@ -157,7 +176,7 @@ async function loadArtifacts() {
           v-for="item in builds.slice(0, 5)"
           :key="item.id"
           class="build-item"
-          :to="`/builds/${item.id}`"
+          :to="{ name: 'build', params: { id: item.id } }"
         >
           <span>
             <span class="name">{{ item.repository }}</span>
@@ -177,7 +196,7 @@ async function loadArtifacts() {
         :loading="skillsState === 'loading' || skillsState === 'idle'"
         :error="skillsState === 'error' ? skillsError : ''"
         :empty="skillsState === 'ready' && reviewSkills.length === 0"
-        :empty-text="skills.length ? '没有草稿或审核中的 skill' : '还没有 skill'"
+        :empty-text="skills.length ? '没有草稿或审核中的 Skill' : '还没有 Skill'"
         @retry="loadSkills"
       >
         <table v-if="reviewSkills.length">
@@ -190,7 +209,7 @@ async function loadArtifacts() {
           <tbody>
             <tr v-for="item in reviewSkills" :key="item.id" class="clickable">
               <td>
-                <RouterLink class="linkish" :to="`/skills/${item.id}`">{{ item.name }}</RouterLink>
+                <RouterLink class="linkish" :to="{ name: 'skill', params: { id: item.id } }">{{ item.name }}</RouterLink>
                 <div class="mono subline">{{ item.version }}</div>
               </td>
               <td class="nowrap"><StatusTag :status="item.status" :label="item.status_label" /></td>
@@ -227,7 +246,7 @@ async function loadArtifacts() {
           <tbody>
             <tr v-for="item in artifacts.slice(0, 5)" :key="item.id" class="clickable">
               <td>
-                <RouterLink class="linkish" :to="`/artifacts/${item.id}`">{{ item.name }}</RouterLink>
+                <RouterLink class="linkish" :to="{ name: 'artifact', params: { id: item.id } }">{{ item.name }}</RouterLink>
               </td>
               <td>{{ item.group || "—" }}</td>
               <td>{{ item.package_type_label }}</td>

@@ -1,7 +1,10 @@
 <script setup>
+import { computed } from "vue";
 import { RouterLink } from "vue-router";
 
-defineProps({
+import { permissionDescription } from "../access";
+
+const props = defineProps({
   loading: { type: Boolean, default: false },
   empty: { type: Boolean, default: false },
   error: { type: String, default: "" },
@@ -11,12 +14,15 @@ defineProps({
 });
 
 defineEmits(["retry"]);
+
+const needed = computed(() => permissionDescription(props.forbiddenCode));
 </script>
 
 <template>
   <section v-if="forbidden" class="forbidden" role="alert">
     <h2>你没有查看此页面的权限</h2>
-    <p class="mono">需要权限：{{ forbiddenCode }}</p>
+    <p>需要权限：{{ needed }}</p>
+    <p class="mono">{{ forbiddenCode }}</p>
     <RouterLink class="btn" to="/">返回概览</RouterLink>
   </section>
   <div v-else-if="loading" class="skeleton" aria-busy="true" aria-live="polite">

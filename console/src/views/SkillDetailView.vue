@@ -2,13 +2,14 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
-import { accessReady, perms } from "../access";
+import { accessReady, actionDeniedText, perms } from "../access";
 import { errorText, getJson, isForbidden, postEmpty } from "../api";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
 import StatusTag from "../components/StatusTag.vue";
 import { pageCrumb } from "../crumb";
 import { stepLabel } from "../format";
+import { apiPath, isUuid } from "../paths";
 import { canDo, canSee } from "../permissions";
 
 const route = useRoute();
@@ -16,6 +17,7 @@ const skill = ref(null);
 const mode = ref("loading");
 const error = ref("");
 const forbidden = ref(false);
+const missing = ref(false);
 const busy = ref("");
 const actionError = ref("");
 
@@ -40,6 +42,15 @@ watch(accessReady, (ready) => {
 async function load() {
   forbidden.value = false;
   actionError.value = "";
+  missing.value = false;
+  const id = route.params.id;
+  if (!isUuid(id)) {
+    skill.value = null;
+    missing.value = true;
+    mode.value = "ready";
+    pageCrumb.value = "Skill";
+    return;
+  }
   if (accessReady.value && !canSee("skill", perms.value)) {
     forbidden.value = true;
     return;
@@ -47,7 +58,7 @@ async function load() {
   mode.value = "loading";
   error.value = "";
   try {
-    skill.value = await getJson(`/api/v1/skills/${route.params.id}`);
+    skill.value = await getJson(apiPath`/api/v1/skills/${id}`);
     pageCrumb.value = `Skill / ${skill.value.name}`;
     mode.value = "ready";
   } catch (caught) {
@@ -56,25 +67,30 @@ async function load() {
       return;
     }
     mode.value = "error";
-    error.value = errorText(caught, "无法读取 skill");
+    error.value = errorText(caught, "无法读取 Skill");
   }
 }
 
 async function act(kind) {
-  if (busy.value) {
+  const id = route.params.id;
+  if (busy.value || !isUuid(id)) {
     return;
   }
   busy.value = kind;
   actionError.value = "";
   const path =
     kind === "submit"
-      ? `/api/v1/skills/${route.params.id}/submit-review`
-      : `/api/v1/skills/${route.params.id}/publish`;
+      ? apiPath`/api/v1/skills/${id}/submit-review`
+      : apiPath`/api/v1/skills/${id}/publish`;
   try {
     skill.value = await postEmpty(path);
     pageCrumb.value = `Skill / ${skill.value.name}`;
   } catch (caught) {
-    actionError.value = errorText(caught, kind === "submit" ? "无法提交审核" : "无法发布");
+    if (isForbidden(caught)) {
+      actionError.value = actionDeniedText(kind === "submit" ? "skill.submit" : "skill.publish");
+    } else {
+      actionError.value = errorText(caught, kind === "submit" ? "无法提交审核" : "无法发布");
+    }
   } finally {
     busy.value = "";
   }
@@ -84,7 +100,7 @@ async function act(kind) {
 <template>
   <StatePanel v-if="forbidden" forbidden forbidden-code="skill.read" />
   <template v-else>
-    <PageIntro :title="skill?.name || 'Skill'" lead="步骤只作为数据保存，不会执行。">
+    <PageIntro :title="skill?.name || 'Skill'">
       <template v-if="skill" #meta>
         <p class="meta-row">
           <StatusTag :status="skill.status" :label="skill.status_label" />
@@ -104,7 +120,13 @@ async function act(kind) {
     </PageIntro>
     <p v-if="skill?.description" class="prose">{{ skill.description }}</p>
     <p v-if="actionError" class="message error" role="alert">{{ actionError }}</p>
-    <StatePanel :loading="mode === 'loading'" :error="mode === 'error' ? error : ''" @retry="load">
+    <StatePanel
+      :loading="mode === 'loading'"
+      :error="mode === 'error' ? error : ''"
+      :empty="missing"
+      empty-text="不存在"
+      @retry="load"
+    >
       <div v-if="skill" class="grid-2 even">
         <section class="panel">
           <div class="panel-head">

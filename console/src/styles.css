@@ -87,6 +87,14 @@ h2,
   letter-spacing: -0.01em;
 }
 
+.section-gap {
+  margin: 18px 0 10px;
+}
+
+.perm-line {
+  margin: 2px 0;
+}
+
 .brand-lockup {
   display: flex;
   align-items: center;
@@ -484,6 +492,8 @@ h2,
 .content.chat {
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .footnote {
@@ -585,7 +595,7 @@ h2,
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(var(--n, 3), minmax(0, 1fr));
   gap: 14px;
   margin-bottom: 14px;
 }
@@ -810,6 +820,27 @@ tr:last-child td {
 .btn-ghost:hover {
   background: none;
   text-decoration: underline;
+}
+
+.copy-control {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  vertical-align: middle;
+}
+
+.copy-fallback {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.copy-fallback input {
+  display: block;
+  width: min(420px, 70vw);
+  margin-top: 4px;
 }
 
 .field {
@@ -1142,17 +1173,41 @@ label {
   border-color: transparent;
 }
 
+.shell:has(.content.chat) {
+  height: 100vh;
+  overflow: hidden;
+}
+
+.shell:has(.content.chat) .workspace {
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .chat-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chat-page > .page-head {
+  flex: none;
+}
+
+.chat-layout {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
 }
 
-.chat-layout {
-  display: flex;
-  flex-direction: column;
-  min-height: calc(100vh - 230px);
+.chat-layout .suggest,
+.chat-layout .composer,
+.chat-layout .hint,
+.chat-layout .message {
+  flex: none;
 }
 
 .messages {
@@ -1160,6 +1215,7 @@ label {
   flex-direction: column;
   gap: 10px;
   flex: 1;
+  min-height: 0;
   overflow: auto;
   padding-bottom: 8px;
 }
@@ -1180,10 +1236,22 @@ label {
 
 .bubble.user {
   align-self: flex-end;
-  background: var(--ember);
-  color: #fff;
+  background: var(--ember-soft);
+  color: var(--ink);
   border-color: transparent;
   border-radius: 16px 16px 6px 16px;
+}
+
+.bubble.failed {
+  border-color: var(--clay);
+}
+
+.fail-mark {
+  display: block;
+  margin-top: 4px;
+  color: var(--clay);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .suggest {

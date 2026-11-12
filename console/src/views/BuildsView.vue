@@ -2,12 +2,13 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRouter } from "vue-router";
 
-import { accessReady, perms } from "../access";
+import { accessReady, actionDeniedText, perms } from "../access";
 import { errorText, getJson, isForbidden, isNotConfigured, postJson } from "../api";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
 import StatusTag from "../components/StatusTag.vue";
 import { formatTime, shortSha } from "../format";
+import { apiPath } from "../paths";
 import { canDo, canSee } from "../permissions";
 
 const note =
@@ -204,7 +205,9 @@ async function createJob() {
     await refreshActive();
     await loadJobs();
   } catch (caught) {
-    actionError.value = errorText(caught, "无法创建任务");
+    actionError.value = isForbidden(caught)
+      ? actionDeniedText("executor.run")
+      : errorText(caught, "无法创建任务");
   } finally {
     busy.value = false;
   }
@@ -214,10 +217,11 @@ async function refreshActive() {
   if (!active.value) {
     return;
   }
+  const id = active.value.id;
   try {
-    active.value = await getJson(`/api/v1/jobs/${active.value.id}`);
+    active.value = await getJson(apiPath`/api/v1/jobs/${id}`);
     if (active.value.build_number) {
-      const log = await getJson(`/api/v1/jobs/${active.value.id}/log`);
+      const log = await getJson(apiPath`/api/v1/jobs/${id}/log`);
       logText.value = log.text;
     }
     if (TERMINAL.includes(active.value.status)) {
@@ -230,7 +234,7 @@ async function refreshActive() {
 }
 
 function openBuild(id) {
-  router.push(`/builds/${id}`);
+  router.push({ name: "build", params: { id } });
 }
 </script>
 
@@ -315,7 +319,7 @@ function openBuild(id) {
                   @click="openBuild(item.id)"
                 >
                   <td class="mono nowrap">
-                    <RouterLink class="linkish" :to="`/builds/${item.id}`" @click.stop>
+                    <RouterLink class="linkish" :to="{ name: 'build', params: { id: item.id } }" @click.stop>
                       {{ item.build_number ?? "—" }}
                     </RouterLink>
                   </td>

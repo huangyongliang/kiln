@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 
-import { accessReady, perms } from "../access";
+import { accessReady, actionDeniedText, perms } from "../access";
 import { errorText, getJson, isForbidden, postJson } from "../api";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
@@ -81,6 +81,13 @@ function onKeydown(event) {
   }
 }
 
+async function scrollMessages() {
+  await nextTick();
+  if (listEl.value) {
+    listEl.value.scrollTop = listEl.value.scrollHeight;
+  }
+}
+
 async function send() {
   const content = prompt.value.trim();
   if (!content || sending.value || composerDisabled.value) {
@@ -88,22 +95,23 @@ async function send() {
   }
   sending.value = true;
   error.value = "";
+  messages.value = [...messages.value, { role: "user", content, failed: false }];
+  await scrollMessages();
   try {
     const body = await postJson("/api/v1/llm/chat", {
       messages: [{ role: "user", content }],
     });
-    messages.value = [
-      ...messages.value,
-      { role: "user", content },
-      { role: "assistant", content: body?.content || "" },
-    ];
+    messages.value = [...messages.value, { role: "assistant", content: body?.content || "" }];
     prompt.value = "";
-    await nextTick();
-    if (listEl.value) {
-      listEl.value.scrollTop = listEl.value.scrollHeight;
-    }
+    await scrollMessages();
   } catch (caught) {
-    error.value = errorText(caught, "发送失败");
+    const copy = messages.value.slice();
+    const last = copy[copy.length - 1];
+    if (last && last.role === "user") {
+      copy[copy.length - 1] = { ...last, failed: true };
+      messages.value = copy;
+    }
+    error.value = isForbidden(caught) ? actionDeniedText("agent.qa") : errorText(caught, "发送失败");
   } finally {
     sending.value = false;
   }
@@ -126,9 +134,10 @@ async function send() {
             v-for="(item, index) in messages"
             :key="index"
             class="bubble"
-            :class="{ user: item.role === 'user' }"
+            :class="{ user: item.role === 'user', failed: item.failed }"
           >
             {{ item.content }}
+            <span v-if="item.failed" class="fail-mark">发送失败</span>
           </div>
         </div>
         <div v-if="mode === 'ready' && !off" class="suggest">

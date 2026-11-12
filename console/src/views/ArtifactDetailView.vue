@@ -5,19 +5,21 @@ import { useRoute } from "vue-router";
 import { accessReady, perms } from "../access";
 import { errorText, getJson, isForbidden } from "../api";
 import AppIcon from "../components/AppIcon.vue";
+import CopyButton from "../components/CopyButton.vue";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
 import StatusTag from "../components/StatusTag.vue";
 import { pageCrumb } from "../crumb";
 import { formatBytes, formatTime, shortDigest, sourceLabel } from "../format";
+import { apiPath, isUuid } from "../paths";
 import { canSee } from "../permissions";
-import { pushToast } from "../toast";
 
 const route = useRoute();
 const artifact = ref(null);
 const mode = ref("loading");
 const error = ref("");
 const forbidden = ref(false);
+const missing = ref(false);
 
 onMounted(load);
 watch(
@@ -32,6 +34,15 @@ watch(accessReady, (ready) => {
 
 async function load() {
   forbidden.value = false;
+  missing.value = false;
+  const id = route.params.id;
+  if (!isUuid(id)) {
+    artifact.value = null;
+    missing.value = true;
+    mode.value = "ready";
+    pageCrumb.value = "制品";
+    return;
+  }
   if (accessReady.value && !canSee("artifact", perms.value)) {
     forbidden.value = true;
     return;
@@ -39,7 +50,7 @@ async function load() {
   mode.value = "loading";
   error.value = "";
   try {
-    artifact.value = await getJson(`/api/v1/artifacts/${route.params.id}`);
+    artifact.value = await getJson(apiPath`/api/v1/artifacts/${id}`);
     pageCrumb.value = `制品 / ${artifact.value.name}`;
     mode.value = "ready";
   } catch (caught) {
@@ -49,15 +60,6 @@ async function load() {
     }
     mode.value = "error";
     error.value = errorText(caught, "无法读取制品");
-  }
-}
-
-async function copyDigest(value) {
-  try {
-    await navigator.clipboard.writeText(value);
-    pushToast("已复制");
-  } catch {
-    pushToast("复制失败");
   }
 }
 </script>
@@ -74,7 +76,13 @@ async function copyDigest(value) {
       </template>
     </PageIntro>
     <p v-if="artifact?.description" class="prose">{{ artifact.description }}</p>
-    <StatePanel :loading="mode === 'loading'" :error="mode === 'error' ? error : ''" @retry="load">
+    <StatePanel
+      :loading="mode === 'loading'"
+      :error="mode === 'error' ? error : ''"
+      :empty="missing"
+      empty-text="不存在"
+      @retry="load"
+    >
       <section v-if="artifact" class="panel">
         <div class="panel-head">
           <h2>版本</h2>
@@ -101,9 +109,7 @@ async function copyDigest(value) {
                   <td class="mono nowrap">{{ item.version }}</td>
                   <td class="nowrap">
                     <span class="mono">{{ item.checksum.algorithm }} {{ shortDigest(item.checksum.value) }}</span>
-                    <button type="button" class="btn btn-ghost" @click="copyDigest(item.checksum.value)">
-                      复制
-                    </button>
+                    <CopyButton :value="item.checksum.value" />
                   </td>
                   <td class="nowrap">{{ formatBytes(item.size_bytes) }}</td>
                   <td>{{ sourceLabel(item.source) }}</td>
