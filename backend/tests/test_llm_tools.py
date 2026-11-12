@@ -989,6 +989,7 @@ class _JenkinsStub:
         sha: str,
         git_user: str,
         git_token: str,
+        declare_nexus_parameters: bool = False,
     ) -> None:
         self.calls.append(
             (
@@ -1000,9 +1001,18 @@ class _JenkinsStub:
         )
         if git_token != "test-token":
             raise AssertionError("git token was not the test value")
+        if declare_nexus_parameters:
+            raise AssertionError("unset chat build declared nexus parameters")
 
-    def trigger_build(self, job_name: str) -> str:
+    def trigger_build(
+        self,
+        job_name: str,
+        *,
+        parameters: dict[str, str] | None = None,
+    ) -> str:
         self.calls.append(("trigger_build", job_name))
+        if parameters:
+            raise AssertionError("unset chat build passed nexus parameters")
         if self.trigger_error is not None:
             raise self.trigger_error
         return "http://127.0.0.1:9/queue/item/1/"

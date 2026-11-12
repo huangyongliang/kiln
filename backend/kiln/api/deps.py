@@ -11,6 +11,7 @@ from kiln.errors import GIT_SOURCE_UNCONFIGURED_DETAIL, JENKINS_UNCONFIGURED_DET
 from kiln.executor.jenkins import JenkinsClient
 from kiln.git.source import GitSource
 from kiln.llm.provider import LLMProvider
+from kiln.nexus.client import NexusClient
 
 
 def get_settings(request: Request) -> Settings:
@@ -49,3 +50,7 @@ def get_git_source(request: Request) -> GitSource:
     if source is None:
         raise NotConfigured(GIT_SOURCE_UNCONFIGURED_DETAIL)
     return source
+
+
+def get_nexus(request: Request) -> NexusClient | None:
+    return request.app.state.nexus

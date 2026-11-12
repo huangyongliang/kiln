@@ -63,6 +63,7 @@ class JenkinsClient:
         sha: str,
         git_user: str,
         git_token: str,
+        declare_nexus_parameters: bool = False,
     ) -> None:
         command = product_build_command(
             clone_url=clone_url,
@@ -75,7 +76,10 @@ class JenkinsClient:
             "POST",
             "/createItem",
             params={"name": job_name},
-            content=product_job_config(command).encode("utf-8"),
+            content=product_job_config(
+                command,
+                nexus_parameters=declare_nexus_parameters,
+            ).encode("utf-8"),
             headers={"Content-Type": "application/xml; charset=utf-8"},
         )
         if response.status_code in {200, 201, 302}:
@@ -106,11 +110,27 @@ class JenkinsClient:
             raise UpstreamFailure(f"Jenkins 没有这个制品文件（{self._netloc}）")
         raise UpstreamFailure(f"Jenkins 调用失败（{self._netloc}，HTTP {last_status}）")
 
-    def trigger_build(self, job_name: str) -> str | None:
-        response = self._request("POST", f"/job/{quote(job_name, safe='')}/build")
+    def trigger_build(
+        self,
+        job_name: str,
+        *,
+        parameters: dict[str, str] | None = None,
+    ) -> str | None:
+        secret = ""
+        if parameters is None:
+            path = f"/job/{quote(job_name, safe='')}/build"
+            data = None
+        else:
+            path = f"/job/{quote(job_name, safe='')}/buildWithParameters"
+            data = parameters
+            secret = parameters.get("KILN_NEXUS_PASSWORD", "")
+        response = self._request("POST", path, data=data)
         if response.status_code not in {200, 201, 302}:
-            raise UpstreamFailure(_failure(response, self._netloc))
-        return _queue_url(self._base, response.headers.get("location"))
+            raise UpstreamFailure(_failure(response, self._netloc, secret))
+        queue = _queue_url(self._base, response.headers.get("location"))
+        if secret and queue and secret in queue:
+            raise UpstreamFailure(f"Jenkins 调用失败（{self._netloc}）")
+        return queue
 
     def delete_job(self, job_name: str) -> None:
         response = self._request("POST", f"/job/{quote(job_name, safe='')}/doDelete")
@@ -218,6 +238,7 @@ class JenkinsClient:
         *,
         params: dict[str, str] | None = None,
         content: bytes | None = None,
+        data: dict[str, str] | None = None,
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         return self._request_url(
@@ -225,6 +246,7 @@ class JenkinsClient:
             self._base + path,
             params=params,
             content=content,
+            data=data,
             headers=headers,
         )
 
@@ -235,6 +257,7 @@ class JenkinsClient:
         *,
         params: dict[str, str] | None = None,
         content: bytes | None = None,
+        data: dict[str, str] | None = None,
         headers: dict[str, str] | None = None,
         retry_crumb: bool = True,
     ) -> httpx.Response:
@@ -249,6 +272,7 @@ class JenkinsClient:
                 url,
                 params=params,
                 content=content,
+                data=data,
                 headers=extra,
                 auth=self._auth,
                 follow_redirects=False,
@@ -266,6 +290,7 @@ class JenkinsClient:
                 url,
                 params=params,
                 content=content,
+                data=data,
                 headers=headers,
                 retry_crumb=False,
             )
@@ -357,10 +382,14 @@ def _bounded(response: httpx.Response, max_bytes: int, netloc: str) -> bytes:
     return data
 
 
-def _failure(response: httpx.Response, netloc: str) -> str:
+def _failure(response: httpx.Response, netloc: str, secret: str = "") -> str:
     snippet = response.text[:180].lower()
     if "crumb" in snippet:
-        return f"Jenkins 拒绝访问（{netloc}，缺少有效 crumb）"
-    if response.status_code in {401, 403}:
-        return f"Jenkins 拒绝访问（{netloc}）"
-    return f"Jenkins 调用失败（{netloc}，HTTP {response.status_code}）"
+        message = f"Jenkins 拒绝访问（{netloc}，缺少有效 crumb）"
+    elif response.status_code in {401, 403}:
+        message = f"Jenkins 拒绝访问（{netloc}）"
+    else:
+        message = f"Jenkins 调用失败（{netloc}，HTTP {response.status_code}）"
+    if secret:
+        message = message.replace(secret, "***")
+    return message

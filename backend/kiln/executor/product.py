@@ -1,8 +1,10 @@
 """Run a product build on Jenkins and store the archived file locally.
 
-The git token is handed to Jenkins for the clone. It is not written to
-Postgres and it is stripped from logs returned by this service. Nothing here
-deploys to a runtime.
+The git token is handed to Jenkins for the clone. An optional Nexus password
+is sent only as a core Jenkins password parameter for that build. Neither is
+written to Postgres. Both are stripped from logs returned by this service.
+Nothing here deploys to a runtime or publishes bytes to Nexus. Configuring the
+proxy does not probe it before the build starts.
 """
 
 import hashlib
@@ -17,7 +19,12 @@ from kiln.domain.builds import BuildLog, ProductBuild, ProductBuildCreate
 from kiln.domain.jobs import TERMINAL_STATUSES, JobStatus
 from kiln.errors import Conflict, UpstreamFailure
 from kiln.executor.jenkins import JenkinsClient
-from kiln.executor.script import WORKSPACE_ARTIFACT, clone_url_with_user, product_build_command
+from kiln.executor.script import (
+    NEXUS_PARAMETER_NAMES,
+    WORKSPACE_ARTIFACT,
+    clone_url_with_user,
+    product_build_command,
+)
 from kiln.git.refs import parse_ref, parse_repository
 from kiln.git.source import GitSource
 
@@ -64,9 +71,13 @@ def create_product_build(
         sha=sha,
         git_user=username,
         git_token=settings.git_token_value(),
+        declare_nexus_parameters=settings.nexus_configured,
     )
     try:
-        queue_url = jenkins.trigger_build(jenkins_job_name)
+        queue_url = jenkins.trigger_build(
+            jenkins_job_name,
+            parameters=nexus_build_parameters(settings),
+        )
         return builds.create_build(
             build_id=build_id,
             name=payload.name or artifact.name,
@@ -155,15 +166,39 @@ def build_log(
     if current.build_number is None:
         raise Conflict("这次构建还没有日志")
     text, truncated = jenkins.read_log(current.jenkins_job_name, current.build_number)
-    secret = settings.git_token_value()
-    if secret:
-        text = text.replace(secret, "***")
+    text = _redact(text, settings.git_token_value(), settings.nexus_password_value())
     return BuildLog(
         build_id=current.id,
         build_number=current.build_number,
         text=text,
         truncated=truncated,
     )
+
+
+def nexus_build_parameters(settings: Settings) -> dict[str, str] | None:
+    """Form body for ``buildWithParameters``. None keeps the trigger on ``/build``.
+
+    Keys match the core parameter names declared on the job. The password is
+    included only here, not in the job config.
+    """
+
+    if not settings.nexus_configured:
+        return None
+    values = {
+        "KILN_NEXUS_URL": settings.nexus_build_base(),
+        "KILN_NEXUS_REPOSITORY": settings.kiln_nexus_repository,
+        "KILN_NEXUS_USERNAME": settings.kiln_nexus_username,
+        "KILN_NEXUS_PASSWORD": settings.nexus_password_value(),
+    }
+    if tuple(values) != NEXUS_PARAMETER_NAMES:
+        raise RuntimeError("nexus build parameters drifted from the job config")
+    return values
+
+
+def _redact(text: str, *secrets: str) -> str:
+    for secret in sorted((item for item in secrets if item), key=len, reverse=True):
+        text = text.replace(secret, "***")
+    return text
 
 
 def publish(builds: BuildStore, stored: StoredBuild) -> ProductBuild:

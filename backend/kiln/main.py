@@ -13,7 +13,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from kiln import __version__
-from kiln.api import accounts, artifacts, auth, builds, git, health, jobs, llm, retrieve, skills
+from kiln.api import (
+    accounts,
+    artifacts,
+    auth,
+    builds,
+    dependency_proxy,
+    git,
+    health,
+    jobs,
+    llm,
+    retrieve,
+    skills,
+)
 from kiln.config import Settings, get_settings
 from kiln.db.builds import BuildStore
 from kiln.db.engine import create_db_engine
@@ -25,6 +37,7 @@ from kiln.errors import AppError
 from kiln.executor.jenkins import JenkinsClient
 from kiln.git.source import build_git_source
 from kiln.llm.provider import build_provider
+from kiln.nexus.client import NexusClient
 from kiln.paths import API_PREFIX
 from kiln.storage.local import LocalBlobStore
 
@@ -48,7 +61,7 @@ DESCRIPTION = (
     "GET /accounts 与 GET /accounts/{id} 需要 account.read，"
     "GET /artifacts 与 GET /artifacts/{id} 需要 artifact.read，"
     "GET /skills 与 GET /skills/{id} 需要 skill.read。"
-    "GET /executor、GET /jobs、GET /jobs/{id}、GET /jobs/{id}/log、"
+    "GET /executor、GET /dependency-proxy、GET /jobs、GET /jobs/{id}、GET /jobs/{id}/log、"
     "GET /builds、GET /builds/{id} 和 GET /builds/{id}/log 需要 executor.read。"
     "GET /git/source、GET /git/repositories 和 GET /git/commits 需要 git.read。"
     "只读角色可以查看账号、skill 与制品，没有 executor.read 和 git.read。"
@@ -59,7 +72,9 @@ DESCRIPTION = (
     "不运行 skill 步骤，也不把制品部署到运行环境。"
     "配置 JENKINS_URL 后，兼容执行器可以在 Jenkins 上创建任务、跟踪状态并读取日志。"
     "代码源是可替换适配器：GIT_PROVIDER=gitea 是实验室实现，GIT_PROVIDER=gitlab 是生产代码源。"
-    "这两处地址只来自环境变量。仓库不写生产 GitLab 地址。Nexus 集成还没有接上，也没有 Nexus 地址。"
+    "这两处地址只来自环境变量。仓库不写生产 GitLab 地址。"
+    "可选依赖代理对接默认关闭；制品不发布到 Nexus。"
+    "未设置 KILN_NEXUS_URL 时，产品构建与现在相同，GET /dependency-proxy 不向外发起调用。"
     "模型调用走 OpenAI 兼容协议，端点由环境变量配置；未就绪时可使用 mock 或 off。"
     "对话可在授权下通过工具起草 skill 草稿。"
     "配置只从环境变量读取。"
@@ -69,6 +84,7 @@ DESCRIPTION = (
 def create_app(
     settings: Settings | None = None,
     http_client: httpx.Client | None = None,
+    nexus_http_client: httpx.Client | None = None,
 ) -> FastAPI:
     resolved = settings if settings is not None else get_settings()
     owns_client = http_client is None
@@ -85,6 +101,22 @@ def create_app(
     jenkins_http = httpx.Client(timeout=resolved.jenkins_timeout_seconds, trust_env=False)
     git_http = httpx.Client(timeout=resolved.git_timeout_seconds, trust_env=False)
     oidc_http = httpx.Client(timeout=30.0, trust_env=False)
+    owns_nexus_http = nexus_http_client is None
+    if nexus_http_client is None:
+        nexus_http = httpx.Client(timeout=resolved.kiln_nexus_timeout_seconds, trust_env=False)
+    else:
+        nexus_http = nexus_http_client
+    nexus = (
+        NexusClient(
+            resolved.kiln_nexus_url,
+            resolved.kiln_nexus_repository,
+            resolved.kiln_nexus_username,
+            resolved.nexus_password_value(),
+            nexus_http,
+        )
+        if resolved.nexus_configured
+        else None
+    )
     jenkins = (
         JenkinsClient(
             resolved.jenkins_url,
@@ -109,6 +141,8 @@ def create_app(
             jenkins_http.close()
             git_http.close()
             oidc_http.close()
+            if owns_nexus_http:
+                nexus_http.close()
             if owns_client:
                 client.close()
 
@@ -128,6 +162,7 @@ def create_app(
     app.state.builds = build_store
     app.state.jenkins = jenkins
     app.state.git_source = git_source
+    app.state.nexus = nexus
     app.state.llm = provider
     app.state.oidc_http = oidc_http
 
@@ -167,6 +202,7 @@ def create_app(
     app.include_router(skills.router, prefix=API_PREFIX)
     app.include_router(llm.router, prefix=API_PREFIX)
     app.include_router(jobs.router, prefix=API_PREFIX)
+    app.include_router(dependency_proxy.router, prefix=API_PREFIX)
     app.include_router(builds.router, prefix=API_PREFIX)
     app.include_router(git.router, prefix=API_PREFIX)
     return app
