@@ -4,6 +4,38 @@
 
 这一版提供 API 大纲、简体中文控制台、Postgres / Jenkins / Gitea 的 compose 契约，以及能在 CI 里跑通的测试。它不是完整产品。
 
+机器配置、依赖系统，以及在一台新机器上把当前骨架启动起来的步骤，写在 [部署说明](docs/DEPLOY.md)。平台不负责把制品发布到运行环境。
+
+## 机器配置
+
+`docker-compose.yml` 没有 `cpus`、`mem_limit`、`deploy.resources`，Jenkins 服务也没有 `JAVA_OPTS`。下表是按当前服务清单给出的起步建议，不是压测后的生产规格。
+
+| 档位 | CPU | 内存 | 可用磁盘 | 用来跑什么 |
+| --- | --- | --- | --- | --- |
+| 小实验室 / 测试 | 2 | 4 GB | 20 GB | 默认栈：Postgres、API、控制台。镜像在这台机器上构建 |
+| 建议 | 4 | 8 GB | 40 GB | 默认栈，并为 profile `lab` 的 Jenkins、Gitea 占位和构建缓存留余量 |
+
+- 系统：能构建并运行仓库中这些 Linux 镜像的 64 位环境。CI 使用 GitHub Actions 的 `ubuntu-latest`。仓库不要求特定发行版，镜像也没有钉死 CPU 架构，不使用 GPU。
+- Docker：Docker Engine，以及 Compose V2（命令是 `docker compose`）。文件使用 `profiles` 和 `depends_on.condition: service_healthy`。版本号没有钉死。
+- 默认栈占用宿主机端口 `5432`、`8000`、`8080`。profile `lab` 另占 `18080`、`13000`。
+- 容器名固定：`kiln-postgres`、`kiln-api`、`kiln-console`。lab 另有 `kiln-jenkins`、`kiln-gitea`。网络名固定为 `kiln-net`。
+
+小实验室档把镜像构建算了进去：控制台镜像在构建阶段执行 `npm ci` 和 `npm run build`，这一步比三个容器运行时更吃内存。建议档的 8 GB 用来在同一台机器上再放下 profile `lab`。Jenkins 服务没有内存上限，也没有 `JAVA_OPTS`，实际堆大小由上游镜像决定，本仓库没有测量。
+
+## 依赖系统
+
+| 系统 | 本期 | 仓库中的实际情况 |
+| --- | --- | --- |
+| Docker Engine 与 Compose V2 | 现在需要（Compose 部署） | `docker-compose.yml`。CI 执行 `docker compose config`。直接跑进程的开发方式不依赖 Docker |
+| PostgreSQL | 现在需要（默认 Compose 栈） | 镜像 `postgres:16-alpine`，默认库 `kiln`。配置项为 `DATABASE_URL`、`POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_DB`。API 接受连接串，本期不建立连接。只跑 API 进程时可以不启动数据库 |
+| kiln API 与控制台 | 现在需要 | 本地构建 `kiln-api:local`（`python:3.11-slim`）和 `kiln-console:local`（构建阶段 `node:22-alpine`，运行阶段 `nginx:1.27-alpine`）。没有现成的远程应用镜像 |
+| Jenkins | 可选占位；执行器尚未接线 | 仅 `docker compose --profile lab`。镜像 `jenkins/jenkins:lts-jdk17`。代码里没有 Jenkins 地址或任务配置 |
+| Git 远端 | 计划。lab 中有未接入的 Gitea | 架构方案把 GitLab 保留为生产代码源。当前代码不读取 Git 远端。compose 里与之相邻的只有 `gitea/gitea:1.22`（sqlite3）占位 |
+| 制品目录 | 现在是进程内存。Nexus 尚未接线 | 制品与校验和登记在 API 内存中。`GET /api/v1/retrieve/{reservation_id}` 的 `content_available` 为 false。仓库没有 Nexus 地址或客户端。架构方案中的现网 Nexus 集成仍待对接 |
+| OpenAI 兼容模型端点 | 可选 | `LLM_PROVIDER` 默认 `off`。设为 `openai` 时必须提供 `LLM_BASE_URL` |
+| 身份联邦 | 计划 | 内存中的本地账号与 RBAC 目录。没有口令、登录，也没有外部身份源的产品名或地址 |
+| Kubernetes、专用镜像仓库 | 计划 | 仓库中没有对应清单或配置项。架构方案把它们放在镜像构建阶段 |
+
 ## 本地运行
 
 配置只来自环境变量。可复制 `.env.example` 为 `.env`（该文件已被忽略）。`.env.example` 里的数据库口令 `kiln` 只用于本地开发，不能用于生产。不要把模型密钥写进仓库。
@@ -34,6 +66,8 @@ npm run dev
 `/health` 不连接数据库，也不访问模型端点。默认 `LLM_PROVIDER=off`。
 
 ### Docker Compose
+
+逐步核对、环境变量如何进入容器，以及常见失败，见 [部署说明](docs/DEPLOY.md)。
 
 ```bash
 docker compose up --build
@@ -99,4 +133,4 @@ GitHub Actions 会跑后端测试、控制台构建，以及 `docker compose con
 
 ## 不在本期
 
-部署、制品仓库集成、镜像仓库、Kubernetes 构建引擎、Jenkins 执行器、身份联邦、登录与口令存储、制品字节下载、任意 shell 执行。
+骨架如何在一台机器上启动，见 [部署说明](docs/DEPLOY.md)。平台仍然不把制品发布到运行环境。制品仓库集成、镜像仓库、Kubernetes 构建引擎、Jenkins 执行器、身份联邦、登录与口令存储、制品字节下载、任意 shell 执行，这些都还没有实现。
