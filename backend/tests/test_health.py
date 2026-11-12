@@ -44,6 +44,11 @@ def test_outline_paths_are_published(client: TestClient) -> None:
         "/api/v1/skills/{skill_id}/publish",
         "/api/v1/llm/provider",
         "/api/v1/llm/chat",
+        "/api/v1/auth/login",
+        "/api/v1/auth/logout",
+        "/api/v1/auth/sync",
+        "/api/v1/auth/oidc/start",
+        "/api/v1/auth/oidc/callback",
     ]
     missing = [path for path in expected if path not in paths]
     assert missing == []

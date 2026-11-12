@@ -22,6 +22,7 @@ DOMAIN_TABLES = (
     "product_builds",
     "artifact_versions",
     "artifacts",
+    "sessions",
     "account_roles",
     "accounts",
     "skill_allowed_repositories",
@@ -84,9 +85,7 @@ def require_database() -> None:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
     except Exception as exc:
-        raise RuntimeError(
-            f"PostgreSQL is required at {redact_database_url(url)}: {exc}"
-        ) from exc
+        raise RuntimeError(f"PostgreSQL is required at {redact_database_url(url)}: {exc}") from exc
     finally:
         engine.dispose()
 

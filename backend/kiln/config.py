@@ -6,8 +6,12 @@ file. Secrets stay out of the repository.
 Jenkins and the git source are optional endpoints. Neither has a built-in
 production host. GitLab is the production provider name; Gitea is the lab
 provider name. Callers supply the base URL.
+
+Optional OIDC settings start 用户信息同步. Empty values leave local password
+login in place. The company user system is not given a default address.
 """
 
+import re
 from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlsplit
@@ -27,12 +31,17 @@ class Settings(BaseSettings):
     artifacts, versions, download reservations, and skills. The default URL
     is for local use and CI only.
 
-    `KILN_API_TOKEN` is required on `/api/v1`. The default is for local use
-    and CI only. An empty token is rejected so the gate cannot be turned off
-    by leaving the variable blank.
+    `KILN_API_TOKEN` is required. The default is for local use and CI only.
+    An empty token is rejected so the gate cannot be turned off by leaving
+    the variable blank. It remains a machine credential with every catalog
+    permission, alongside user sessions.
 
     `KILN_ARTIFACT_ROOT` is the platform-owned directory for artifact bytes.
     It is a local path, not a Nexus URL.
+
+    OIDC settings are optional and empty by default. When any required OIDC
+    value is set, all of them must be set. They configure 用户信息同步 only.
+    Kiln accounts and kiln permissions stay on the platform.
     """
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -71,6 +80,17 @@ class Settings(BaseSettings):
     kiln_artifact_root: str = "var/kiln-artifacts"
     kiln_artifact_max_bytes: int = Field(default=64 * 1024 * 1024, gt=0, le=1024 * 1024 * 1024)
 
+    # Optional 用户信息同步. All required values stay empty unless configured.
+    kiln_oidc_issuer_url: str = ""
+    kiln_oidc_client_id: str = ""
+    kiln_oidc_client_secret: SecretStr = SecretStr("")
+    kiln_oidc_redirect_uri: str = ""
+    kiln_oidc_employment_claim: str = ""
+    kiln_oidc_employment_active_values: str = ""
+    kiln_oidc_scopes: str = ""
+    kiln_session_ttl_seconds: int = Field(default=12 * 60 * 60, ge=60, le=14 * 24 * 60 * 60)
+    kiln_session_cookie_secure: bool = False
+
     @field_validator("llm_provider", mode="before")
     @classmethod
     def normalize_llm_provider(cls, value: object) -> object:
@@ -99,14 +119,31 @@ class Settings(BaseSettings):
             return "off"
         return text
 
-    @field_validator("jenkins_url", "git_base_url", "git_clone_base_url", mode="before")
+    @field_validator(
+        "jenkins_url",
+        "git_base_url",
+        "git_clone_base_url",
+        "kiln_oidc_issuer_url",
+        "kiln_oidc_redirect_uri",
+        mode="before",
+    )
     @classmethod
     def normalize_service_url(cls, value: object) -> object:
         if not isinstance(value, str):
             return value
         return _clean_http_url(value)
 
-    @field_validator("jenkins_api_token", "git_token", mode="before")
+    @field_validator(
+        "kiln_oidc_client_id",
+        "kiln_oidc_employment_claim",
+        "kiln_oidc_employment_active_values",
+        "kiln_oidc_scopes",
+    )
+    @classmethod
+    def strip_oidc_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("jenkins_api_token", "git_token", "kiln_oidc_client_secret", mode="before")
     @classmethod
     def strip_optional_secret(cls, value: object) -> object:
         if isinstance(value, SecretStr):
@@ -154,6 +191,29 @@ class Settings(BaseSettings):
                 raise ValueError("GIT_PROVIDER 为 gitea 或 gitlab 时必须设置 GIT_TOKEN")
         return self
 
+    @model_validator(mode="after")
+    def oidc_settings_are_complete(self) -> "Settings":
+        required = (
+            self.kiln_oidc_issuer_url,
+            self.kiln_oidc_client_id,
+            self.oidc_client_secret_value(),
+            self.kiln_oidc_redirect_uri,
+            self.kiln_oidc_employment_claim,
+            self.kiln_oidc_employment_active_values,
+        )
+        if any(required) and not all(required):
+            raise ValueError(
+                "配置用户信息同步时必须同时设置 KILN_OIDC_ISSUER_URL、"
+                "KILN_OIDC_CLIENT_ID、KILN_OIDC_CLIENT_SECRET、KILN_OIDC_REDIRECT_URI、"
+                "KILN_OIDC_EMPLOYMENT_CLAIM 和 KILN_OIDC_EMPLOYMENT_ACTIVE_VALUES"
+            )
+        claim = self.kiln_oidc_employment_claim
+        if claim and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{0,63}", claim):
+            raise ValueError("KILN_OIDC_EMPLOYMENT_CLAIM 格式不正确")
+        if all(required) and not self.oidc_employment_active_values():
+            raise ValueError("KILN_OIDC_EMPLOYMENT_ACTIVE_VALUES 不能为空")
+        return self
+
     def cors_origins(self) -> list[str]:
         return [item.strip() for item in self.kiln_cors_origins.split(",") if item.strip()]
 
@@ -168,6 +228,32 @@ class Settings(BaseSettings):
 
     def git_token_value(self) -> str:
         return self.git_token.get_secret_value()
+
+    def oidc_client_secret_value(self) -> str:
+        return self.kiln_oidc_client_secret.get_secret_value()
+
+    def oidc_employment_active_values(self) -> frozenset[str]:
+        return frozenset(
+            item.strip()
+            for item in self.kiln_oidc_employment_active_values.split(",")
+            if item.strip()
+        )
+
+    def oidc_scopes(self) -> str:
+        if not self.oidc_configured:
+            return ""
+        return self.kiln_oidc_scopes or "openid profile email"
+
+    @property
+    def oidc_configured(self) -> bool:
+        return bool(
+            self.kiln_oidc_issuer_url
+            and self.kiln_oidc_client_id
+            and self.oidc_client_secret_value()
+            and self.kiln_oidc_redirect_uri
+            and self.kiln_oidc_employment_claim
+            and self.oidc_employment_active_values()
+        )
 
     def git_clone_base(self) -> str:
         """Base URL Jenkins uses to clone. Falls back to the API's git URL."""

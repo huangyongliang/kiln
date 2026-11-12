@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from kiln.api.deps import get_store
-from kiln.auth import require_api_token
+from kiln.auth import require_auth, require_permission
 from kiln.config import Settings
 from kiln.db.store import PostgresStore
 from kiln.domain.artifacts import (
@@ -28,7 +28,7 @@ from kiln.errors import BadRequest, PayloadTooLarge
 router = APIRouter(
     prefix="/artifacts",
     tags=["制品"],
-    dependencies=[Depends(require_api_token)],
+    dependencies=[Depends(require_auth)],
 )
 
 
@@ -37,7 +37,13 @@ def list_artifacts(store: PostgresStore = Depends(get_store)) -> ArtifactList:
     return ArtifactList(items=store.list_artifacts())
 
 
-@router.post("", response_model=Artifact, status_code=201, summary="登记制品")
+@router.post(
+    "",
+    response_model=Artifact,
+    status_code=201,
+    summary="登记制品",
+    dependencies=[Depends(require_permission("artifact.upload"))],
+)
 def create_artifact(payload: ArtifactCreate, store: PostgresStore = Depends(get_store)) -> Artifact:
     return store.create_artifact(payload)
 
@@ -52,6 +58,7 @@ def get_artifact(artifact_id: UUID, store: PostgresStore = Depends(get_store)) -
     response_model=ArtifactVersion,
     status_code=201,
     summary="登记不可变版本",
+    dependencies=[Depends(require_permission("artifact.upload"))],
 )
 def add_version(
     artifact_id: UUID,
@@ -92,6 +99,7 @@ async def _read_limited_body(request: Request) -> bytes:
         201: {"model": ArtifactVersion, "description": "制品字节已保存"},
     },
     summary="保存制品字节",
+    dependencies=[Depends(require_permission("artifact.upload"))],
 )
 def store_version_content(
     artifact_id: UUID,
@@ -124,6 +132,7 @@ def store_version_content(
     response_model=Reservation,
     status_code=201,
     summary="创建下载预约",
+    dependencies=[Depends(require_permission("artifact.download"))],
 )
 def reserve_download(
     artifact_id: UUID,

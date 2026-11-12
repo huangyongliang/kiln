@@ -17,6 +17,7 @@ export async function requestJson(path, options = {}) {
   const token = readApiToken();
   const response = await fetch(path, {
     ...options,
+    credentials: "include",
     headers: {
       Accept: "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),

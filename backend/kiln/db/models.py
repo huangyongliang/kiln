@@ -27,9 +27,7 @@ class Base(DeclarativeBase):
 
 class PermissionRow(Base):
     __tablename__ = "rbac_permissions"
-    __table_args__ = (
-        CheckConstraint("position >= 0", name="ck_rbac_permissions_position"),
-    )
+    __table_args__ = (CheckConstraint("position >= 0", name="ck_rbac_permissions_position"),)
 
     code: Mapped[str] = mapped_column(Text, primary_key=True)
     description: Mapped[str] = mapped_column(Text, nullable=False)
@@ -53,9 +51,7 @@ class RoleRow(Base):
 
 class RolePermissionRow(Base):
     __tablename__ = "rbac_role_permissions"
-    __table_args__ = (
-        CheckConstraint("position >= 0", name="ck_rbac_role_permissions_position"),
-    )
+    __table_args__ = (CheckConstraint("position >= 0", name="ck_rbac_role_permissions_position"),)
 
     role_id: Mapped[str] = mapped_column(ForeignKey("rbac_roles.id"), primary_key=True)
     permission_code: Mapped[str] = mapped_column(
@@ -70,7 +66,13 @@ class AccountRow(Base):
     __tablename__ = "accounts"
     __table_args__ = (
         UniqueConstraint("username", name="uq_accounts_username"),
+        UniqueConstraint("idp_issuer", "idp_subject", name="uq_accounts_idp_issuer_subject"),
         CheckConstraint("status IN ('active', 'disabled')", name="ck_accounts_status"),
+        CheckConstraint(
+            "(idp_issuer IS NULL AND idp_subject IS NULL) OR "
+            "(idp_issuer IS NOT NULL AND idp_subject IS NOT NULL)",
+            name="ck_accounts_idp_pair",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
@@ -78,6 +80,10 @@ class AccountRow(Base):
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     email: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False)
+    password_hash: Mapped[str | None] = mapped_column(Text)
+    idp_issuer: Mapped[str | None] = mapped_column(Text)
+    idp_subject: Mapped[str | None] = mapped_column(Text)
+    employment_status: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     roles: Mapped[list[AccountRoleRow]] = relationship(
         back_populates="account",
@@ -88,9 +94,7 @@ class AccountRow(Base):
 
 class AccountRoleRow(Base):
     __tablename__ = "account_roles"
-    __table_args__ = (
-        CheckConstraint("position >= 0", name="ck_account_roles_position"),
-    )
+    __table_args__ = (CheckConstraint("position >= 0", name="ck_account_roles_position"),)
 
     account_id: Mapped[UUID] = mapped_column(
         ForeignKey("accounts.id", ondelete="CASCADE"),
@@ -99,6 +103,26 @@ class AccountRoleRow(Base):
     role_id: Mapped[str] = mapped_column(ForeignKey("rbac_roles.id"), primary_key=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     account: Mapped[AccountRow] = relationship(back_populates="roles")
+
+
+class SessionRow(Base):
+    """A user session. Only the token hash is stored."""
+
+    __tablename__ = "sessions"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_sessions_token_hash"),
+        CheckConstraint("expires_at > created_at", name="ck_sessions_expiry"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    account_id: Mapped[UUID] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ArtifactRow(Base):

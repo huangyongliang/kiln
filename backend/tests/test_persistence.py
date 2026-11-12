@@ -44,15 +44,20 @@ def test_schema_is_postgresql(client: TestClient) -> None:
         "skill_allowed_dependencies",
         "executor_jobs",
         "product_builds",
+        "sessions",
     } <= names
+    account_columns = {column["name"] for column in inspect(engine).get_columns("accounts")}
+    assert {
+        "password_hash",
+        "idp_issuer",
+        "idp_subject",
+        "employment_status",
+    } <= account_columns
     columns = {column["name"] for column in inspect(engine).get_columns("artifact_versions")}
     assert {"content_available", "blob_key"} <= columns
     with engine.connect() as connection:
         definition = connection.execute(
-            text(
-                "SELECT indexdef FROM pg_indexes "
-                "WHERE indexname = 'uq_artifacts_group_name'"
-            )
+            text("SELECT indexdef FROM pg_indexes WHERE indexname = 'uq_artifacts_group_name'")
         ).scalar_one()
     assert "NULLS NOT DISTINCT" in definition
 
@@ -62,8 +67,7 @@ def test_rbac_catalog_is_read_from_postgres(client: TestClient) -> None:
     with engine.begin() as connection:
         updated = connection.execute(
             text(
-                "UPDATE rbac_permissions SET description = '来自数据库' "
-                "WHERE code = 'account.read'"
+                "UPDATE rbac_permissions SET description = '来自数据库' WHERE code = 'account.read'"
             )
         )
         assert updated.rowcount == 1
@@ -151,8 +155,7 @@ def test_records_survive_api_process_restart() -> None:
             == "1.0.0"
         )
         assert (
-            connection.execute(text("SELECT count(*) FROM download_reservations")).scalar_one()
-            == 1
+            connection.execute(text("SELECT count(*) FROM download_reservations")).scalar_one() == 1
         )
         stored_skill = connection.execute(text("SELECT name, status FROM skills")).one()
         assert stored_skill.name == "重启技能"
@@ -350,6 +353,14 @@ def _api_env(database_url: str, artifact_root: str) -> dict[str, str]:
     env["GIT_TOKEN"] = ""
     env["KILN_ARTIFACT_ROOT"] = artifact_root
     env["KILN_ARTIFACT_MAX_BYTES"] = str(64 * 1024 * 1024)
+    env["KILN_OIDC_ISSUER_URL"] = ""
+    env["KILN_OIDC_CLIENT_ID"] = ""
+    env["KILN_OIDC_CLIENT_SECRET"] = ""
+    env["KILN_OIDC_REDIRECT_URI"] = ""
+    env["KILN_OIDC_EMPLOYMENT_CLAIM"] = ""
+    env["KILN_OIDC_EMPLOYMENT_ACTIVE_VALUES"] = ""
+    env["KILN_OIDC_SCOPES"] = ""
+    env["KILN_SESSION_COOKIE_SECURE"] = "false"
     env["PYTHONUNBUFFERED"] = "1"
     return env
 

@@ -1,6 +1,6 @@
 """Git source HTTP API.
 
-Listing repositories and resolving a ref require the local API token.
+Listing repositories and resolving a ref require a user session or the machine token.
 The adapter is selected by GIT_PROVIDER: gitea for the lab, gitlab for
 production. The base URL is not hard-coded.
 """
@@ -8,14 +8,14 @@ production. The base URL is not hard-coded.
 from fastapi import APIRouter, Depends, Query
 
 from kiln.api.deps import get_git_source, get_settings
-from kiln.auth import require_api_token
+from kiln.auth import require_auth
 from kiln.config import Settings
 from kiln.domain.git import GitRepositoryList, GitSourceInfo, ResolvedCommit
 from kiln.errors import BadRequest
 from kiln.git.refs import parse_ref, parse_repository
 from kiln.git.source import GitSource, role_for_provider
 
-router = APIRouter(prefix="/git", tags=["代码源"], dependencies=[Depends(require_api_token)])
+router = APIRouter(prefix="/git", tags=["代码源"], dependencies=[Depends(require_auth)])
 
 
 @router.get("/source", response_model=GitSourceInfo, summary="代码源适配器")

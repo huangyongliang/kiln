@@ -105,6 +105,31 @@ def test_artifact_root_rejects_blank_and_urls() -> None:
         Settings(kiln_artifact_root="http://127.0.0.1:9/repo", _env_file=None)
 
 
+def test_oidc_is_unset_until_every_required_value_is_present() -> None:
+    settings = Settings(_env_file=None)
+    assert settings.oidc_configured is False
+    assert settings.oidc_scopes() == ""
+    assert settings.kiln_session_ttl_seconds == 12 * 60 * 60
+    assert settings.kiln_session_cookie_secure is False
+    with pytest.raises(ValidationError, match="KILN_OIDC_ISSUER_URL"):
+        Settings(kiln_oidc_issuer_url="http://127.0.0.1:9", _env_file=None)
+    with pytest.raises(ValidationError):
+        Settings(kiln_oidc_issuer_url="http://user:secret@127.0.0.1:9", _env_file=None)
+    configured = Settings(
+        kiln_oidc_issuer_url="http://127.0.0.1:9",
+        kiln_oidc_client_id="kiln-test-client",
+        kiln_oidc_client_secret="local-only",
+        kiln_oidc_redirect_uri="http://127.0.0.1:9/api/v1/auth/oidc/callback",
+        kiln_oidc_employment_claim="employment",
+        kiln_oidc_employment_active_values="active, employed",
+        _env_file=None,
+    )
+    assert configured.oidc_configured is True
+    assert configured.oidc_scopes() == "openid profile email"
+    assert configured.oidc_employment_active_values() == {"active", "employed"}
+    assert configured.api_token_value() == LOCAL_API_TOKEN
+
+
 def test_openai_accepts_a_configured_endpoint() -> None:
     settings = Settings(
         llm_provider="openai-compatible",

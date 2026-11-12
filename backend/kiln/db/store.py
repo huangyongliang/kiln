@@ -6,7 +6,7 @@ in the platform-owned blob store, which also outlives the process.
 
 import hashlib
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
 from psycopg.errors import UniqueViolation
@@ -24,13 +24,14 @@ from kiln.db.models import (
     PermissionRow,
     ReservationRow,
     RoleRow,
+    SessionRow,
     SkillDependencyRow,
     SkillInputRow,
     SkillRepositoryRow,
     SkillRow,
     SkillStepRow,
 )
-from kiln.domain.accounts import Account, AccountCreate
+from kiln.domain.accounts import Account, AccountCreate, SyncLink
 from kiln.domain.artifacts import (
     PACKAGE_LABELS,
     VERSION_PATTERN,
@@ -55,6 +56,7 @@ from kiln.domain.skills import (
     SkillStep,
 )
 from kiln.errors import BadRequest, Conflict, Gone, NotFound, StorageError
+from kiln.passwords import hash_password, verify_password
 from kiln.paths import retrieve_content_path, retrieve_path
 from kiln.storage.local import LocalBlobStore
 
@@ -126,12 +128,14 @@ class PostgresStore:
     def create_account(self, payload: AccountCreate) -> Account:
         account_id = uuid4()
         created_at = clock.utcnow()
+        password_hash = hash_password(payload.password) if payload.password is not None else None
         row = AccountRow(
             id=account_id,
             username=payload.username,
             display_name=payload.display_name,
             email=payload.email,
             status="active",
+            password_hash=password_hash,
             created_at=created_at,
         )
         row.roles = [
@@ -147,6 +151,124 @@ class PostgresStore:
             session.add(row)
             _commit_unique(session, "用户名已存在")
             return _account(row)
+
+    def authenticate_password(self, username: str, password: str) -> tuple[Account | None, str]:
+        """Return the account, or a denial of `invalid` or `disabled`.
+
+        A missing password hash is `invalid`. No session is created here.
+        """
+
+        with self._session() as session:
+            row = session.scalars(
+                select(AccountRow)
+                .where(AccountRow.username == username)
+                .options(selectinload(AccountRow.roles))
+            ).first()
+            if row is None or not row.password_hash:
+                return None, "invalid"
+            if not verify_password(password, row.password_hash):
+                return None, "invalid"
+            if row.status != "active":
+                return None, "disabled"
+            return _account(row), "ok"
+
+    def link_synced_account(
+        self,
+        *,
+        issuer: str,
+        subject: str,
+        username_seed: str,
+        display_name: str,
+        email: str | None,
+        employment_status: str | None,
+        employment_active: bool,
+    ) -> SyncLink:
+        """Link `(issuer, subject)` to a kiln account.
+
+        An existing local account that only shares an email is left alone.
+        Roles are not changed. A password is not set. Inactive employment
+        does not create an account.
+        """
+
+        if not re.fullmatch(r"^[a-z][a-z0-9_-]{2,31}$", username_seed):
+            raise BadRequest("用户名不正确")
+        with self._session() as session:
+            row = session.scalars(
+                select(AccountRow)
+                .where(AccountRow.idp_issuer == issuer, AccountRow.idp_subject == subject)
+                .options(selectinload(AccountRow.roles))
+            ).first()
+            if row is None:
+                if not employment_active:
+                    return SyncLink(account=None, denial="employment")
+                row = AccountRow(
+                    id=uuid4(),
+                    username=_unique_username(session, username_seed),
+                    display_name=display_name[:80],
+                    email=email,
+                    status="active",
+                    password_hash=None,
+                    idp_issuer=issuer,
+                    idp_subject=subject,
+                    employment_status=employment_status,
+                    created_at=clock.utcnow(),
+                )
+                row.roles = [AccountRoleRow(role_id="reader", position=0)]
+                session.add(row)
+                _commit_unique(session, "用户名已存在")
+                return SyncLink(account=_account(row))
+            row.display_name = display_name[:80]
+            row.email = email
+            row.employment_status = employment_status
+            session.commit()
+            if row.status != "active":
+                return SyncLink(account=None, denial="disabled")
+            if not employment_active:
+                return SyncLink(account=None, denial="employment")
+            return SyncLink(account=_account(row))
+
+    def create_session(self, account_id: UUID, token_hash: str, ttl_seconds: int) -> datetime:
+        created_at = clock.utcnow()
+        expires_at = created_at + timedelta(seconds=ttl_seconds)
+        row = SessionRow(
+            id=uuid4(),
+            token_hash=token_hash,
+            account_id=account_id,
+            created_at=created_at,
+            expires_at=expires_at,
+        )
+        with self._session() as session:
+            session.add(row)
+            session.commit()
+        return expires_at
+
+    def account_for_session_hash(self, token_hash: str) -> Account | None:
+        now = clock.utcnow()
+        with self._session() as session:
+            row = session.scalars(
+                select(SessionRow).where(SessionRow.token_hash == token_hash)
+            ).first()
+            if row is None or row.revoked_at is not None or row.expires_at <= now:
+                return None
+            account = session.scalars(
+                select(AccountRow)
+                .where(AccountRow.id == row.account_id)
+                .options(selectinload(AccountRow.roles))
+            ).first()
+            if account is None or account.status != "active":
+                return None
+            return _account(account)
+
+    def revoke_session_hash(self, token_hash: str) -> None:
+        now = clock.utcnow()
+        with self._session() as session:
+            row = session.scalars(
+                select(SessionRow).where(SessionRow.token_hash == token_hash)
+            ).first()
+            if row is None or row.revoked_at is not None:
+                return
+            row.revoked_at = now
+            session.commit()
 
     def list_artifacts(self) -> list[Artifact]:
         with self._session() as session:
@@ -479,6 +601,18 @@ def _load_reservation(session: Session, reservation_id: UUID) -> ReservationRow:
     if row.expires_at <= clock.utcnow():
         raise Gone("取包预约已过期")
     return row
+
+
+def _unique_username(session: Session, seed: str) -> str:
+    if session.scalar(select(AccountRow.id).where(AccountRow.username == seed)) is None:
+        return seed
+    for index in range(1, 100):
+        suffix = f"_{index}"
+        candidate = seed[: 32 - len(suffix)] + suffix
+        taken = session.scalar(select(AccountRow.id).where(AccountRow.username == candidate))
+        if taken is None:
+            return candidate
+    raise Conflict("用户名已存在")
 
 
 def _commit_unique(session: Session, message: str) -> None:

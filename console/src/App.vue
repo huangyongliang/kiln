@@ -1,7 +1,8 @@
 <script setup>
 import { onMounted, ref } from "vue";
-import { RouterLink, RouterView } from "vue-router";
+import { RouterLink, RouterView, useRoute } from "vue-router";
 
+import { requestJson } from "./api";
 import { readApiToken, writeApiToken } from "./token";
 
 const links = [
@@ -12,6 +13,7 @@ const links = [
   { to: "/access", label: "账号与权限" },
   { to: "/chat", label: "对话" },
 ];
+const route = useRoute();
 const token = ref("");
 
 onMounted(() => {
@@ -22,10 +24,20 @@ function saveToken() {
   writeApiToken(token.value);
   window.location.reload();
 }
+
+async function logout() {
+  try {
+    await requestJson("/api/v1/auth/logout", { method: "POST" });
+  } finally {
+    writeApiToken("");
+    window.location.assign("/login");
+  }
+}
 </script>
 
 <template>
-  <div class="shell">
+  <RouterView v-if="route.name === 'login'" />
+  <div v-else class="shell">
     <aside class="sidebar">
       <p class="brand">kiln</p>
       <p class="brand-note">制品构建平台</p>
@@ -34,14 +46,18 @@ function saveToken() {
           {{ link.label }}
         </RouterLink>
       </nav>
-      <form class="token-form" @submit.prevent="saveToken">
-        <label for="api-token">访问令牌</label>
-        <input id="api-token" v-model="token" type="password" autocomplete="off" />
-        <button type="submit">保存</button>
-        <p class="token-note">
-          调用 /api 时放在 Authorization 头。本地示例是 kiln-local，不能用于生产。这不是登录。
-        </p>
-      </form>
+      <button type="button" class="logout" @click="logout">退出</button>
+      <details class="token-form">
+        <summary>机器访问令牌</summary>
+        <form @submit.prevent="saveToken">
+          <label for="api-token">访问令牌</label>
+          <input id="api-token" v-model="token" type="password" autocomplete="off" />
+          <button type="submit">保存</button>
+          <p class="token-note">
+            登录后，控制台通过会话访问 /api。这里的令牌是机器和开发用的 KILN_API_TOKEN，不是主要入口。本地示例是 kiln-local，不能用于生产。
+          </p>
+        </form>
+      </details>
     </aside>
     <div class="workspace">
       <main class="content">

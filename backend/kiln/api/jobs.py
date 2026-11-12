@@ -1,7 +1,7 @@
 """Jenkins compat executor HTTP API.
 
-Creating a job, reading its status, and reading its log all require the local
-API token. These routes do not deploy to a runtime.
+Creating a job, reading its status, and reading its log require a user session
+or the machine token. These routes do not deploy to a runtime.
 """
 
 from uuid import UUID
@@ -9,14 +9,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 
 from kiln.api.deps import get_jenkins, get_job_store, get_settings
-from kiln.auth import require_api_token
+from kiln.auth import require_auth
 from kiln.config import Settings
 from kiln.db.jobs import JobStore
 from kiln.domain.jobs import ExecutorInfo, Job, JobCreate, JobList, JobLog
 from kiln.executor.jenkins import JenkinsClient
 from kiln.executor.service import create_job, job_log, list_tracked, tracked_job
 
-router = APIRouter(tags=["执行器"], dependencies=[Depends(require_api_token)])
+router = APIRouter(tags=["执行器"], dependencies=[Depends(require_auth)])
 
 
 @router.get("/executor", response_model=ExecutorInfo, summary="执行器状态")

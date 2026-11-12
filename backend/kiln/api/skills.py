@@ -5,14 +5,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 
 from kiln.api.deps import get_store
-from kiln.auth import require_api_token
+from kiln.auth import require_auth, require_permission
 from kiln.db.store import PostgresStore
 from kiln.domain.skills import Skill, SkillCreate, SkillList, SkillStatus
 
 router = APIRouter(
     prefix="/skills",
     tags=["Skill"],
-    dependencies=[Depends(require_api_token)],
+    dependencies=[Depends(require_auth)],
 )
 
 
@@ -24,7 +24,13 @@ def list_skills(
     return SkillList(items=store.list_skills(status))
 
 
-@router.post("", response_model=Skill, status_code=201, summary="创建 skill 草稿")
+@router.post(
+    "",
+    response_model=Skill,
+    status_code=201,
+    summary="创建 skill 草稿",
+    dependencies=[Depends(require_permission("skill.use"))],
+)
 def create_skill(payload: SkillCreate, store: PostgresStore = Depends(get_store)) -> Skill:
     return store.create_skill(payload)
 
@@ -34,11 +40,21 @@ def get_skill(skill_id: UUID, store: PostgresStore = Depends(get_store)) -> Skil
     return store.get_skill(skill_id)
 
 
-@router.post("/{skill_id}/submit-review", response_model=Skill, summary="提交审核")
+@router.post(
+    "/{skill_id}/submit-review",
+    response_model=Skill,
+    summary="提交审核",
+    dependencies=[Depends(require_permission("skill.publish"))],
+)
 def submit_review(skill_id: UUID, store: PostgresStore = Depends(get_store)) -> Skill:
     return store.submit_skill_review(skill_id)
 
 
-@router.post("/{skill_id}/publish", response_model=Skill, summary="发布 skill")
+@router.post(
+    "/{skill_id}/publish",
+    response_model=Skill,
+    summary="发布 skill",
+    dependencies=[Depends(require_permission("skill.publish"))],
+)
 def publish_skill(skill_id: UUID, store: PostgresStore = Depends(get_store)) -> Skill:
     return store.publish_skill(skill_id)
