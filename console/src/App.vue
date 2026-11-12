@@ -54,7 +54,7 @@ watch(
   () => route.fullPath,
   () => {
     pageCrumb.value = "";
-    if (route.name === "login") {
+    if (route.name === "login" || window.location.pathname === "/login") {
       return;
     }
     token.value = readApiToken();

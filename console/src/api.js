@@ -54,8 +54,8 @@ export async function requestJson(path, options = {}) {
     error.status = response.status;
     if (isSessionExpiry(path, response.status)) {
       clearAccount();
-      writeFlash("登录已过期，请重新登录");
       if (window.location.pathname !== "/login") {
+        writeFlash("登录已过期，请重新登录");
         window.location.assign("/login");
       }
     }
