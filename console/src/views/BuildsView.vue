@@ -105,7 +105,7 @@ async function refreshActive() {
 <template>
   <PageIntro
     title="构建"
-    lead="兼容执行器在已配置的 Jenkins 上创建任务，并取回状态和日志。代码源按适配器读取：Gitea 是实验室实现，GitLab 是生产代码源。平台不把制品部署到运行环境。"
+    lead="兼容执行器在已配置的 Jenkins 上创建任务，并取回状态和日志。产品构建从代码仓库检出提交，在 Jenkins 上运行仓库里的 kiln-build.sh，把产出的字节存进平台目录。代码源按适配器读取：Gitea 是实验室实现，GitLab 是生产代码源。平台不把制品部署到运行环境。"
   />
   <p v-if="error" class="message error">{{ error }}</p>
   <section class="panel">

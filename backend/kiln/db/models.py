@@ -305,6 +305,49 @@ class SkillDependencyRow(Base):
     skill: Mapped[SkillRow] = relationship(back_populates="allowed_dependencies")
 
 
+class ProductBuildRow(Base):
+    """A Jenkins product build. Bytes live in artifact storage, not in this row.
+
+    The row does not store a git token and does not deploy to a runtime.
+    """
+
+    __tablename__ = "product_builds"
+    __table_args__ = (
+        UniqueConstraint("jenkins_job_name", name="uq_product_builds_jenkins_job_name"),
+        CheckConstraint(
+            "status IN ("
+            "'queued', 'running', 'success', 'failure', "
+            "'unstable', 'aborted', 'not_built', 'unknown'"
+            ")",
+            name="ck_product_builds_status",
+        ),
+        CheckConstraint(
+            "build_number IS NULL OR build_number >= 1",
+            name="ck_product_builds_build_number",
+        ),
+        CheckConstraint(
+            "package_type IN ('maven', 'python', 'generic', 'frontend')",
+            name="ck_product_builds_package_type",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    jenkins_job_name: Mapped[str] = mapped_column(Text, nullable=False)
+    repository: Mapped[str] = mapped_column(Text, nullable=False)
+    git_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    commit_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    artifact_id: Mapped[UUID] = mapped_column(ForeignKey("artifacts.id"), nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    package_type: Mapped[str] = mapped_column(Text, nullable=False)
+    queue_url: Mapped[str | None] = mapped_column(Text)
+    build_number: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    content_stored: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ExecutorJobRow(Base):
     """A Jenkins build tracked by kiln. The row does not deploy anything."""
 

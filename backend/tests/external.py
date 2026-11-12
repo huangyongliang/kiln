@@ -33,6 +33,9 @@ class ExternalTargets:
     jenkins_token: str
     git_base_url: str
     git_token: str
+    # URL Jenkins can clone. May differ from git_base_url when Jenkins runs in
+    # another network namespace. Not a secret and not a production host.
+    git_clone_base_url: str
 
 
 def load_external_targets() -> ExternalTargets:
@@ -48,28 +51,39 @@ def load_external_targets() -> ExternalTargets:
     provider = os.environ.get("KILN_TEST_GIT_PROVIDER", "gitea").strip().lower()
     if provider != "gitea":
         pytest.fail("KILN_TEST_GIT_PROVIDER must be gitea for the lab adapter tests")
+    git_base_url = os.environ["KILN_TEST_GIT_BASE_URL"].strip().rstrip("/")
+    clone_base = os.environ.get("KILN_TEST_GIT_CLONE_BASE_URL", "").strip().rstrip("/")
     targets = ExternalTargets(
         jenkins_url=os.environ["KILN_TEST_JENKINS_URL"].strip().rstrip("/"),
         jenkins_user=os.environ["KILN_TEST_JENKINS_USER"].strip(),
         jenkins_token=os.environ["KILN_TEST_JENKINS_API_TOKEN"].strip(),
-        git_base_url=os.environ["KILN_TEST_GIT_BASE_URL"].strip().rstrip("/"),
+        git_base_url=git_base_url,
         git_token=os.environ["KILN_TEST_GIT_TOKEN"].strip(),
+        git_clone_base_url=clone_base or git_base_url,
     )
     _probe(targets)
     return targets
 
 
-def external_settings(targets: ExternalTargets) -> Settings:
-    return app_settings(
-        jenkins_url=targets.jenkins_url,
-        jenkins_user=targets.jenkins_user,
-        jenkins_api_token=targets.jenkins_token,
-        jenkins_timeout_seconds=60,
-        git_provider="gitea",
-        git_base_url=targets.git_base_url,
-        git_token=targets.git_token,
-        git_timeout_seconds=60,
-    )
+def external_settings(
+    targets: ExternalTargets,
+    *,
+    artifact_root: str | None = None,
+) -> Settings:
+    values: dict[str, object] = {
+        "jenkins_url": targets.jenkins_url,
+        "jenkins_user": targets.jenkins_user,
+        "jenkins_api_token": targets.jenkins_token,
+        "jenkins_timeout_seconds": 60,
+        "git_provider": "gitea",
+        "git_base_url": targets.git_base_url,
+        "git_clone_base_url": targets.git_clone_base_url,
+        "git_token": targets.git_token,
+        "git_timeout_seconds": 60,
+    }
+    if artifact_root is not None:
+        values["kiln_artifact_root"] = artifact_root
+    return app_settings(**values)
 
 
 def _probe(targets: ExternalTargets) -> None:

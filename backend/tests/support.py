@@ -19,6 +19,7 @@ _TEST_ARTIFACT_ROOT = Path(tempfile.mkdtemp(prefix="kiln-test-artifacts-"))
 
 DOMAIN_TABLES = (
     "download_reservations",
+    "product_builds",
     "artifact_versions",
     "artifacts",
     "account_roles",

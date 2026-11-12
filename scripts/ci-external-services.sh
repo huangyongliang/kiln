@@ -11,6 +11,7 @@ JENKINS_NAME="kiln-ci-jenkins"
 GITEA_NAME="kiln-ci-gitea"
 JENKINS_VOLUME="kiln-ci-jenkins-data"
 GITEA_VOLUME="kiln-ci-gitea-data"
+CI_NETWORK="kiln-ci-net"
 JENKINS_PORT="28080"
 GITEA_PORT="23000"
 GITEA_SSH_PORT="2322"
@@ -47,6 +48,12 @@ assert_isolated() {
         ;;
     esac
   done
+  case "$CI_NETWORK" in
+    kiln-net)
+      echo "refusing to use the repo compose network ${CI_NETWORK}" >&2
+      exit 1
+      ;;
+  esac
 }
 
 redact() {
@@ -67,6 +74,7 @@ stop_services() {
   assert_isolated
   docker rm -f "$JENKINS_NAME" "$GITEA_NAME" >/dev/null 2>&1 || true
   docker volume rm "$JENKINS_VOLUME" "$GITEA_VOLUME" >/dev/null 2>&1 || true
+  docker network rm "$CI_NETWORK" >/dev/null 2>&1 || true
 }
 
 wait_for_url() {
@@ -93,8 +101,11 @@ start_services() {
     echo "::add-mask::${GITEA_ADMIN_PASSWORD}"
   fi
 
+  docker network create "$CI_NETWORK" >/dev/null
+
   docker run -d \
     --name "$JENKINS_NAME" \
+    --network "$CI_NETWORK" \
     -p "127.0.0.1:${JENKINS_PORT}:8080" \
     -e "JENKINS_ADMIN_ID=${JENKINS_USER}" \
     -e "JENKINS_ADMIN_PASSWORD=${JENKINS_ADMIN_PASSWORD}" \
@@ -105,6 +116,7 @@ start_services() {
 
   docker run -d \
     --name "$GITEA_NAME" \
+    --network "$CI_NETWORK" \
     -p "127.0.0.1:${GITEA_PORT}:3000" \
     -e GITEA__database__DB_TYPE=sqlite3 \
     -e GITEA__database__PATH=/data/gitea/gitea.db \
@@ -207,6 +219,11 @@ start_services() {
     exit 1
   fi
 
+  if ! docker exec "$JENKINS_NAME" git --version >/dev/null 2>&1; then
+    echo "Jenkins image does not provide git, which the product build needs" >&2
+    exit 1
+  fi
+
   local env_file="${KILN_CI_ENV_FILE:-/tmp/kiln-ci-external.env}"
   umask 077
   cat >"$env_file" <<EOF
@@ -216,6 +233,7 @@ KILN_TEST_JENKINS_API_TOKEN=${JENKINS_ADMIN_PASSWORD}
 KILN_TEST_GIT_BASE_URL=http://127.0.0.1:${GITEA_PORT}
 KILN_TEST_GIT_TOKEN=${GITEA_TOKEN}
 KILN_TEST_GIT_PROVIDER=gitea
+KILN_TEST_GIT_CLONE_BASE_URL=http://${GITEA_NAME}:3000
 EOF
   chmod 600 "$env_file"
   if [[ -n "${GITHUB_ENV:-}" ]]; then
@@ -223,6 +241,7 @@ EOF
   fi
   echo "Throwaway Jenkins is on 127.0.0.1:${JENKINS_PORT} (${JENKINS_NAME})."
   echo "Throwaway Gitea is on 127.0.0.1:${GITEA_PORT} (${GITEA_NAME})."
+  echo "Jenkins clones Gitea on ${CI_NETWORK} as http://${GITEA_NAME}:3000."
   echo "Credentials were written to ${env_file} and were not printed."
 }
 

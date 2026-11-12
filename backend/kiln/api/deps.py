@@ -3,6 +3,7 @@
 from fastapi import Request
 
 from kiln.config import Settings
+from kiln.db.builds import BuildStore
 from kiln.db.jobs import JobStore
 from kiln.db.store import PostgresStore
 from kiln.errors import NotConfigured
@@ -25,6 +26,10 @@ def get_llm(request: Request) -> LLMProvider:
 
 def get_job_store(request: Request) -> JobStore:
     return request.app.state.jobs
+
+
+def get_build_store(request: Request) -> BuildStore:
+    return request.app.state.builds
 
 
 def get_jenkins(request: Request) -> JenkinsClient:

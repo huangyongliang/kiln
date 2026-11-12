@@ -42,6 +42,7 @@ def test_compose_contract_prefixes_container_names() -> None:
     assert "JENKINS_URL:" in text
     assert "GIT_PROVIDER:" in text
     assert "GIT_BASE_URL:" in text
+    assert "GIT_CLONE_BASE_URL:" in text
     assert "KILN_ARTIFACT_ROOT:" in text
     assert "kiln-artifact-data:" in text
     assert "127.0.0.1:2222" not in text
