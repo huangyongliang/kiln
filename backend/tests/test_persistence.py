@@ -306,7 +306,7 @@ def test_product_build_skill_migration_round_trip(client: TestClient) -> None:
     """skill_id appears at head and is gone at 0006_skill_rejection."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0008_skill_created_by"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0009_llm_catalog"]
     engine = client.app.state.engine
     try:
         command.downgrade(cfg, "0006_skill_rejection")
@@ -333,7 +333,7 @@ def test_skill_rejection_migration_round_trip(client: TestClient) -> None:
     """Drop the rejection columns at 0005_local_login, then restore them at head."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0008_skill_created_by"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0009_llm_catalog"]
     engine = client.app.state.engine
     try:
         command.downgrade(cfg, "0005_local_login")
@@ -348,7 +348,7 @@ def test_skill_created_by_migration_round_trip(client: TestClient) -> None:
     """created_by appears at head and is gone at 0007_product_build_skill."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0008_skill_created_by"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0009_llm_catalog"]
     engine = client.app.state.engine
     try:
         _assert_created_by_schema(engine)
@@ -370,6 +370,65 @@ def test_skill_created_by_migration_round_trip(client: TestClient) -> None:
         _assert_created_by_schema(engine)
     finally:
         command.upgrade(cfg, "head")
+
+
+def test_llm_catalog_migration_round_trip(client: TestClient) -> None:
+    """Downgrade drops a saved catalog. Upgrade again is back to env behavior."""
+
+    cfg = _alembic_config(postgres_url())
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0009_llm_catalog"]
+    engine = client.app.state.engine
+    try:
+        _assert_llm_catalog_tables(engine, present=True)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO llm_catalog_state (id, source) VALUES (1, 'db') "
+                    "ON CONFLICT (id) DO UPDATE SET source = 'db'"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO llm_catalog_models "
+                    "(model_id, display_name, position, is_default) "
+                    "VALUES ('model-a', '甲', 0, true)"
+                )
+            )
+        command.downgrade(cfg, "0008_skill_created_by")
+        _assert_llm_catalog_tables(engine, present=False)
+        command.upgrade(cfg, "head")
+        _assert_llm_catalog_tables(engine, present=True)
+        with engine.connect() as connection:
+            source = connection.execute(
+                text("SELECT source FROM llm_catalog_state WHERE id = 1")
+            ).scalar_one()
+            saved = connection.execute(
+                text("SELECT count(*) FROM llm_catalog_models")
+            ).scalar_one()
+        assert source == "env"
+        assert saved == 0
+    finally:
+        command.upgrade(cfg, "head")
+
+
+def _assert_llm_catalog_tables(engine: Engine, *, present: bool) -> None:
+    with engine.connect() as connection:
+        found = connection.execute(
+            text(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name IN (
+                    'llm_catalog_state',
+                    'llm_catalog_models',
+                    'llm_role_models'
+                  )
+                """
+            )
+        ).scalars().all()
+    expected = {"llm_catalog_state", "llm_catalog_models", "llm_role_models"}
+    assert set(found) == (expected if present else set())
 
 
 def _assert_created_by_schema(engine: Engine) -> None:

@@ -163,6 +163,7 @@ def test_permission_catalog_includes_read_codes(client: TestClient) -> None:
     assert described["git.read"] == _GIT_READ
     assert described["skill.submit"] == "提交 skill 审核"
     assert described["skill.publish"] == "审核并发布 skill"
+    assert described["llm.manage"] == "管理模型目录及角色可用模型"
     assert "skill.review" not in described
     listed = {role["id"]: role for role in client.get("/api/v1/rbac/roles").json()["items"]}
     assert listed["reader"]["description"] == "查看账号、skill 与制品"
@@ -181,6 +182,10 @@ def test_permission_catalog_includes_read_codes(client: TestClient) -> None:
     assert "agent.draft_skill" not in roles["reader"]
     assert "skill.publish" in roles["publisher"]
     assert "skill.publish" in roles["admin"]
+    assert "llm.manage" not in roles["reader"]
+    assert "llm.manage" not in roles["builder"]
+    assert "llm.manage" not in roles["publisher"]
+    assert "llm.manage" in roles["admin"]
     for role_id in ("builder", "publisher", "admin"):
         assert "executor.run" in roles[role_id]
         assert "agent.qa" in roles[role_id]

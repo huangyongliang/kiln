@@ -11,7 +11,9 @@ export const CHAT_MESSAGE_LIMIT = 32;
 export const CHAT_THREAD_KEY = "kiln.chat.thread";
 export const CHAT_MODEL_KEY = "kiln.chat.model";
 export const STALE_MODEL_TIP = "上次选择的模型已不在允许列表中，已改用默认模型。";
-export const EMPTY_CATALOG_TIP = "请运营配置 LLM_MODEL 或 LLM_MODELS。";
+export const EMPTY_CATALOG_TIP =
+  "当前没有可用的模型。请管理员在模型配置中分配，或检查环境变量 LLM_MODEL / LLM_MODELS。";
+export const MODEL_NOT_ALLOWED = "模型不在允许的模型列表中。";
 
 const MODEL_ID_MAX = 128;
 
@@ -56,6 +58,13 @@ export function failOutgoingMessage(messages, prompt) {
     thread[thread.length - 1] = { ...last, failed: true };
   }
   return { messages: thread, prompt };
+}
+
+export function isDisallowedModelError(caught) {
+  if (!caught || caught.status !== 400) {
+    return false;
+  }
+  return caught.message === MODEL_NOT_ALLOWED || caught.detail === MODEL_NOT_ALLOWED;
 }
 
 export function showModelPicker(provider) {

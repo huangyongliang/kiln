@@ -92,6 +92,13 @@ export function getJson(path) {
   return requestJson(path);
 }
 
+export function putJson(path, payload) {
+  return requestJson(path, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function postJson(path, payload) {
   return requestJson(path, {
     method: "POST",

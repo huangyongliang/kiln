@@ -30,6 +30,7 @@ from kiln.config import Settings, get_settings
 from kiln.db.builds import BuildStore
 from kiln.db.engine import create_db_engine
 from kiln.db.jobs import JobStore
+from kiln.db.llm_catalog import LlmCatalogStore
 from kiln.db.migrate import upgrade_database
 from kiln.db.seed import seed_rbac
 from kiln.db.store import PostgresStore
@@ -53,8 +54,9 @@ DESCRIPTION = (
     "KILN_API_TOKEN 仍是必填的机器和开发访问令牌，拥有目录中的全部权限。"
     "未配置公司用户系统时，本地口令登录可用。配置之后，用户信息同步只接收身份和在职状态，"
     "不把公司侧的组或角色写入 kiln 权限。kiln 的授权仍留在平台上。"
-    "已登录用户的写入会按现有权限目录校验，包括 account.manage、artifact.upload、"
-    "artifact.download、skill.use、skill.submit、skill.publish、executor.run 和 agent.qa。"
+    "已登录用户的写入会按现有权限目录校验，包括 account.manage、llm.manage、"
+    "artifact.upload、artifact.download、skill.use、skill.submit、skill.publish、"
+    "executor.run 和 agent.qa。"
     "POST /skills/{id}/reject 需要 skill.publish，把审核中的 skill 退回草稿，须填写原因。"
     "POST /jobs 需要 executor.run。POST /builds 需要 executor.run 与 skill.use，"
     "并且必须带已发布 skill 的 skill_id。POST /llm/chat 需要 agent.qa。"
@@ -67,7 +69,8 @@ DESCRIPTION = (
     "GET /git/source、GET /git/repositories 和 GET /git/commits 需要 git.read。"
     "只读角色可以查看账号、skill 与制品，没有 executor.read 和 git.read。"
     "GET /llm/provider、GET /rbac/roles、GET /rbac/permissions 和取包元数据"
-    "仍只需会话或机器令牌。GET /retrieve/{id}/content 需要 artifact.download。"
+    "仍只需会话或机器令牌。GET /llm/catalog 与 PUT /llm/catalog 需要 llm.manage。"
+    "GET /retrieve/{id}/content 需要 artifact.download。"
     "权限不足返回 403，正文是「没有权限」，并且先于未配置检查。"
     "/health 与 /docs 不接受写入。"
     "不运行 skill 步骤，也不把制品部署到运行环境。"
@@ -76,12 +79,15 @@ DESCRIPTION = (
     "这两处地址只来自环境变量。仓库不写生产 GitLab 地址。"
     "可选依赖代理对接默认关闭；制品不发布到 Nexus。"
     "未设置 KILN_NEXUS_URL 时，产品构建与现在相同，GET /dependency-proxy 不向外发起调用。"
-    "模型调用走 OpenAI 兼容协议，端点由环境变量配置；未就绪时可使用 mock 或 off。"
-    "可选模型 id 来自 LLM_MODELS，经 GET /llm/provider 的 models 下发；"
-    "对话只更换 model id，不切换提供方。"
+    "模型调用走 OpenAI 兼容协议。提供方、端点、密钥和超时由环境变量配置；"
+    "未就绪时可使用 mock 或 off。"
+    "模型目录和角色分配可在管理页保存，首次从 LLM_MODEL / LLM_MODELS 种子。"
+    "尚未托管时，GET /llm/provider 的 models 与环境变量目录相同。"
+    "已托管且提供方为 openai 时，models 是当前调用者可用的模型 id。"
+    "mock 与 off 的 models 为空。对话只更换 model id，不切换提供方。"
     "对话可在授权下通过工具起草 skill 草稿，或在 skill 发布后发起构建。"
     "这些工具只在 openai 提供方下运行；mock 与 off 不调用工具。"
-    "配置只从环境变量读取。"
+    "连接参数只从环境变量读取。已保存的模型目录保存在 PostgreSQL，不含密钥。"
 )
 
 
@@ -168,6 +174,7 @@ def create_app(
     app.state.git_source = git_source
     app.state.nexus = nexus
     app.state.llm = provider
+    app.state.llm_catalog = LlmCatalogStore(engine)
     app.state.oidc_http = oidc_http
 
     app.add_middleware(

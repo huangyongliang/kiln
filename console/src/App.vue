@@ -22,6 +22,7 @@ const links = [
   { to: "/artifacts", route: "artifacts", label: "制品", icon: "artifacts" },
   { to: "/skills", route: "skills", label: "Skill", sub: "构建流程", icon: "skills" },
   { to: "/access", route: "access", label: "账号与权限", icon: "access" },
+  { to: "/models", route: "models", label: "模型配置", icon: "models" },
   { to: "/chat", route: "chat", label: "对话", icon: "chat" },
 ];
 
@@ -35,6 +36,7 @@ const baseCrumbs = {
   skill: "Skill",
   "skill-new": "Skill",
   access: "账号与权限",
+  models: "模型配置",
   chat: "对话",
 };
 

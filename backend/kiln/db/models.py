@@ -17,6 +17,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -429,3 +430,75 @@ class ExecutorJobRow(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LlmCatalogStateRow(Base):
+    """Single row. source=env is unmanaged; source=db is the saved catalog.
+
+    An empty model table together with source=db means an administrator saved
+    an empty catalog. A missing row is treated as env. Downgrade drops the row.
+    """
+
+    __tablename__ = "llm_catalog_state"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_llm_catalog_state_singleton"),
+        CheckConstraint("source IN ('env', 'db')", name="ck_llm_catalog_state_source"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class LlmCatalogModelRow(Base):
+    """One platform model id. No endpoint and no secret is stored."""
+
+    __tablename__ = "llm_catalog_models"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(model_id) BETWEEN 1 AND 128",
+            name="ck_llm_catalog_models_id_len",
+        ),
+        CheckConstraint(
+            "display_name IS NULL OR char_length(display_name) BETWEEN 1 AND 128",
+            name="ck_llm_catalog_models_display_name_len",
+        ),
+        CheckConstraint("position >= 0", name="ck_llm_catalog_models_position"),
+        Index(
+            "uq_llm_catalog_models_one_default",
+            "is_default",
+            unique=True,
+            postgresql_where=text("is_default"),
+        ),
+    )
+
+    model_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    display_name: Mapped[str | None] = mapped_column(Text)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class LlmRoleModelRow(Base):
+    """Models assigned to one of the four fixed roles. Not an RBAC grant."""
+
+    __tablename__ = "llm_role_models"
+    __table_args__ = (
+        CheckConstraint(
+            "role_id IN ('reader', 'builder', 'publisher', 'admin')",
+            name="ck_llm_role_models_role",
+        ),
+        CheckConstraint("position >= 0", name="ck_llm_role_models_position"),
+        Index(
+            "uq_llm_role_models_one_default",
+            "role_id",
+            unique=True,
+            postgresql_where=text("is_default"),
+        ),
+    )
+
+    role_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    model_id: Mapped[str] = mapped_column(
+        ForeignKey("llm_catalog_models.model_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

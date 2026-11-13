@@ -1699,6 +1699,103 @@ dialog.modal::backdrop {
   box-shadow: var(--shadow);
 }
 
+.model-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px 28px;
+  margin: 0;
+}
+
+.model-status div {
+  min-width: 120px;
+}
+
+.model-status dt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.model-status dd {
+  margin: 2px 0 0;
+}
+
+.model-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+  margin-bottom: 8px;
+}
+
+.model-add .field {
+  margin-bottom: 0;
+  flex: 1 1 180px;
+}
+
+.model-add .btn {
+  margin-bottom: 0;
+}
+
+.model-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+
+.model-list li {
+  display: grid;
+  grid-template-columns: auto minmax(120px, 1.2fr) minmax(100px, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.model-list li:last-child {
+  border-bottom: 0;
+}
+
+.model-name-field {
+  margin-bottom: 0;
+}
+
+.model-name-field input {
+  max-width: none;
+}
+
+.model-order {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.role-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.role-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+}
+
+.role-card h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+}
+
+.role-card h3 .mono {
+  margin-left: 8px;
+  font-weight: 500;
+}
+
+.role-card .checks {
+  margin: 8px 0 12px;
+}
+
 :focus-visible {
   outline: 2px solid var(--ember);
   outline-offset: 2px;
@@ -1739,7 +1836,9 @@ dialog.modal::backdrop {
 
   .metrics,
   .grid-2,
-  .grid-2.even {
+  .grid-2.even,
+  .role-grid,
+  .model-list li {
     grid-template-columns: 1fr;
   }
 

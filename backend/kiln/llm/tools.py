@@ -15,7 +15,7 @@ It needs ``agent.build_artifact``, ``executor.run``, and ``skill.use``.
 """
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -325,16 +325,36 @@ def run_tool_loop(
     provider: OpenAICompatibleProvider,
     principal: Principal,
     context: ToolContext,
+    *,
+    allowed: Sequence[str] | None = None,
+    default: str | None = None,
+    managed: bool = False,
 ) -> ChatCompletion:
-    """Call the model at most MAX_MODEL_ROUNDS times, executing only known tools."""
+    """Call the model at most MAX_MODEL_ROUNDS times, executing only known tools.
+
+    The chat route always passes ``allowed``, ``default``, and ``managed``
+    for this caller. It does not rebuild the provider. When ``allowed`` is
+    omitted, the loop uses the environment catalog. Direct tool tests use
+    that omission; the HTTP route does not.
+    """
+
+    if allowed is None:
+        allowed = context.settings.llm_catalog()
+        default = context.settings.llm_request_default()
+        managed = False
 
     messages = _model_messages(request)
     actions: list[ChatAction] = []
     turn: ModelTurn | None = None
-    # Resolve once. Later rounds of this request reuse the same id, including
-    # when the catalog default fills in an omitted model. An id outside a
-    # non-empty catalog fails here and does not call the endpoint.
-    model = provider.resolve_model(request.model)
+    # Resolve once. Later rounds of this request reuse the same id. The
+    # allow-list and default are this caller's, passed in by the chat route.
+    # An id outside a non-empty list fails here and does not call the endpoint.
+    model = provider.resolve_model(
+        request.model,
+        allowed=allowed,
+        default=default or "",
+        managed=managed,
+    )
     for _ in range(MAX_MODEL_ROUNDS):
         turn = provider.complete_turn(
             model=model,

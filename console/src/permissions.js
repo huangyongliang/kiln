@@ -16,6 +16,7 @@ export const ROUTE_GATES = {
   "skill-detail": "skill.read",
   "skill-new": "skill.use",
   access: "account.read",
+  models: "llm.manage",
   chat: "agent.qa",
 };
 
@@ -44,6 +45,7 @@ export const ACTION_GATES = {
   "artifact.upload": ["artifact.upload"],
   "artifact.reserve": ["artifact.download"],
   "retrieve.download": ["artifact.download"],
+  "llm.catalog.update": ["llm.manage"],
 };
 
 export const GATE_DOCS = [
@@ -60,6 +62,7 @@ export const GATE_DOCS = [
   { action: "artifact.reserve", label: "预约下载", codes: ["artifact.download"] },
   { action: "retrieve.download", label: "取回字节", codes: ["artifact.download"] },
   { action: "chat.send", label: "对话", codes: ["agent.qa"] },
+  { action: "llm.catalog.update", label: "保存模型配置", codes: ["llm.manage"] },
   { action: "agent.draft_skill", label: "对话起草 Skill", codes: ["agent.draft_skill"] },
   { action: "agent.build_artifact", label: "对话制作制品", codes: ["agent.build_artifact"] },
 ];
