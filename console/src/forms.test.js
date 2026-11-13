@@ -2,6 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  allowedRepositoriesFromChecklist,
+  checklistRepositoriesError,
+  fetchGitCatalog,
+  repositoryFieldState,
+  repositoryLinesError,
+} from "./repositories.js";
+import {
   artifactNameError,
   boundError,
   buildNameError,
@@ -195,4 +202,113 @@ test("fieldErrors strips the value-error prefix and maps loc to a field", () => 
   assert.equal(errors.name, "名称至少 2 个字符");
   assert.deepEqual(fieldErrors("不是数组"), {});
   assert.equal(JSON.stringify(errors).includes("Value error"), false);
+});
+
+test("repository checkboxes map full_name and keep values outside the list", () => {
+  const result = {
+    problem: null,
+    items: [
+      { full_name: "ada/demo" },
+      { full_name: "ada/other" },
+      { full_name: "ada/demo" },
+      { full_name: "  " },
+    ],
+  };
+  const state = repositoryFieldState(result, ["ada/demo", "kept/legacy"]);
+  assert.equal(state.mode, "checklist");
+  assert.equal(state.notice, "");
+  assert.deepEqual(state.choices, [
+    { name: "ada/demo", extra: false },
+    { name: "ada/other", extra: false },
+    { name: "kept/legacy", extra: true },
+  ]);
+  assert.deepEqual(state.selected, ["ada/demo", "kept/legacy"]);
+  assert.deepEqual(
+    allowedRepositoriesFromChecklist(state.selected, "", state.choices),
+    ["ada/demo", "kept/legacy"],
+  );
+  assert.deepEqual(allowedRepositoriesFromChecklist([], "", state.choices), []);
+  assert.deepEqual(
+    allowedRepositoriesFromChecklist(["ada/other"], " ada/manual ", state.choices),
+    ["ada/other", "ada/manual"],
+  );
+  assert.equal(checklistRepositoriesError(["ada/demo"], "", state.choices), "");
+  assert.equal(checklistRepositoriesError([], "  ", state.choices), "");
+  assert.equal(
+    checklistRepositoriesError(["ada/demo"], "nope", state.choices),
+    "仓库必须是 owner/name",
+  );
+  const uncheckedExtra = allowedRepositoriesFromChecklist(["ada/demo"], "", state.choices);
+  assert.equal(uncheckedExtra.includes("kept/legacy"), false);
+  assert.equal(state.choices.some((row) => row.name === "kept/legacy"), true);
+});
+
+test("without a repository list the field stays manual and can be empty", async () => {
+  for (const problem of ["forbidden", "unconfigured", "source", "list"]) {
+    const state = repositoryFieldState({ items: [], problem }, ["ada/demo"]);
+    assert.equal(state.mode, "manual");
+    assert.equal(state.notice.length > 0, true);
+    assert.deepEqual(state.choices, []);
+    assert.deepEqual(state.selected, ["ada/demo"]);
+    assert.deepEqual(scopeList(state.selected.join("\n")), ["ada/demo"]);
+  }
+  const empty = repositoryFieldState({ items: [], problem: "unconfigured" }, " \n ");
+  assert.deepEqual(empty.selected, []);
+  assert.equal(repositoryLinesError(""), "");
+  assert.equal(repositoryLinesError("ada/demo\n\n"), "");
+  assert.deepEqual(scopeList(""), []);
+  assert.deepEqual(scopeList("ada/demo\n\n"), ["ada/demo"]);
+  assert.equal(repositoryLinesError("not-a-repo"), "仓库必须是 owner/name");
+
+  const sourceCalls = [];
+  const unconfigured = await fetchGitCatalog(async (path) => {
+    sourceCalls.push(path);
+    return { configured: false, provider: "off" };
+  });
+  assert.deepEqual(sourceCalls, ["/api/v1/git/source"]);
+  assert.equal(unconfigured.problem, "unconfigured");
+  assert.deepEqual(unconfigured.items, []);
+
+  const listed = await fetchGitCatalog(async (path) => {
+    if (path === "/api/v1/git/source") {
+      return { configured: true, provider: "gitea" };
+    }
+    if (path === "/api/v1/git/repositories") {
+      return { items: [{ full_name: "ada/demo" }] };
+    }
+    throw new Error(path);
+  });
+  assert.equal(listed.problem, null);
+  assert.equal(listed.items[0].full_name, "ada/demo");
+  assert.equal(repositoryFieldState(listed, []).mode, "checklist");
+
+  const missing = await fetchGitCatalog(async (path) => {
+    if (path.endsWith("/repositories")) {
+      const error = new Error("无法读取仓库");
+      error.status = 500;
+      throw error;
+    }
+    return { configured: true, provider: "gitea" };
+  });
+  assert.equal(missing.problem, "list");
+  assert.equal(missing.source.configured, true);
+  assert.equal(repositoryFieldState(missing, "").mode, "manual");
+
+  const quiet = await fetchGitCatalog(async (path) => {
+    if (path.endsWith("/repositories")) {
+      const error = new Error("未配置");
+      error.status = 503;
+      throw error;
+    }
+    return { configured: true, provider: "gitea" };
+  });
+  assert.equal(quiet.problem, "unconfigured");
+
+  const denied = await fetchGitCatalog(async () => {
+    const error = new Error("没有权限");
+    error.status = 403;
+    throw error;
+  });
+  assert.equal(denied.problem, "forbidden");
+  assert.equal(denied.source, null);
 });

@@ -1,7 +1,8 @@
 <script setup>
-import { reactive, ref, watch } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 
-import PageIntro from "./PageIntro.vue";
+import { accessReady, perms } from "../access";
+import { getJson } from "../api";
 import {
   boundError,
   inputNameError,
@@ -11,6 +12,21 @@ import {
   stepKindError,
   versionError,
 } from "../forms";
+import { canDo } from "../permissions";
+import {
+  DEPENDENCY_NOTE,
+  REPO_MANUAL_UNRESTRICTED,
+  REPO_NOTICES,
+  REPO_UNRESTRICTED,
+  allowedRepositoriesFromChecklist,
+  checklistRepositoriesError,
+  fetchGitCatalog,
+  repositoryChecklist,
+  repositoryFieldState,
+  repositoryFullNames,
+  repositoryLinesError,
+} from "../repositories";
+import PageIntro from "./PageIntro.vue";
 
 const STEP_OPTIONS = [
   ["checkout", "检出"],
@@ -33,6 +49,13 @@ const props = defineProps({
 const emit = defineEmits(["submit", "cancel"]);
 
 const errors = reactive({});
+const repoMode = ref("loading");
+const repoNotice = ref("");
+const repoCatalog = ref([]);
+const keptRepos = ref([]);
+const selectedRepos = ref([]);
+const repoManual = ref("");
+const repoChoices = computed(() => repositoryChecklist(repoCatalog.value, keptRepos.value));
 const form = reactive({
   name: "",
   version: "0.1.0",
@@ -53,11 +76,67 @@ const scalars = [
   ["toolchain", "工具链", "skill-toolchain"],
   ["environment", "环境", "skill-environment"],
   ["output_spec", "输出说明", "skill-output", 2],
-  ["allowed_repositories", "允许仓库", "skill-repos", 3, "一行一条"],
-  ["allowed_dependencies", "允许依赖", "skill-deps", 3, "一行一条"],
+  ["allowed_repositories", "允许仓库", "skill-repos"],
+  ["allowed_dependencies", "允许依赖", "skill-deps", 3, "一行一条", DEPENDENCY_NOTE],
 ];
 
 watch(() => props.initial, applyInitial, { immediate: true });
+watch(accessReady, (ready) => {
+  if (ready) {
+    loadRepositoryChoices();
+  }
+}, { immediate: true });
+
+async function loadRepositoryChoices() {
+  if (!accessReady.value) {
+    return;
+  }
+  if (perms.value != null && !canDo("git.read", perms.value)) {
+    useManual("forbidden");
+    return;
+  }
+  const result = await fetchGitCatalog(getJson);
+  if (result.problem) {
+    useManual(result.problem);
+    return;
+  }
+  const state = repositoryFieldState(result, scopeList(form.allowed_repositories));
+  repoCatalog.value = repositoryFullNames(result.items);
+  if (repoMode.value !== "checklist") {
+    keptRepos.value = state.selected.slice();
+    selectedRepos.value = state.selected.slice();
+  }
+  repoMode.value = "checklist";
+  repoNotice.value = "";
+}
+
+function useManual(problem) {
+  if (repoMode.value === "checklist") {
+    form.allowed_repositories = allowedRepositoriesFromChecklist(
+      selectedRepos.value,
+      repoManual.value,
+      repoChoices.value,
+    ).join("\n");
+    repoManual.value = "";
+  }
+  repoCatalog.value = [];
+  repoMode.value = "manual";
+  repoNotice.value = REPO_NOTICES[problem] || REPO_NOTICES.source;
+}
+
+function repositoryPayload() {
+  if (repoMode.value === "checklist") {
+    return allowedRepositoriesFromChecklist(selectedRepos.value, repoManual.value, repoChoices.value);
+  }
+  return scopeList(form.allowed_repositories);
+}
+
+function repositoryMessage() {
+  if (repoMode.value === "checklist") {
+    return checklistRepositoriesError(selectedRepos.value, repoManual.value, repoChoices.value);
+  }
+  return repositoryLinesError(form.allowed_repositories);
+}
 
 function applyInitial(skill) {
   form.name = skill?.name || "";
@@ -66,7 +145,13 @@ function applyInitial(skill) {
   form.toolchain = skill?.toolchain || "";
   form.environment = skill?.environment || "";
   form.output_spec = skill?.output_spec || "";
-  form.allowed_repositories = (skill?.allowed_repositories || []).join("\n");
+  const repositories = (skill?.allowed_repositories || [])
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean);
+  form.allowed_repositories = repositories.join("\n");
+  keptRepos.value = repositories;
+  selectedRepos.value = [...repositories];
+  repoManual.value = "";
   form.allowed_dependencies = (skill?.allowed_dependencies || []).join("\n");
   inputs.value = (skill?.inputs || []).map((row) => ({
     name: row.name || "",
@@ -122,7 +207,7 @@ function validate() {
     const hit = boundError(value, max, message);
     if (hit) errors[key] = hit;
   }
-  const repoMessage = scopeListError(form.allowed_repositories);
+  const repoMessage = repositoryMessage();
   if (repoMessage) errors.allowed_repositories = repoMessage;
   const dependencyMessage = scopeListError(form.allowed_dependencies);
   if (dependencyMessage) errors.allowed_dependencies = dependencyMessage;
@@ -157,7 +242,7 @@ function submit() {
       })),
     toolchain: form.toolchain.trim() || null,
     environment: form.environment.trim() || null,
-    allowed_repositories: scopeList(form.allowed_repositories),
+    allowed_repositories: repositoryPayload(),
     allowed_dependencies: scopeList(form.allowed_dependencies),
     steps: steps.value.map((row) => ({ kind: row.kind, description: row.description.trim() })),
     output_spec: form.output_spec.trim() || null,
@@ -170,15 +255,53 @@ function submit() {
     <PageIntro v-if="title" :title="title" :lead="lead" />
     <p v-else-if="lead" class="hint">{{ lead }}</p>
     <div v-for="field in scalars" :key="field[0]" class="field">
-      <label :for="field[2]">{{ field[1] }}</label>
-      <textarea
-        v-if="field[3]"
-        :id="field[2]"
-        v-model="form[field[0]]"
-        :rows="field[3]"
-        :placeholder="field[4]"
-      />
-      <input v-else :id="field[2]" v-model="form[field[0]]" type="text" autocomplete="off" />
+      <template v-if="field[0] === 'allowed_repositories'">
+        <fieldset class="repo-field">
+          <legend>允许仓库</legend>
+          <p v-if="repoMode === 'checklist'" class="field-note">{{ REPO_UNRESTRICTED }}</p>
+          <template v-else-if="repoMode === 'manual'">
+            <p class="field-note">{{ REPO_MANUAL_UNRESTRICTED }}</p>
+            <p v-if="repoNotice" class="field-note">{{ repoNotice }}</p>
+          </template>
+          <p v-else class="field-note">正在读取仓库…</p>
+          <div v-if="repoMode === 'checklist'">
+            <div v-if="repoChoices.length" class="repo-choices">
+              <label v-for="row in repoChoices" :key="row.name" class="check">
+                <input v-model="selectedRepos" type="checkbox" :value="row.name" />
+                <span class="mono">{{ row.name }}</span>
+                <span v-if="row.extra" class="repo-extra">不在当前列表，可以取消勾选</span>
+              </label>
+            </div>
+            <label class="repo-manual" for="skill-repo-manual">手动添加</label>
+            <input
+              id="skill-repo-manual"
+              v-model="repoManual"
+              type="text"
+              autocomplete="off"
+              placeholder="owner/name"
+            />
+          </div>
+          <textarea
+            v-else-if="repoMode === 'manual'"
+            id="skill-repos"
+            v-model="form.allowed_repositories"
+            rows="3"
+            placeholder="一行一条，owner/name"
+          />
+        </fieldset>
+      </template>
+      <template v-else>
+        <label :for="field[2]">{{ field[1] }}</label>
+        <p v-if="field[5]" class="field-note">{{ field[5] }}</p>
+        <textarea
+          v-if="field[3]"
+          :id="field[2]"
+          v-model="form[field[0]]"
+          :rows="field[3]"
+          :placeholder="field[4]"
+        />
+        <input v-else :id="field[2]" v-model="form[field[0]]" type="text" autocomplete="off" />
+      </template>
       <p v-if="fieldMessage(field[0])" class="field-error">{{ fieldMessage(field[0]) }}</p>
     </div>
     <div class="field">

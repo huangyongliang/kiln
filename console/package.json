@@ -7,12 +7,14 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test src/permissions.test.js src/paths.test.js src/forms.test.js src/chat.test.js src/skillLists.test.js"
+    "test": "node --test src/permissions.test.js src/paths.test.js src/forms.test.js src/chat.test.js src/skillLists.test.js src/markdown.test.js"
   },
   "dependencies": {
     "@fontsource-variable/fraunces": "^5.3.0",
     "@fontsource-variable/geist": "^5.3.0",
     "@fontsource-variable/geist-mono": "^5.3.0",
+    "marked": "^18.2.0",
+    "sanitize-html": "^2.18.2",
     "vue": "^3.5.13",
     "vue-router": "^4.5.0"
   },
