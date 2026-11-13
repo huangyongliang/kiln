@@ -633,6 +633,39 @@ def test_unknown_tool_is_not_executed(tmp_path) -> None:
         assert _count(engine, "artifacts") == 0
 
 
+def test_tool_loop_reuses_the_resolved_model_on_every_round(tmp_path) -> None:
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        seen.append(body)
+        if len(seen) < 3:
+            return _tool_call(f"call_{len(seen)}", "list_skills", {})
+        return _content("完成", "chatcmpl-done")
+
+    with _openai_client(
+        handler,
+        tmp_path,
+        llm_models="other-model, demo-model",
+    ) as (client, engine):
+        response = client.post(
+            "/api/v1/llm/chat",
+            json={"messages": [{"role": "user", "content": "列出"}], "model": "other-model"},
+        )
+        assert response.status_code == 200
+        assert response.json()["model"] == "other-model"
+        assert response.json()["content"] == "完成"
+        assert _count(engine, "skills") == 0
+    assert len(seen) == 3
+    assert [item["model"] for item in seen] == ["other-model", "other-model", "other-model"]
+    assert [item["function"]["name"] for item in seen[0]["tools"]] == _TOOL_NAMES
+    assert "submit_review" not in _TOOL_NAMES
+    assert "publish_skill" not in _TOOL_NAMES
+    assert MAX_MODEL_ROUNDS == 4
+    assert "不能提交审核" in PLATFORM_SYSTEM_PROMPT
+    assert "也不能发布" in PLATFORM_SYSTEM_PROMPT
+
+
 def test_tool_loop_stops_at_four_model_rounds(tmp_path) -> None:
     assert MAX_MODEL_ROUNDS == 4
     seen: list[dict] = []

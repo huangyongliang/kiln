@@ -33,7 +33,7 @@
 | Git 远端 | 可替换适配器 | `GIT_PROVIDER=gitea` 是实验室实现，对着配置的 `GIT_BASE_URL` 调用 Gitea HTTP API。`GIT_PROVIDER=gitlab` 是生产代码源，调用 GitLab HTTP API。仓库不写生产 GitLab 地址。compose 里的 `gitea/gitea:1.22` 仍是未作为生产源的占位 |
 | 制品目录 | 目录、版本和字节由平台保存 | 元数据在 PostgreSQL。字节在平台自管的本地目录 `KILN_ARTIFACT_ROOT`（compose 命名卷 `kiln-artifact-data`）。版本保存字节后 `content_available` 为 true，`GET /api/v1/retrieve/{reservation_id}/content` 返回这些字节。制品不发布到 Nexus |
 | 可选依赖代理对接，默认关闭；制品不发布到 Nexus | 现在可以接线 | 配置 `KILN_NEXUS_URL` 与 `KILN_NEXUS_REPOSITORY` 后，`GET /api/v1/dependency-proxy` 只读探测连通性，产品构建把地址经 Jenkins 参数传给 `kiln-build.sh`。未设置时，任务配置和 `POST /job/<name>/build` 与现在相同，并且不向外连接。仓库 compose 不启动 Nexus |
-| OpenAI 兼容模型端点 | 可选 | `LLM_PROVIDER` 默认 `off`。设为 `openai` 时必须提供 `LLM_BASE_URL` |
+| OpenAI 兼容模型端点 | 可选 | `LLM_PROVIDER` 默认 `off`。设为 `openai` 时必须提供 `LLM_BASE_URL`。可选模型 id 来自 `LLM_MODELS`，不从端点拉取目录 |
 | 本地登录与用户信息同步 | 这一版已接上起步 | 平台自身具备完整的账号与权限能力。本地账号、口令哈希、会话和 RBAC 目录在 Postgres。控制台有登录页。未配置公司用户系统时使用本地口令登录。`KILN_API_TOKEN` 仍是必填的机器和开发访问令牌，拥有目录中的全部权限。公司用户系统的对接是可选的。可选对接之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上 |
 | Harbor、Kubernetes、专用镜像仓库 | 不属于一期 | 仓库中没有对应清单或配置项。架构方案把镜像构建放在后面 |
 
@@ -106,6 +106,7 @@ docker compose --profile lab up
 | `LLM_BASE_URL` | 空 | OpenAI 兼容根路径，例如 `http://127.0.0.1:11434/v1`。`openai` 时必填 |
 | `LLM_API_KEY` | 空 | 仅从环境读取。无鉴权的本地端点可以留空 |
 | `LLM_MODEL` | 空 | 默认模型。请求里也可以传 `model` |
+| `LLM_MODELS` | 空 | 逗号分隔的模型 id。留空时可选列表等于 `LLM_MODEL`。单项超过 128 个字符，或去掉空白、空项并去重后超过 32 项，进程拒绝启动，不会截断。`LLM_MODEL` 不在列表中时插到开头。`mock` 与 `off` 不使用这份列表 |
 | `LLM_TIMEOUT_SECONDS` | `30` | 调用超时 |
 | `JENKINS_URL` | 空 | Jenkins 根地址，例如共享实验机上的 `http://127.0.0.1:8080`。空则不连接。不能在地址里带用户名或口令 |
 | `JENKINS_USER` | 空 | Jenkins 用户。与 URL、令牌一起设置 |
@@ -134,7 +135,7 @@ docker compose --profile lab up
 | `KILN_SESSION_TTL_SECONDS` | `43200` | 用户会话有效期，默认 12 小时 |
 | `KILN_SESSION_COOKIE_SECURE` | `false` | 为 true 时会话 cookie 带 Secure。本地 http 保持 false |
 
-`LLM_PROVIDER=openai` 时，聊天请求会 `POST {LLM_BASE_URL}/chat/completions`。模拟模式和关闭模式不会访问网络。
+`LLM_PROVIDER=openai` 时，聊天请求会 `POST {LLM_BASE_URL}/chat/completions`。模拟模式和关闭模式不会访问网络。可选模型 id 来自 `LLM_MODELS`，经 `GET /llm/provider` 的 `models` 下发，不从端点拉取目录。控制台在 `openai` 且目录非空时于输入区旁选择模型，选择保存在当前标签页，页头只显示连接状态。目录非空时，请求里的 `model` 必须在目录中，省略则使用 `LLM_MODEL`；`LLM_MODEL` 为空时使用目录第一项。不在目录中返回 400，且不会调用上游。目录为空时，请求自带的 `model` 仍会转发。`mock` 与 `off` 的 `models` 为空，控制台不展示选择器。
 
 `GIT_PROVIDER=gitea` 时，列表和解析引用走 `{GIT_BASE_URL}/api/v1/`。`GIT_PROVIDER=gitlab` 时走 `{GIT_BASE_URL}/api/v4/`。两种适配器实现同一组 kiln 接口，按配置替换，不把 Gitea 写成生产代码源。
 
@@ -151,7 +152,7 @@ docker compose --profile lab up
 - 下载预约：`POST /artifacts/{id}/versions/{version}/download-reservations`
 - 取包：`GET /retrieve/{reservation_id}` 返回预约信息。字节已保存时 `content_available` 为 true，`GET /retrieve/{reservation_id}/content` 返回这些字节
 - Skill：`GET /skills` 与 `GET /skills/{id}` 需要 `skill.read`。`POST /skills` 创建草稿，需要 `skill.use`，登录账号会记下 `created_by`。`PATCH /skills/{id}` 用与创建相同的正文替换草稿的可变字段，不改变状态，也不改退回记录。创建者（有 `skill.use`）或有 `skill.publish` 的人可以改草稿；审核中和已发布返回 409。`GET /skills` 可选 `scope=mine`（我产出的）或 `scope=usable`（我能用的已发布 Skill，还需要 `skill.use`），可与 `status` 一起用。省略 `scope` 仍列出全库。`POST /skills/{id}/submit-review` 需要 `skill.submit`。`POST /skills/{id}/publish` 需要 `skill.publish`。`POST /skills/{id}/reject` 需要 `skill.publish`，把审核中的 skill 退回草稿，正文 `{"reason":"…"}` 必填
-- 模型：`GET /llm/provider` 仍只需会话或机器令牌，`POST /llm/chat`。对话写入需要 `agent.qa`。只读角色不能调用。对话可协助起草和改稿，但不能提交审核或发布。列出「我产出的 / 我能用的」使用 `scope`。工具只在 `LLM_PROVIDER=openai` 时运行；`mock` 与 `off` 不调用工具。模型关闭时用表单新建和编辑草稿。发布后的构建仍与 POST /builds 相同。
+- 模型：`GET /llm/provider` 仍只需会话或机器令牌，返回里增加 `models`（openai 的有效目录；`mock` 与 `off` 为空）。`POST /llm/chat` 的 `model` 在目录非空时必须落在目录中，省略则用默认。对话写入需要 `agent.qa`。只读角色不能调用。对话可协助起草和改稿，但不能提交审核或发布。列出「我产出的 / 我能用的」使用 `scope`。工具只在 `LLM_PROVIDER=openai` 时运行；`mock` 与 `off` 不调用工具。模型关闭时用表单新建和编辑草稿。发布后的构建仍与 POST /builds 相同。
 - 执行器：`GET /executor`，`POST /jobs`（需要 `executor.run`），`GET /jobs`，`GET /jobs/{id}`，`GET /jobs/{id}/log`。任务记录在 PostgreSQL。状态和日志来自 Jenkins。响应里 `deploys_to_runtime` 为 false。兼容任务只打印调用方给出的标记。读取执行器状态、任务和日志需要 `executor.read`。只读角色没有这项权限
 - 产品构建：`POST /builds`（需要 `executor.run` 与 `skill.use`），`GET /builds`，`GET /builds/{id}`，`GET /builds/{id}/log`。请求体必须给出已发布 skill 的 `skill_id`，以及 `repository`、`ref`、`artifact_name`、`version`、`package_type`。kiln 用当前代码源适配器解析提交，Jenkins 克隆该提交并运行仓库根目录的 `kiln-build.sh`。脚本必须写出 `kiln-dist/artifact.bin`。Skill 步骤不会被执行。构建成功后，这些字节写入 `KILN_ARTIFACT_ROOT`，对应版本的 `content_available` 为 true，`source` 为 `build`。取包接口返回同一组字节。响应里 `deploys_to_runtime` 为 false。读取构建和日志需要 `executor.read`
 - 依赖代理：`GET /dependency-proxy` 需要 `executor.read`。未配置时 `configured` 为 false，`publishes_artifacts` 为 false，并且不向外连接。配置后探测是否可达；失败仍返回 200，`reachable` 为 false。响应不包含口令。制品不发布到 Nexus

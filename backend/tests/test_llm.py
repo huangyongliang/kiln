@@ -42,6 +42,7 @@ def test_off_mode_does_not_call_network() -> None:
             )
     assert status.status_code == 200
     assert status.json()["provider"] == "off"
+    assert status.json()["models"] == []
     assert status.json()["api_key_configured"] is False
     assert chat.status_code == 503
 
@@ -64,6 +65,7 @@ def test_mock_mode_does_not_call_network() -> None:
             schema = client.get("/openapi.json").text
     body = status.json()
     assert body["provider"] == "mock"
+    assert body["models"] == []
     assert body["api_key_configured"] is True
     assert "super-secret-value" not in str(body)
     assert "super-secret-value" not in schema
@@ -280,3 +282,240 @@ def test_openai_requires_a_model() -> None:
                 json={"messages": [{"role": "user", "content": "ping"}]},
             )
     assert response.status_code == 400
+    assert "未指定模型" in response.json()["detail"]
+
+
+def test_provider_publishes_the_openai_catalog() -> None:
+    app = create_app(
+        app_settings(
+            llm_provider="openai",
+            llm_base_url="http://llm.example/v1",
+            llm_model="model-a",
+            llm_models="model-b, model-a",
+        )
+    )
+    with TestClient(app, headers=auth_headers()) as client:
+        body = client.get("/api/v1/llm/provider").json()
+    assert body["provider"] == "openai"
+    assert body["base_url"] == "http://llm.example/v1"
+    assert body["models"] == ["model-b", "model-a"]
+    assert body["default_model"] == "model-a"
+
+
+def test_provider_prepends_a_default_missing_from_the_catalog() -> None:
+    app = create_app(
+        app_settings(
+            llm_provider="openai",
+            llm_base_url="http://llm.example/v1",
+            llm_model="model-a",
+            llm_models="model-b, model-c",
+        )
+    )
+    with TestClient(app, headers=auth_headers()) as client:
+        body = client.get("/api/v1/llm/provider").json()
+    assert body["models"] == ["model-a", "model-b", "model-c"]
+    assert body["default_model"] == "model-a"
+
+
+def test_provider_mock_and_off_publish_an_empty_catalog() -> None:
+    for provider in ("mock", "off"):
+        app = create_app(
+            app_settings(
+                llm_provider=provider,
+                llm_base_url="http://llm.example/v1",
+                llm_model="model-a",
+                llm_models="model-a, model-b",
+            )
+        )
+        with TestClient(app, headers=auth_headers()) as client:
+            body = client.get("/api/v1/llm/provider").json()
+        assert body["provider"] == provider
+        assert body["models"] == []
+        assert body["default_model"] == "model-a"
+
+
+def test_openai_omitted_model_uses_the_catalog_default() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        seen.append(body["model"])
+        return httpx.Response(
+            200,
+            json={"id": "chatcmpl-default", "choices": [{"message": {"content": "ok"}}]},
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        app = create_app(
+            app_settings(
+                llm_provider="openai",
+                llm_base_url="http://llm.example/v1",
+                llm_model="",
+                llm_models="first-model, second-model",
+            ),
+            http_client=http_client,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
+            status = client.get("/api/v1/llm/provider")
+            blank = client.post(
+                "/api/v1/llm/chat",
+                json={"messages": [{"role": "user", "content": "ping"}], "model": "  "},
+            )
+            response = client.post(
+                "/api/v1/llm/chat",
+                json={"messages": [{"role": "user", "content": "ping"}]},
+            )
+    assert status.json()["default_model"] is None
+    assert status.json()["models"] == ["first-model", "second-model"]
+    assert blank.status_code == 200
+    assert blank.json()["model"] == "first-model"
+    assert response.status_code == 200
+    assert response.json()["model"] == "first-model"
+    assert seen == ["first-model", "first-model"]
+
+
+def test_openai_sends_an_in_catalog_model() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content.decode())
+        return httpx.Response(
+            200,
+            json={"id": "chatcmpl-picked", "choices": [{"message": {"content": "ok"}}]},
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        app = create_app(
+            app_settings(
+                llm_provider="openai",
+                llm_base_url="http://llm.example/v1",
+                llm_model="model-a",
+                llm_models="model-b, model-a",
+            ),
+            http_client=http_client,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
+            response = client.post(
+                "/api/v1/llm/chat",
+                json={
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "model": "  model-b  ",
+                },
+            )
+    assert response.status_code == 200
+    assert response.json()["model"] == "model-b"
+    assert seen["body"]["model"] == "model-b"
+
+
+def test_openai_rejects_a_model_outside_the_catalog() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"out-of-catalog model called upstream: {request.url}")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        app = create_app(
+            app_settings(
+                llm_provider="openai",
+                llm_base_url="http://llm.example/v1",
+                llm_model="model-a",
+                llm_models="model-a, model-b",
+            ),
+            http_client=http_client,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
+            response = client.post(
+                "/api/v1/llm/chat",
+                json={"messages": [{"role": "user", "content": "ping"}], "model": "other-model"},
+            )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "模型不在允许的模型列表中。"
+
+
+def test_openai_empty_catalog_still_forwards_a_request_model() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["called"] = True
+        seen["body"] = json.loads(request.content.decode())
+        return httpx.Response(
+            200,
+            json={"id": "chatcmpl-script", "choices": [{"message": {"content": "ok"}}]},
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        app = create_app(
+            app_settings(
+                llm_provider="openai",
+                llm_base_url="http://llm.example/v1",
+                llm_model="",
+                llm_models="",
+            ),
+            http_client=http_client,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
+            status = client.get("/api/v1/llm/provider")
+            forwarded = client.post(
+                "/api/v1/llm/chat",
+                json={"messages": [{"role": "user", "content": "ping"}], "model": "script-model"},
+            )
+            missing = client.post(
+                "/api/v1/llm/chat",
+                json={"messages": [{"role": "user", "content": "ping"}]},
+            )
+    assert status.json()["models"] == []
+    assert status.json()["default_model"] is None
+    assert forwarded.status_code == 200
+    assert seen["body"]["model"] == "script-model"
+    assert missing.status_code == 400
+    assert "未指定模型" in missing.json()["detail"]
+
+
+def test_mock_ignores_the_catalog_with_or_without_a_model() -> None:
+    def explode(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"mock mode called the network: {request.url}")
+
+    with httpx.Client(transport=httpx.MockTransport(explode)) as http_client:
+        app = create_app(
+            app_settings(
+                llm_provider="mock",
+                llm_model="model-a",
+                llm_models="model-a",
+            ),
+            http_client=http_client,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
+            plain = client.post(
+                "/api/v1/llm/chat",
+                json={"messages": [{"role": "user", "content": "你好"}]},
+            )
+            chosen = client.post(
+                "/api/v1/llm/chat",
+                json={"messages": [{"role": "user", "content": "你好"}], "model": "not-in-catalog"},
+            )
+    assert plain.status_code == 200
+    assert plain.json()["model"] == "mock"
+    assert plain.json()["provider"] == "mock"
+    assert chosen.status_code == 200
+    assert chosen.json()["model"] == "not-in-catalog"
+    assert "这是模拟回复" in chosen.json()["content"]
+
+
+def test_off_stays_disabled_when_the_body_names_a_model() -> None:
+    def explode(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"off mode called the network: {request.url}")
+
+    with httpx.Client(transport=httpx.MockTransport(explode)) as http_client:
+        app = create_app(
+            app_settings(
+                llm_provider="off",
+                llm_model="model-a",
+                llm_models="model-a, model-b",
+            ),
+            http_client=http_client,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
+            response = client.post(
+                "/api/v1/llm/chat",
+                json={"messages": [{"role": "user", "content": "你好"}], "model": "model-b"},
+            )
+    assert response.status_code == 503
+    assert "模型未启用" in response.json()["detail"]

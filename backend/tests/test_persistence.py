@@ -527,6 +527,7 @@ def _api_env(database_url: str, artifact_root: str) -> dict[str, str]:
     env["LLM_BASE_URL"] = ""
     env["LLM_API_KEY"] = ""
     env["LLM_MODEL"] = ""
+    env["LLM_MODELS"] = ""
     env["KILN_API_TOKEN"] = LOCAL_API_TOKEN
     env["JENKINS_URL"] = ""
     env["JENKINS_USER"] = ""

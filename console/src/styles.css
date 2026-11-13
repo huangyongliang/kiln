@@ -1444,6 +1444,13 @@ dialog.modal::backdrop {
   font-weight: 600;
 }
 
+.bubble-model {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .suggest {
   display: flex;
   flex-wrap: wrap;
@@ -1477,6 +1484,37 @@ dialog.modal::backdrop {
 .composer textarea {
   min-height: 52px;
   resize: vertical;
+}
+
+.composer-actions {
+  display: contents;
+}
+
+.composer:has(.model-select) textarea {
+  grid-column: 1 / -1;
+}
+
+.composer:has(.model-select) .composer-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-select {
+  width: auto;
+  max-width: 16rem;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+
+.model-select:focus {
+  border-color: var(--ember);
+  box-shadow: 0 0 0 3px var(--ember-ring);
+  outline: none;
 }
 
 .spinner {

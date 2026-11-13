@@ -29,6 +29,7 @@ ENV_KEYS = (
     "LLM_BASE_URL",
     "LLM_API_KEY",
     "LLM_MODEL",
+    "LLM_MODELS",
     "LLM_TIMEOUT_SECONDS",
     "KILN_API_TOKEN",
     "JENKINS_URL",

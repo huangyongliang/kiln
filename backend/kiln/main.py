@@ -77,6 +77,8 @@ DESCRIPTION = (
     "可选依赖代理对接默认关闭；制品不发布到 Nexus。"
     "未设置 KILN_NEXUS_URL 时，产品构建与现在相同，GET /dependency-proxy 不向外发起调用。"
     "模型调用走 OpenAI 兼容协议，端点由环境变量配置；未就绪时可使用 mock 或 off。"
+    "可选模型 id 来自 LLM_MODELS，经 GET /llm/provider 的 models 下发；"
+    "对话只更换 model id，不切换提供方。"
     "对话可在授权下通过工具起草 skill 草稿，或在 skill 发布后发起构建。"
     "这些工具只在 openai 提供方下运行；mock 与 off 不调用工具。"
     "配置只从环境变量读取。"

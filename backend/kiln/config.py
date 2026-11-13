@@ -13,6 +13,12 @@ login in place. The company user system is not given a default address.
 Optional Nexus settings are a read-only dependency proxy. Empty values leave
 product builds unchanged. Artifact bytes stay in KILN_ARTIFACT_ROOT and are
 never published to Nexus.
+
+Optional ``LLM_MODELS`` is a comma-separated allow-list of model ids for the
+already configured OpenAI-compatible provider. The list is not fetched from
+the endpoint. An id longer than 128 characters, or more than 32 ids after
+trim, drop, and dedupe, refuses process startup. The id is not truncated and
+the list is not cut down to the first 32.
 """
 
 import re
@@ -25,6 +31,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Shared by local compose, .env.example, and tests. Not a production secret.
 LOCAL_API_TOKEN = "kiln-local"
+
+# LLM_MODELS items. The 32-item cap applies to the parsed allow-list only.
+# Prepending a missing LLM_MODEL happens later and may add one extra catalog
+# entry. That prepend is required and is not a parse error.
+LLM_MODEL_ID_MAX_LENGTH = 128
+LLM_MODELS_MAX_ITEMS = 32
 
 
 class Settings(BaseSettings):
@@ -70,6 +82,7 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: SecretStr = SecretStr("")
     llm_model: str = ""
+    llm_models: str = ""
     llm_timeout_seconds: float = Field(default=30, gt=0, le=300)
 
     jenkins_url: str = ""
@@ -130,6 +143,14 @@ class Settings(BaseSettings):
     @classmethod
     def strip_text(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("llm_models")
+    @classmethod
+    def validate_llm_models(cls, value: str) -> str:
+        # Illegal values refuse startup. parse_llm_model_ids does not truncate.
+        text = value.strip()
+        parse_llm_model_ids(text)
+        return text
 
     @field_validator("git_provider", mode="before")
     @classmethod
@@ -290,6 +311,49 @@ class Settings(BaseSettings):
     def cors_origins(self) -> list[str]:
         return [item.strip() for item in self.kiln_cors_origins.split(",") if item.strip()]
 
+    def llm_model_ids(self) -> list[str]:
+        """Parsed ``LLM_MODELS`` allow-list. Empty when the variable is empty.
+
+        This is the list before a missing ``LLM_MODEL`` is prepended. The
+        parse rules, including the startup refusals, live in
+        ``parse_llm_model_ids``.
+        """
+
+        return parse_llm_model_ids(self.llm_models)
+
+    def llm_catalog(self) -> list[str]:
+        """Model ids the console may pick. Empty unless the provider is openai.
+
+        An empty allow-list means the catalog is the configured ``LLM_MODEL``,
+        or an empty list when that is also empty. A set ``LLM_MODEL`` that is
+        missing from the allow-list is prepended so the default stays
+        selectable. That extra entry can make the catalog 33 items and is not
+        a parse error. ``mock`` and ``off`` do not publish a catalog.
+        """
+
+        if self.llm_provider != "openai":
+            return []
+        listed = self.llm_model_ids()
+        if not listed:
+            return [self.llm_model] if self.llm_model else []
+        if self.llm_model and self.llm_model not in listed:
+            return [self.llm_model, *listed]
+        return list(listed)
+
+    def llm_request_default(self) -> str:
+        """Model id used when a chat request omits ``model``.
+
+        ``LLM_MODEL`` when it is set. Otherwise the first catalog item, when
+        the openai catalog is non-empty. Empty when neither is available.
+        """
+
+        if self.llm_model:
+            return self.llm_model
+        catalog = self.llm_catalog()
+        if catalog:
+            return catalog[0]
+        return ""
+
     def llm_api_key_value(self) -> str:
         return self.llm_api_key.get_secret_value()
 
@@ -352,6 +416,36 @@ class Settings(BaseSettings):
     @property
     def git_configured(self) -> bool:
         return self.git_provider != "off" and bool(self.git_base_url and self.git_token_value())
+
+
+def parse_llm_model_ids(value: str) -> list[str]:
+    """Parse ``LLM_MODELS`` the same way as other comma-separated settings.
+
+    Split on commas, trim whitespace, drop empty items, and dedupe by first
+    occurrence. An item longer than 128 characters refuses process startup;
+    the id is not truncated. More than 32 items after that cleanup also
+    refuses startup; the list is not silently cut to the first 32. Counts
+    are taken after trim, drop, and dedupe, so repeated ids do not consume
+    extra slots.
+
+    Prepending a missing ``LLM_MODEL`` is not done here. That step runs when
+    the openai catalog is built, may add one extra entry, and is not a parse
+    error.
+    """
+
+    seen: list[str] = []
+    known: set[str] = set()
+    for item in value.split(","):
+        text = item.strip()
+        if not text or text in known:
+            continue
+        if len(text) > LLM_MODEL_ID_MAX_LENGTH:
+            raise ValueError("LLM_MODELS 中的单项不能超过 128 个字符，不会截断")
+        known.add(text)
+        seen.append(text)
+    if len(seen) > LLM_MODELS_MAX_ITEMS:
+        raise ValueError("LLM_MODELS 不能超过 32 项，不会只保留前 32 项")
+    return seen
 
 
 def _clean_http_url(value: str) -> str:
