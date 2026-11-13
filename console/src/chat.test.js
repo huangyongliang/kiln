@@ -86,6 +86,7 @@ test("the page thread round-trips in session storage without action noise", () =
       content: "答",
       actions: [
         { type: "skill_drafted", id: SKILL_ID, name: "流程" },
+        { type: "skill_updated", id: SKILL_ID, name: "流程" },
         { type: "tool", id: SKILL_ID, name: "隐藏" },
       ],
     },
@@ -97,7 +98,10 @@ test("the page thread round-trips in session storage without action noise", () =
     {
       role: "assistant",
       content: "答",
-      actions: [{ type: "skill_drafted", id: SKILL_ID, name: "流程" }],
+      actions: [
+        { type: "skill_drafted", id: SKILL_ID, name: "流程" },
+        { type: "skill_updated", id: SKILL_ID, name: "流程" },
+      ],
     },
   ]);
   assert.equal(storage.getItem(CHAT_THREAD_KEY) != null, true);

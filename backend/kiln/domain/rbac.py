@@ -22,6 +22,7 @@ _BUILDER = _READER + (
     "artifact.upload",
     "artifact.download",
     "agent.qa",
+    "agent.draft_skill",
     "agent.build_artifact",
     "executor.read",
     "executor.run",
@@ -29,7 +30,6 @@ _BUILDER = _READER + (
 )
 _PUBLISHER = _BUILDER + (
     "skill.publish",
-    "agent.draft_skill",
 )
 
 

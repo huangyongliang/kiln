@@ -175,6 +175,10 @@ def test_permission_catalog_includes_read_codes(client: TestClient) -> None:
     assert "skill.submit" not in roles["reader"]
     assert "skill.publish" not in roles["reader"]
     assert "skill.publish" not in roles["builder"]
+    assert "agent.draft_skill" in roles["builder"]
+    assert "agent.draft_skill" in roles["publisher"]
+    assert "agent.draft_skill" in roles["admin"]
+    assert "agent.draft_skill" not in roles["reader"]
     assert "skill.publish" in roles["publisher"]
     assert "skill.publish" in roles["admin"]
     for role_id in ("builder", "publisher", "admin"):

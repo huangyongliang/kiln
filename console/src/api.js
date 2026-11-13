@@ -99,6 +99,13 @@ export function postJson(path, payload) {
   });
 }
 
+export function patchJson(path, payload) {
+  return requestJson(path, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function postEmpty(path) {
   return requestJson(path, { method: "POST" });
 }

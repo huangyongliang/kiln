@@ -9,7 +9,7 @@ export const CHAT_MESSAGE_LIMIT = 32;
 export const CHAT_THREAD_KEY = "kiln.chat.thread";
 
 const ROLES = new Set(["system", "user", "assistant"]);
-const ACTION_TYPES = new Set(["skill_drafted", "build_started"]);
+const ACTION_TYPES = new Set(["skill_drafted", "skill_updated", "build_started"]);
 
 export function chatRequestMessages(history, content) {
   const prior = [];

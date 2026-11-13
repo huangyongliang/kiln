@@ -386,6 +386,7 @@ def test_auth_me_returns_the_principal_and_hides_secrets(client: TestClient) -> 
     assert body["permissions"] == expected
     assert set(body["permissions"]) == permissions_for(account["role_ids"])
     assert "skill.submit" in body["permissions"]
+    assert "agent.draft_skill" in body["permissions"]
     assert "skill.publish" not in body["permissions"]
     _assert_me_hides_secrets(by_cookie, token, client.app.state.engine, account["id"])
 

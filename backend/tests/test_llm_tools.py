@@ -15,12 +15,27 @@ from sqlalchemy import text
 
 from kiln.auth import Principal
 from kiln.domain.builds import ProductBuild
+from kiln.domain.rbac import ROLE_INDEX, permissions_for
 from kiln.errors import GIT_SOURCE_UNCONFIGURED_DETAIL, JENKINS_UNCONFIGURED_DETAIL, UpstreamFailure
 from kiln.executor.product import publish
 from kiln.llm.provider import ChatMessage, ChatRequest
-from kiln.llm.tools import MAX_MODEL_ROUNDS, OPENAI_TOOLS, ToolContext, run_tool_loop
+from kiln.llm.tools import (
+    MAX_MODEL_ROUNDS,
+    OPENAI_TOOLS,
+    PLATFORM_SYSTEM_PROMPT,
+    ToolContext,
+    run_tool_loop,
+)
 from kiln.main import create_app
 from tests.support import app_settings, auth_headers, blob_files, publish_skill, truncate_domain
+
+_TOOL_NAMES = [
+    "list_skills",
+    "get_skill",
+    "draft_skill",
+    "update_skill",
+    "build_artifact",
+]
 
 LOCAL_PASSWORD = "correct-horse-1"
 _COMPLETION_KEYS = {"id", "provider", "model", "content", "finish_reason", "actions"}
@@ -113,14 +128,21 @@ def test_publisher_admin_and_machine_can_draft_a_skill(tmp_path) -> None:
             fetched = session.get(f"/api/v1/skills/{drafted['id']}")
             assert fetched.status_code == 200
             assert fetched.json() == drafted
-            assert [item["function"]["name"] for item in seen[before]["tools"]] == [
-                "list_skills",
-                "draft_skill",
-                "build_artifact",
-            ]
+            assert [item["function"]["name"] for item in seen[before]["tools"]] == _TOOL_NAMES
             assert seen[before]["messages"] == [
-                {"role": "user", "content": f"起草 {role}-draft"}
+                {"role": "system", "content": PLATFORM_SYSTEM_PROMPT},
+                {"role": "user", "content": f"起草 {role}-draft"},
             ]
+            assert seen[before + 1]["messages"][0] == {
+                "role": "system",
+                "content": PLATFORM_SYSTEM_PROMPT,
+            }
+            me = session.get("/api/v1/auth/me").json()
+            if role == "machine":
+                assert me["account"] is None
+                assert drafted["created_by"] is None
+            else:
+                assert drafted["created_by"] == me["account"]["id"]
         rows = _rows(engine, "SELECT name, status FROM skills ORDER BY name")
         assert rows == [
             ("admin-draft", "draft"),
@@ -132,27 +154,149 @@ def test_publisher_admin_and_machine_can_draft_a_skill(tmp_path) -> None:
         assert len(seen) == 6
 
 
-def test_builder_draft_skill_is_denied_without_a_new_row(tmp_path) -> None:
+def test_builder_can_draft_and_update_own_skill(tmp_path) -> None:
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content.decode()))
+        index = len(seen) - 1
+        if index == 0:
+            return _tool_call("call_draft", "draft_skill", _named(_DRAFT, "builder-draft"))
+        if index == 1:
+            return _content("已保存草稿。请到 Skill 页提交审核。")
+        if index == 2:
+            drafted = json.loads(seen[1]["messages"][-1]["content"])
+            return _tool_call(
+                "call_update",
+                "update_skill",
+                {
+                    **_named(_DRAFT, "builder-draft"),
+                    "id": drafted["id"],
+                    "description": "改过的说明",
+                },
+            )
+        return _content("已更新草稿。请到 Skill 页提交审核。")
+
+    with _openai_client(handler, tmp_path) as (client, engine):
+        builder = _login(client, "ada_builder", ["builder"])
+        account_id = builder.get("/api/v1/auth/me").json()["account"]["id"]
+        drafted_response = builder.post("/api/v1/llm/chat", json=_chat("起草 builder-draft"))
+        assert drafted_response.status_code == 200
+        drafted = json.loads(seen[1]["messages"][-1]["content"])
+        assert drafted_response.json()["actions"] == [
+            {"type": "skill_drafted", "id": drafted["id"], "name": "builder-draft"}
+        ]
+        assert drafted["created_by"] == account_id
+        assert drafted["status"] == "draft"
+        updated_response = builder.post("/api/v1/llm/chat", json=_chat("改一下说明"))
+        assert updated_response.status_code == 200
+        updated = json.loads(seen[3]["messages"][-1]["content"])
+        assert updated_response.json()["actions"] == [
+            {"type": "skill_updated", "id": drafted["id"], "name": "builder-draft"}
+        ]
+        assert updated["description"] == "改过的说明"
+        assert updated["status"] == "draft"
+        assert updated["created_by"] == account_id
+        assert updated["review_note"] is None
+        stored = builder.get(f"/api/v1/skills/{drafted['id']}")
+        assert stored.status_code == 200
+        assert stored.json()["description"] == "改过的说明"
+        assert _count(engine, "skills") == 1
+        assert seen[0]["messages"][0] == {"role": "system", "content": PLATFORM_SYSTEM_PROMPT}
+        assert [item["function"]["name"] for item in seen[0]["tools"]] == _TOOL_NAMES
+
+
+def test_draft_and_update_without_agent_draft_skill_do_not_write(tmp_path) -> None:
+    seen: list[dict] = []
+    calls = (
+        ("draft_skill", _named(_DRAFT, "denied-draft")),
+        (
+            "update_skill",
+            {**_named(_DRAFT, "denied-draft"), "id": "00000000-0000-4000-8000-0000000000bb"},
+        ),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content.decode()))
+        if len(seen) % 2 == 1:
+            name, payload = calls[(len(seen) - 1) // 2]
+            return _tool_call("call_write", name, payload)
+        return _content("没有权限，未写入。")
+
+    with _openai_client(handler, tmp_path) as (client, engine):
+        kept = client.post("/api/v1/skills", json=_named(_DRAFT, "kept-draft"))
+        assert kept.status_code == 201
+        for _name, _payload in calls:
+            result = run_tool_loop(
+                ChatRequest(messages=[ChatMessage(role="user", content="改一条 skill")]),
+                client.app.state.llm,
+                Principal(
+                    kind="user",
+                    permissions=frozenset({"agent.qa", "skill.use", "skill.read", "skill.submit"}),
+                ),
+                _tool_context(client.app),
+            )
+            assert result.content == "没有权限，未写入。"
+            assert result.actions == []
+        tool_messages = [
+            item
+            for body in seen
+            for item in body["messages"]
+            if item.get("role") == "tool"
+        ]
+        assert tool_messages == [
+            {"role": "tool", "tool_call_id": "call_write", "content": "没有权限"},
+            {"role": "tool", "tool_call_id": "call_write", "content": "没有权限"},
+        ]
+        assert _rows(engine, "SELECT name, status FROM skills") == [("kept-draft", "draft")]
+
+
+def test_reader_cannot_draft_or_update_a_skill(tmp_path) -> None:
     seen: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(json.loads(request.content.decode()))
         if len(seen) == 1:
-            return _tool_call("call_draft", "draft_skill", _named(_DRAFT, "builder-draft"))
-        return _content("没有权限，未创建草稿。")
+            return _tool_call("call_draft", "draft_skill", _named(_DRAFT, "reader-draft"))
+        if len(seen) == 3:
+            return _tool_call(
+                "call_update",
+                "update_skill",
+                {**_named(_DRAFT, "reader-draft"), "id": "00000000-0000-4000-8000-0000000000cc"},
+            )
+        return _content("没有权限。")
 
     with _openai_client(handler, tmp_path) as (client, engine):
-        builder = _login(client, "ada_builder", ["builder"])
-        response = builder.post("/api/v1/llm/chat", json=_chat("起草 builder-draft"))
-        assert response.status_code == 200
-        assert response.json()["content"] == "没有权限，未创建草稿。"
-        assert response.json()["actions"] == []
-        assert _count(engine, "skills") == 0
-        tool_messages = [item for item in seen[1]["messages"] if item["role"] == "tool"]
-        assert tool_messages == [
-            {"role": "tool", "tool_call_id": "call_draft", "content": "没有权限"}
-        ]
-        assert len(seen) == 2
+        kept = client.post("/api/v1/skills", json=_named(_DRAFT, "kept-draft"))
+        assert kept.status_code == 201
+        reader = _login(client, "ada_reader", ["reader"])
+        denied = reader.post("/api/v1/llm/chat", json=_chat("起草"))
+        assert denied.status_code == 403
+        assert denied.json()["detail"] == "没有权限"
+        result = run_tool_loop(
+            ChatRequest(messages=[ChatMessage(role="user", content="起草")]),
+            client.app.state.llm,
+            Principal(kind="user", permissions=permissions_for(["reader"])),
+            _tool_context(client.app),
+        )
+        assert result.actions == []
+        assert seen[-1]["messages"][-1]["content"] == "没有权限"
+        again = run_tool_loop(
+            ChatRequest(messages=[ChatMessage(role="user", content="改稿")]),
+            client.app.state.llm,
+            Principal(kind="user", permissions=permissions_for(["reader"])),
+            _tool_context(client.app),
+        )
+        assert again.actions == []
+        assert seen[-1]["messages"][-1]["content"] == "没有权限"
+        assert _rows(engine, "SELECT name FROM skills") == [("kept-draft",)]
+        assert "agent.draft_skill" in ROLE_INDEX["builder"].permissions
+        assert ROLE_INDEX["builder"].permissions.count("agent.draft_skill") == 1
+        assert "agent.draft_skill" in ROLE_INDEX["publisher"].permissions
+        assert ROLE_INDEX["publisher"].permissions.count("agent.draft_skill") == 1
+        assert "agent.draft_skill" in ROLE_INDEX["admin"].permissions
+        assert "agent.draft_skill" not in ROLE_INDEX["reader"].permissions
+        assert "skill.publish" not in ROLE_INDEX["builder"].permissions
 
 
 def test_builder_can_list_skills(tmp_path) -> None:
@@ -292,6 +436,127 @@ def test_list_skills_matches_get_skills_filter(tmp_path) -> None:
         assert "listed-review" not in seen[1]["messages"][-1]["content"]
 
 
+def test_list_and_get_skill_scopes_stay_in_the_tool_result(tmp_path) -> None:
+    seen: list[dict] = []
+    calls: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content.decode()))
+        if len(seen) % 2 == 1:
+            name, payload = calls[(len(seen) - 1) // 2]
+            return _tool_call("call_read", name, payload)
+        return _content("已查询。")
+
+    with _openai_client(handler, tmp_path) as (client, engine):
+        builder = _login(client, "ada_builder", ["builder"])
+        account_id = builder.get("/api/v1/auth/me").json()["account"]["id"]
+        own = builder.post("/api/v1/skills", json=_named(_DRAFT, "mine-draft"))
+        assert own.status_code == 201
+        other = client.post("/api/v1/skills", json=_named(_DRAFT, "other-draft"))
+        assert other.status_code == 201
+        published = client.post("/api/v1/skills", json=_named(_DRAFT, "usable-skill"))
+        assert published.status_code == 201
+        published_id = published.json()["id"]
+        assert client.post(f"/api/v1/skills/{published_id}/submit-review").status_code == 200
+        assert client.post(f"/api/v1/skills/{published_id}/publish").status_code == 200
+
+        queries = (
+            ("list_skills", {"scope": "mine"}),
+            ("list_skills", {"scope": "usable"}),
+            ("list_skills", {"scope": "mine", "status": "draft"}),
+            ("list_skills", {}),
+            ("get_skill", {"id": own.json()["id"]}),
+            ("get_skill", {"id": "00000000-0000-4000-8000-000000000099"}),
+            ("get_skill", {"skill_id": own.json()["id"]}),
+        )
+        calls.extend(queries)
+        for _name, _payload in queries:
+            response = builder.post("/api/v1/llm/chat", json=_chat("查询 skill"))
+            assert response.status_code == 200
+            assert response.json()["actions"] == []
+
+        mine = json.loads(seen[1]["messages"][-1]["content"])
+        usable = json.loads(seen[3]["messages"][-1]["content"])
+        mine_drafts = json.loads(seen[5]["messages"][-1]["content"])
+        catalog = json.loads(seen[7]["messages"][-1]["content"])
+        fetched = json.loads(seen[9]["messages"][-1]["content"])
+        missing = seen[11]["messages"][-1]["content"]
+        bad = seen[13]["messages"][-1]["content"]
+        assert mine == builder.get("/api/v1/skills", params={"scope": "mine"}).json()
+        assert [item["name"] for item in mine["items"]] == ["mine-draft"]
+        assert mine["items"][0]["created_by"] == account_id
+        assert usable == builder.get("/api/v1/skills", params={"scope": "usable"}).json()
+        assert [item["name"] for item in usable["items"]] == ["usable-skill"]
+        assert [item["name"] for item in mine_drafts["items"]] == ["mine-draft"]
+        assert {item["name"] for item in catalog["items"]} == {
+            "mine-draft",
+            "other-draft",
+            "usable-skill",
+        }
+        assert any(item["created_by"] is None for item in catalog["items"])
+        assert fetched["id"] == own.json()["id"]
+        assert missing == "skill 不存在"
+        assert bad.startswith("参数不符合要求")
+        calls.append(("list_skills", {"scope": "usable"}))
+        denied = run_tool_loop(
+            ChatRequest(messages=[ChatMessage(role="user", content="列出可用")]),
+            client.app.state.llm,
+            Principal(kind="user", permissions=frozenset({"agent.qa", "skill.read"})),
+            _tool_context(client.app),
+        )
+        assert denied.content == "已查询。"
+        assert seen[-1]["messages"][-1]["content"] == "没有权限"
+        assert "usable-skill" not in seen[-1]["messages"][-1]["content"]
+        assert _count(engine, "skills") == 3
+
+
+def test_update_skill_failures_do_not_enter_actions(tmp_path) -> None:
+    seen: list[dict] = []
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content.decode()))
+        if len(seen) % 2 == 1:
+            return _tool_call("call_update", "update_skill", calls[(len(seen) - 1) // 2])
+        return _content("没有改成。")
+
+    with _openai_client(handler, tmp_path) as (client, engine):
+        builder = _login(client, "ada_builder", ["builder"])
+        own = builder.post("/api/v1/skills", json=_named(_DRAFT, "own-draft"))
+        assert own.status_code == 201
+        foreign = client.post("/api/v1/skills", json=_named(_DRAFT, "foreign-draft"))
+        assert foreign.status_code == 201
+        own_id = own.json()["id"]
+        foreign_id = foreign.json()["id"]
+        submitted = builder.post(f"/api/v1/skills/{own_id}/submit-review")
+        assert submitted.status_code == 200
+        calls.extend(
+            (
+                {**_named(_DRAFT, "own-draft"), "id": own_id, "description": "审核中不能改"},
+                {
+                    **_named(_DRAFT, "foreign-draft"),
+                    "id": foreign_id,
+                    "description": "不能改别人的",
+                },
+                {"id": own_id, "description": "缺名称"},
+            )
+        )
+        for _payload in calls:
+            response = builder.post("/api/v1/llm/chat", json=_chat("改稿"))
+            assert response.status_code == 200
+            assert response.json()["actions"] == []
+            assert response.json()["content"] == "没有改成。"
+        assert seen[1]["messages"][-1]["content"] == "只有草稿可以修改"
+        assert seen[3]["messages"][-1]["content"] == "没有权限"
+        assert seen[5]["messages"][-1]["content"].startswith("参数不符合要求")
+        stored_own = builder.get(f"/api/v1/skills/{own_id}").json()
+        stored_foreign = client.get(f"/api/v1/skills/{foreign_id}").json()
+        assert stored_own["status"] == "in_review"
+        assert stored_own["description"] == _DRAFT["description"]
+        assert stored_foreign["description"] == _DRAFT["description"]
+        assert _count(engine, "skills") == 2
+
+
 def test_list_skills_rejects_unknown_fields_without_listing(tmp_path) -> None:
     seen: list[dict] = []
 
@@ -336,6 +601,7 @@ def test_invalid_skill_create_writes_nothing(tmp_path) -> None:
             response = client.post("/api/v1/llm/chat", json=_chat("起草一个无效 skill"))
             assert response.status_code == 200
             assert response.json()["content"] == "未创建。"
+            assert response.json()["actions"] == []
         tool_contents = [
             item["content"]
             for body in seen
@@ -396,11 +662,7 @@ def test_tool_loop_stops_at_four_model_rounds(tmp_path) -> None:
             f"cap-draft-{index}" for index in range(4)
         ]
         assert len(seen) == 4
-        assert [item["function"]["name"] for item in seen[0]["tools"]] == [
-            "list_skills",
-            "draft_skill",
-            "build_artifact",
-        ]
+        assert [item["function"]["name"] for item in seen[0]["tools"]] == _TOOL_NAMES
         rows = _rows(engine, "SELECT name, status FROM skills ORDER BY name")
         assert rows == [(f"cap-draft-{index}", "draft") for index in range(4)]
         kinds = _rows(
@@ -547,11 +809,11 @@ def test_authorized_roles_can_start_a_product_build(tmp_path) -> None:
             assert body["content"] == "已发起构建。"
             assert body["finish_reason"] == "stop"
             assert seen[before]["tools"] == OPENAI_TOOLS
-            assert [item["function"]["name"] for item in seen[before]["tools"]] == [
-                "list_skills",
-                "draft_skill",
-                "build_artifact",
-            ]
+            assert [item["function"]["name"] for item in seen[before]["tools"]] == _TOOL_NAMES
+            assert seen[before]["messages"][0] == {
+                "role": "system",
+                "content": PLATFORM_SYSTEM_PROMPT,
+            }
             tool_message = seen[before + 1]["messages"][-1]
             assert tool_message["role"] == "tool"
             assert tool_message["tool_call_id"] == "call_build"
@@ -715,11 +977,9 @@ def test_build_artifact_skill_gate_stays_in_the_tool_result(tmp_path) -> None:
         assert blocked.status_code == 200
         assert blocked.json()["actions"] == []
         assert seen[-1]["messages"][-1]["content"] == "仓库不在该 Skill 的允许范围内"
-        assert [item["function"]["name"] for item in seen[0]["tools"]] == [
-            "list_skills",
-            "draft_skill",
-            "build_artifact",
-        ]
+        assert [item["function"]["name"] for item in seen[0]["tools"]] == _TOOL_NAMES
+        assert "submit_review" not in _TOOL_NAMES
+        assert "publish_skill" not in _TOOL_NAMES
         assert git.calls == []
         assert jenkins.calls == []
         assert _count(engine, "product_builds") == 0

@@ -52,6 +52,7 @@ from kiln.domain.skills import (
     Skill,
     SkillCreate,
     SkillInput,
+    SkillScope,
     SkillStatus,
     SkillStep,
 )
@@ -484,9 +485,21 @@ class PostgresStore:
                 digest=version.checksum_value,
             )
 
-    def list_skills(self, status: SkillStatus | None) -> list[Skill]:
+    def list_skills(
+        self,
+        status: SkillStatus | None,
+        *,
+        scope: SkillScope | None = None,
+        account_id: UUID | None = None,
+    ) -> list[Skill]:
+        if scope is SkillScope.mine and account_id is None:
+            return []
         with self._session() as session:
             stmt = select(SkillRow).order_by(SkillRow.created_at, SkillRow.id).options(*_SKILL_LOAD)
+            if scope is SkillScope.mine:
+                stmt = stmt.where(SkillRow.created_by == account_id)
+            elif scope is SkillScope.usable:
+                stmt = stmt.where(SkillRow.status == SkillStatus.published.value)
             if status is not None:
                 stmt = stmt.where(SkillRow.status == status.value)
             rows = session.scalars(stmt).all()
@@ -497,7 +510,7 @@ class PostgresStore:
             row = _load_skill(session, skill_id, lock=False)
             return _skill(row)
 
-    def create_skill(self, payload: SkillCreate) -> Skill:
+    def create_skill(self, payload: SkillCreate, created_by: UUID | None = None) -> Skill:
         skill_id = uuid4()
         now = clock.utcnow()
         row = SkillRow(
@@ -511,6 +524,7 @@ class PostgresStore:
             output_spec=payload.output_spec,
             created_at=now,
             updated_at=now,
+            created_by=created_by,
         )
         row.inputs = [
             SkillInputRow(
@@ -543,6 +557,62 @@ class PostgresStore:
             if existing is not None:
                 raise Conflict("同名同版本的 skill 已存在")
             session.add(row)
+            _commit_unique(session, "同名同版本的 skill 已存在")
+            return _skill(row)
+
+    def update_skill(self, skill_id: UUID, payload: SkillCreate) -> Skill:
+        """Replace mutable fields of a draft. Status and review fields stay.
+
+        Callers decide who may edit. This method only refuses a non-draft and
+        a name/version collision, and it does not clear a return.
+        """
+
+        with self._session() as session:
+            row = _load_skill(session, skill_id, lock=True)
+            if row.status != SkillStatus.draft.value:
+                raise Conflict("只有草稿可以修改")
+            taken = session.scalar(
+                select(SkillRow.id).where(
+                    SkillRow.name == payload.name,
+                    SkillRow.version == payload.version,
+                    SkillRow.id != skill_id,
+                )
+            )
+            if taken is not None:
+                raise Conflict("同名同版本的 skill 已存在")
+            row.name = payload.name
+            row.version = payload.version
+            row.description = payload.description
+            row.toolchain = payload.toolchain
+            row.environment = payload.environment
+            row.output_spec = payload.output_spec
+            row.updated_at = clock.utcnow()
+            row.inputs.clear()
+            row.steps.clear()
+            row.allowed_repositories.clear()
+            row.allowed_dependencies.clear()
+            session.flush()
+            row.inputs = [
+                SkillInputRow(
+                    position=index,
+                    name=item.name,
+                    description=item.description,
+                    required=item.required,
+                )
+                for index, item in enumerate(payload.inputs)
+            ]
+            row.steps = [
+                SkillStepRow(position=index, kind=item.kind, description=item.description)
+                for index, item in enumerate(payload.steps)
+            ]
+            row.allowed_repositories = [
+                SkillRepositoryRow(position=index, value=item)
+                for index, item in enumerate(payload.allowed_repositories)
+            ]
+            row.allowed_dependencies = [
+                SkillDependencyRow(position=index, value=item)
+                for index, item in enumerate(payload.allowed_dependencies)
+            ]
             _commit_unique(session, "同名同版本的 skill 已存在")
             return _skill(row)
 
@@ -723,6 +793,7 @@ def _skill(row: SkillRow) -> Skill:
         output_spec=row.output_spec,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        created_by=row.created_by,
         review_note=row.review_note,
         rejected_at=row.rejected_at,
         rejected_by=row.rejected_by,

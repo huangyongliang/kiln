@@ -306,7 +306,7 @@ def test_product_build_skill_migration_round_trip(client: TestClient) -> None:
     """skill_id appears at head and is gone at 0006_skill_rejection."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0007_product_build_skill"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0008_skill_created_by"]
     engine = client.app.state.engine
     try:
         command.downgrade(cfg, "0006_skill_rejection")
@@ -333,7 +333,7 @@ def test_skill_rejection_migration_round_trip(client: TestClient) -> None:
     """Drop the rejection columns at 0005_local_login, then restore them at head."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0007_product_build_skill"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0008_skill_created_by"]
     engine = client.app.state.engine
     try:
         command.downgrade(cfg, "0005_local_login")
@@ -342,6 +342,61 @@ def test_skill_rejection_migration_round_trip(client: TestClient) -> None:
         _assert_rejection_schema(engine)
     finally:
         command.upgrade(cfg, "head")
+
+
+def test_skill_created_by_migration_round_trip(client: TestClient) -> None:
+    """created_by appears at head and is gone at 0007_product_build_skill."""
+
+    cfg = _alembic_config(postgres_url())
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0008_skill_created_by"]
+    engine = client.app.state.engine
+    try:
+        _assert_created_by_schema(engine)
+        command.downgrade(cfg, "0007_product_build_skill")
+        with engine.connect() as connection:
+            present = connection.execute(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'skills'
+                      AND column_name = 'created_by'
+                    """
+                )
+            ).scalar_one()
+        assert present == 0
+        command.upgrade(cfg, "head")
+        _assert_created_by_schema(engine)
+    finally:
+        command.upgrade(cfg, "head")
+
+
+def _assert_created_by_schema(engine: Engine) -> None:
+    with engine.connect() as connection:
+        kind = connection.execute(
+            text(
+                """
+                SELECT data_type || ' ' || is_nullable
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'skills'
+                  AND column_name = 'created_by'
+                """
+            )
+        ).scalar_one()
+        delete_rule = connection.execute(
+            text(
+                """
+                SELECT delete_rule
+                FROM information_schema.referential_constraints
+                WHERE constraint_schema = 'public'
+                  AND constraint_name = 'fk_skills_created_by_accounts'
+                """
+            )
+        ).scalar_one()
+    assert kind == "uuid YES"
+    assert delete_rule == "SET NULL"
 
 
 def _alembic_config(database_url: str) -> Config:
