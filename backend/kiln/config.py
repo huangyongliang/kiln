@@ -329,8 +329,11 @@ class Settings(BaseSettings):
         list is empty, with a missing ``LLM_MODEL`` prepended. ``mock`` and
         ``off`` still publish an empty list from ``GET /llm/provider``.
         More than 32 unique ids is kept. Startup logs a warning that names
-        the 32 limit, and ``GET /llm/catalog`` sets ``seed_over_limit``.
+        the 32 limit only while the catalog source is still the environment
+        seed, and ``GET /llm/catalog`` sets ``seed_over_limit``.
         Saving that unedited list is still rejected. The ids are not truncated.
+        Ids the catalog page would reject are listed in a separate startup
+        warning and do not, by themselves, refuse startup.
         """
 
         listed = self.llm_model_ids()

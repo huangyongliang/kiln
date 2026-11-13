@@ -15,6 +15,16 @@ from kiln.domain.llm_catalog import ROLE_ORDER, CatalogSnapshot, env_snapshot
 
 @dataclass(frozen=True)
 class ChatAllowance:
+    """Allow-list passed into every provider ``complete`` call.
+
+    ``managed`` is true when this list is the caller's whole set and an empty
+    list is final: a saved catalog, or an unmanaged deployment with neither
+    ``LLM_MODELS`` nor ``LLM_MODEL``. It is false when the environment seed
+    supplies the ids. ``resolve_model`` rejects an empty list either way, so
+    the flag no longer decides whether an empty list is forwarded. ``mock``
+    and ``off`` receive the same value and ignore it.
+    """
+
     allowed: tuple[str, ...]
     default: str
     managed: bool
@@ -40,17 +50,23 @@ def provider_models(
 ) -> tuple[list[str], str | None]:
     """``models`` and ``default_model`` for ``GET /llm/provider``.
 
-    Unmanaged responses keep today's values for every signed-in principal.
-    ``mock`` and ``off`` always publish an empty ``models`` list. A managed
-    ``default_model`` is the caller default, or null.
+    A caller without ``agent.qa`` gets an empty ``models`` list and a null
+    ``default_model``, so the default id is not visible. ``base_url`` is
+    unchanged and the route stays login-only. ``mock`` and ``off`` always
+    publish an empty ``models`` list. A managed ``default_model`` for a
+    caller with ``agent.qa`` is the caller default, or null.
     """
 
     if snapshot.source != "db":
-        return list(settings.llm_catalog()), (settings.llm_model or None)
-    caller = caller_models(principal, snapshot)
-    if settings.llm_provider != "openai":
-        return [], caller.default_model
-    return list(caller.allowed), caller.default_model
+        models = list(settings.llm_catalog())
+        default_model = settings.llm_model or None
+    else:
+        caller = caller_models(principal, snapshot)
+        default_model = caller.default_model
+        models = list(caller.allowed) if settings.llm_provider == "openai" else []
+    if "agent.qa" not in principal.permissions:
+        return [], None
+    return models, default_model
 
 
 def chat_allowance(
@@ -58,14 +74,32 @@ def chat_allowance(
     principal: Principal,
     snapshot: CatalogSnapshot,
 ) -> ChatAllowance:
-    """Allowance for one openai chat request. Not used for mock or off."""
+    """Allowance for one chat request.
+
+    The openai path enforces it. ``mock`` and ``off`` receive the same object
+    and ignore it, so their replies do not depend on the list.
+
+    An unmanaged deployment with environment models keeps that allow-list and
+    ``managed`` false. With no environment models, only ``LLM_MODEL`` is
+    allowed when it is set. When neither is set, ``managed`` is true and the
+    list is empty. See ``ChatAllowance`` for what ``managed`` means.
+    """
 
     if snapshot.source != "db":
-        return ChatAllowance(
-            allowed=tuple(settings.llm_catalog()),
-            default=settings.llm_request_default(),
-            managed=False,
-        )
+        catalog = tuple(settings.llm_catalog())
+        if catalog:
+            return ChatAllowance(
+                allowed=catalog,
+                default=settings.llm_request_default(),
+                managed=False,
+            )
+        if settings.llm_model:
+            return ChatAllowance(
+                allowed=(settings.llm_model,),
+                default=settings.llm_model,
+                managed=False,
+            )
+        return ChatAllowance(allowed=(), default="", managed=True)
     caller = caller_models(principal, snapshot)
     return ChatAllowance(
         allowed=caller.allowed,

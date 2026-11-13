@@ -6,9 +6,10 @@ Saving an empty catalog still writes ``source=db``. There is no ETag: a later
 replace overwrites the earlier one.
 """
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from kiln.db.models import LlmCatalogModelRow, LlmCatalogStateRow, LlmRoleModelRow
@@ -23,6 +24,28 @@ from kiln.domain.llm_catalog import (
 class LlmCatalogStore:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
+
+    def follows_environment(self) -> bool:
+        """True when startup should still treat the environment seed as current.
+
+        A missing table, a missing singleton row, or a source other than
+        ``db`` is unmanaged. A database that cannot be reached is treated the
+        same way so the seed warning stays non-fatal.
+        """
+
+        try:
+            with self.engine.connect() as connection:
+                present = connection.execute(
+                    text("SELECT to_regclass('public.llm_catalog_state')")
+                ).scalar_one()
+                if present is None:
+                    return True
+                source = connection.execute(
+                    text("SELECT source FROM llm_catalog_state WHERE id = 1")
+                ).scalar_one_or_none()
+        except OperationalError:
+            return True
+        return source != "db"
 
     def read(self) -> CatalogSnapshot | None:
         """Return the saved catalog, or None when the deployment is unmanaged."""

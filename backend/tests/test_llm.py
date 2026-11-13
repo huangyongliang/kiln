@@ -1,13 +1,18 @@
 import json
+from inspect import signature
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from kiln.errors import ModelRequestError
+from kiln.domain.llm_catalog import MODEL_NOT_ALLOWED, NO_MODELS_FOR_ACCOUNT
+from kiln.errors import ModelDisabled, ModelRequestError
 from kiln.llm.provider import (
     ChatMessage,
     ChatRequest,
+    DisabledProvider,
+    LLMProvider,
+    MockProvider,
     OpenAICompatibleProvider,
     chat_completions_url,
 )
@@ -22,6 +27,94 @@ _TOOL_NAMES = [
     "update_skill",
     "build_artifact",
 ]
+
+
+def test_provider_complete_signatures_match() -> None:
+    expected = signature(OpenAICompatibleProvider.complete)
+    for method in (
+        LLMProvider.complete,
+        MockProvider.complete,
+        DisabledProvider.complete,
+    ):
+        actual = signature(method)
+        assert list(actual.parameters) == list(expected.parameters)
+        for name, parameter in expected.parameters.items():
+            assert actual.parameters[name].kind is parameter.kind
+            assert actual.parameters[name].default == parameter.default
+
+
+def test_mock_and_off_complete_accept_allowance_and_ignore_it() -> None:
+    request = ChatRequest(
+        messages=[ChatMessage(role="user", content="ping")],
+        model="not-allowed",
+    )
+    completion = MockProvider().complete(
+        request,
+        allowed=("only-model",),
+        default="only-model",
+        managed=True,
+    )
+    assert completion.provider == "mock"
+    assert completion.model == "not-allowed"
+    omitted = MockProvider().complete(
+        ChatRequest(messages=[ChatMessage(role="user", content="ping")]),
+        allowed=("only-model",),
+        default="only-model",
+        managed=True,
+    )
+    assert omitted.model == "mock"
+    with pytest.raises(ModelDisabled):
+        DisabledProvider().complete(
+            request,
+            allowed=("only-model",),
+            default="only-model",
+            managed=True,
+        )
+
+
+def test_openai_empty_allowance_is_rejected_even_when_unmanaged() -> None:
+    def explode(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"empty allowance called upstream: {request.url}")
+
+    with httpx.Client(transport=httpx.MockTransport(explode)) as http_client:
+        provider = OpenAICompatibleProvider(
+            base_url="http://llm.example/v1",
+            api_key="",
+            client=http_client,
+        )
+        request = ChatRequest(
+            messages=[ChatMessage(role="user", content="ping")],
+            model="script-model",
+        )
+        with pytest.raises(ModelRequestError, match=NO_MODELS_FOR_ACCOUNT):
+            provider.complete(request, allowed=(), default="", managed=False)
+
+
+def test_mock_chat_still_answers_when_nothing_is_configured() -> None:
+    def explode(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"mock mode called the network: {request.url}")
+
+    with httpx.Client(transport=httpx.MockTransport(explode)) as http_client:
+        app = create_app(
+            app_settings(llm_provider="mock", llm_model="", llm_models=""),
+            http_client=http_client,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
+            named = client.post(
+                "/api/v1/llm/chat",
+                json={"messages": [{"role": "user", "content": "ping"}], "model": "script-model"},
+            )
+            omitted = client.post(
+                "/api/v1/llm/chat",
+                json={"messages": [{"role": "user", "content": "ping"}]},
+            )
+    assert named.status_code == 200
+    assert named.json()["provider"] == "mock"
+    assert named.json()["model"] == "script-model"
+    assert NO_MODELS_FOR_ACCOUNT not in named.text
+    assert omitted.status_code == 200
+    assert omitted.json()["model"] == "mock"
+    assert NO_MODELS_FOR_ACCOUNT not in omitted.text
 
 
 def test_openai_complete_without_allowance_raises_and_does_not_call_upstream() -> None:
@@ -314,7 +407,7 @@ def test_openai_requires_a_model() -> None:
                 json={"messages": [{"role": "user", "content": "ping"}]},
             )
     assert response.status_code == 400
-    assert "未指定模型" in response.json()["detail"]
+    assert response.json()["detail"] == NO_MODELS_FOR_ACCOUNT
 
 
 def test_provider_publishes_the_openai_catalog() -> None:
@@ -462,18 +555,53 @@ def test_openai_rejects_a_model_outside_the_catalog() -> None:
     assert response.json()["detail"] == "模型不在允许的模型列表中。"
 
 
-def test_openai_empty_catalog_still_forwards_a_request_model() -> None:
-    seen: dict[str, object] = {}
+def test_unmanaged_openai_allows_only_the_configured_llm_model() -> None:
+    seen: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen["called"] = True
-        seen["body"] = json.loads(request.content.decode())
+        seen.append(json.loads(request.content.decode())["model"])
         return httpx.Response(
             200,
-            json={"id": "chatcmpl-script", "choices": [{"message": {"content": "ok"}}]},
+            json={"id": "chatcmpl-only", "choices": [{"message": {"content": "ok"}}]},
         )
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        app = create_app(
+            app_settings(
+                llm_provider="openai",
+                llm_base_url="http://llm.example/v1",
+                llm_model="only-model",
+                llm_models="",
+            ),
+            http_client=http_client,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
+            named = client.post(
+                "/api/v1/llm/chat",
+                json={"messages": [{"role": "user", "content": "ping"}], "model": "only-model"},
+            )
+            omitted = client.post(
+                "/api/v1/llm/chat",
+                json={"messages": [{"role": "user", "content": "ping"}]},
+            )
+            other = client.post(
+                "/api/v1/llm/chat",
+                json={"messages": [{"role": "user", "content": "ping"}], "model": "other-model"},
+            )
+    assert named.status_code == 200
+    assert named.json()["model"] == "only-model"
+    assert omitted.status_code == 200
+    assert omitted.json()["model"] == "only-model"
+    assert seen == ["only-model", "only-model"]
+    assert other.status_code == 400
+    assert other.json()["detail"] == MODEL_NOT_ALLOWED
+
+
+def test_unmanaged_openai_with_nothing_configured_rejects_every_model() -> None:
+    def explode(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unconfigured openai called upstream: {request.url}")
+
+    with httpx.Client(transport=httpx.MockTransport(explode)) as http_client:
         app = create_app(
             app_settings(
                 llm_provider="openai",
@@ -485,20 +613,20 @@ def test_openai_empty_catalog_still_forwards_a_request_model() -> None:
         )
         with TestClient(app, headers=auth_headers()) as client:
             status = client.get("/api/v1/llm/provider")
-            forwarded = client.post(
+            named = client.post(
                 "/api/v1/llm/chat",
                 json={"messages": [{"role": "user", "content": "ping"}], "model": "script-model"},
             )
-            missing = client.post(
+            omitted = client.post(
                 "/api/v1/llm/chat",
                 json={"messages": [{"role": "user", "content": "ping"}]},
             )
     assert status.json()["models"] == []
     assert status.json()["default_model"] is None
-    assert forwarded.status_code == 200
-    assert seen["body"]["model"] == "script-model"
-    assert missing.status_code == 400
-    assert "未指定模型" in missing.json()["detail"]
+    assert named.status_code == 400
+    assert named.json()["detail"] == NO_MODELS_FOR_ACCOUNT
+    assert omitted.status_code == 400
+    assert omitted.json()["detail"] == NO_MODELS_FOR_ACCOUNT
 
 
 def test_mock_ignores_the_catalog_with_or_without_a_model() -> None:

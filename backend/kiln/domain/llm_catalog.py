@@ -17,7 +17,8 @@ from kiln.domain.rbac import ROLES
 from kiln.errors import Unprocessable
 
 _ILLEGAL_CATALOG_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cs"})
-_HANGUL_FILLER = "\u3164"
+# Lo/So fillers that are blank in a catalog id. U+3164 stays rejected with them.
+_CATALOG_FILLERS = frozenset({"\u115f", "\u1160", "\u3164", "\uffa0", "\u2800"})
 
 logger = logging.getLogger(__name__)
 
@@ -214,23 +215,35 @@ def document_from(snapshot: CatalogSnapshot, settings: Settings) -> CatalogDocum
     )
 
 
-def warn_if_env_seed_exceeds_limit(settings: Settings) -> None:
-    """Log when the environment seed is larger than a save will accept.
+def warn_env_seed(settings: Settings, *, source_is_env: bool) -> None:
+    """Log non-fatal notes about the environment seed. Nothing is truncated.
 
-    ``LLM_MODELS`` itself still refuses more than 32 items at configuration
-    load. Prepending a missing ``LLM_MODEL`` can make the seed 33 ids. That
-    is not a startup failure and the seed is not truncated. The models page
-    reads the same limit from ``GET /llm/catalog``.
+    The over-32 warning is emitted only while startup still follows the
+    environment seed (``source=env``, including a missing state row). After a
+    catalog is saved, a restart does not repeat it. ``LLM_MODELS`` itself
+    still refuses more than 32 items, or one item longer than 128 characters,
+    at configuration load. Prepending a missing ``LLM_MODEL`` can make the
+    seed 33 ids. That is not a startup failure.
+
+    Ids the catalog page would reject are listed in a separate warning. That
+    list does not refuse startup and does not drop the ids. Each id is
+    escaped so a carriage return, line feed, or bidi mark cannot break the
+    log line.
     """
 
-    count = len(settings.llm_seed_ids())
-    if count <= LLM_MODELS_MAX_ITEMS:
-        return
-    logger.warning(
-        "LLM_MODEL 与 LLM_MODELS 组成的种子有 %s 个不重复 id，超过 32 个上限，不会截断。%s",
-        count,
-        SEED_OVER_LIMIT_MESSAGE,
-    )
+    ids = settings.llm_seed_ids()
+    if source_is_env and len(ids) > LLM_MODELS_MAX_ITEMS:
+        logger.warning(
+            "LLM_MODEL 与 LLM_MODELS 组成的种子有 %s 个不重复 id，超过 32 个上限，不会截断。%s",
+            len(ids),
+            SEED_OVER_LIMIT_MESSAGE,
+        )
+    illegal = [item for item in ids if _illegal_catalog_text(item)]
+    if illegal:
+        logger.warning(
+            "环境变量中的模型 id 含有非法字符：%s",
+            "、".join(item.encode("unicode_escape").decode("ascii") for item in illegal),
+        )
 
 
 def _assignments(
@@ -317,15 +330,40 @@ def _trim_catalog_text(value: str) -> str:
     return value[start:end]
 
 
+def _illegal_catalog_code(code: int) -> bool:
+    """Fixed ranges. Not category Cn and not a live Default_Ignorable property.
+
+    U+2065, U+FFF0–U+FFF8, and U+E0000–U+E0FFF stay invisible across Unicode
+    versions, including reserved tag and variation-selector code points.
+    U+FDD0–U+FDEF and any code point whose low 16 bits are U+FFFE or U+FFFF
+    are noncharacters.
+    """
+
+    if code == 0x2065 or 0xFFF0 <= code <= 0xFFF8 or 0xE0000 <= code <= 0xE0FFF:
+        return True
+    if 0xFDD0 <= code <= 0xFDEF:
+        return True
+    low = code & 0xFFFF
+    return low == 0xFFFE or low == 0xFFFF
+
+
 def _illegal_catalog_text(text: str) -> bool:
     """Reject controls, format marks, separators, private use, and surrogates.
 
     Categories Cc, Cf, Zl, Zp, Co, and Cs cover NUL, DEL, C1, bidi overrides,
-    zero-width marks, line and paragraph separators, and tag characters.
-    U+3164 is rejected as well: its category is Lo. Normal CJK stays allowed.
+    zero-width marks, line and paragraph separators, tag characters, private
+    use, and surrogates. Unassigned code points (Cn) stay allowed, including
+    a newer emoji and a visible gap such as U+0378. U+115F, U+1160, U+3164,
+    U+FFA0, and U+2800 are rejected as well. So are the fixed invisible
+    ranges and noncharacters in ``_illegal_catalog_code``. Emoji variation
+    selectors U+FE00–U+FE0F stay allowed.
     """
 
     for char in text:
-        if char == _HANGUL_FILLER or unicodedata.category(char) in _ILLEGAL_CATALOG_CATEGORIES:
+        if (
+            char in _CATALOG_FILLERS
+            or _illegal_catalog_code(ord(char))
+            or unicodedata.category(char) in _ILLEGAL_CATALOG_CATEGORIES
+        ):
             return True
     return False
