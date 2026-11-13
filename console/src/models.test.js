@@ -3,10 +3,13 @@ import { test } from "node:test";
 
 import {
   ID_DUPLICATE,
+  ID_ILLEGAL,
   ID_TOO_LONG,
+  NAME_ILLEGAL,
   NAME_TOO_LONG,
   SAVE_FAILED_TAG,
   SAVED_TEXT,
+  SEED_OVER_LIMIT,
   UNSAVED_TAG,
   catalogStatusTag,
   displayNameError,
@@ -79,6 +82,33 @@ test("a server 422 names the row when the current list identifies it", () => {
   assert.equal(duplicate.message, `review-a：${ID_DUPLICATE}`);
   const longId = mapSaveFailure(ID_TOO_LONG, [{ id: "y".repeat(129), displayName: "" }]);
   assert.equal(longId.message.startsWith(`${"y".repeat(129)}：`), true);
+});
+
+test("control, invisible, and bidi characters are rejected and CJK names pass", () => {
+  for (const sample of ["\u0000", "\u0007", "\u200b", "\u202e"]) {
+    assert.equal(displayNameError(`通义${sample}千问`), NAME_ILLEGAL);
+    const badId = prepareCatalogSave({
+      rows: [{ id: `review-${sample}a`, displayName: "通义千问" }],
+      globalDefault: "",
+      assignments,
+      roleDefaults,
+    });
+    assert.equal(badId.ok, false);
+    assert.equal(badId.body, null);
+    assert.equal(badId.message, ID_ILLEGAL);
+  }
+  assert.equal(displayNameError("通义千问"), "");
+  const saved = prepareCatalogSave({
+    rows: [{ id: "review-a", displayName: "通义千问" }],
+    globalDefault: "review-a",
+    assignments,
+    roleDefaults,
+  });
+  assert.equal(saved.ok, true);
+  assert.equal(saved.body.models[0].display_name, "通义千问");
+  const mapped = mapSaveFailure(NAME_ILLEGAL, [{ id: "review-a", displayName: "通\u200b义" }]);
+  assert.equal(mapped.message, `review-a：${NAME_ILLEGAL}`);
+  assert.equal(SEED_OVER_LIMIT, "环境变量中的模型超过 32 个，保存前请删减");
 });
 
 test("a rejected save does not keep the saved status tag", () => {

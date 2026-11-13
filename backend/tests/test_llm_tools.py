@@ -9,6 +9,7 @@ import json
 from uuid import UUID
 
 import httpx
+import pytest
 from fastapi.encoders import jsonable_encoder
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -38,6 +39,12 @@ _TOOL_NAMES = [
 ]
 
 LOCAL_PASSWORD = "correct-horse-1"
+
+
+def test_run_tool_loop_without_allowance_raises() -> None:
+    request = ChatRequest(messages=[ChatMessage(role="user", content="ping")])
+    with pytest.raises(TypeError, match="allowed"):
+        run_tool_loop(request, None, None, None)  # type: ignore[arg-type]
 _COMPLETION_KEYS = {"id", "provider", "model", "content", "finish_reason", "actions"}
 _DRAFT = {
     "name": "chat-draft",
@@ -235,6 +242,7 @@ def test_draft_and_update_without_agent_draft_skill_do_not_write(tmp_path) -> No
                     permissions=frozenset({"agent.qa", "skill.use", "skill.read", "skill.submit"}),
                 ),
                 _tool_context(client.app),
+                **_unmanaged_allowance(client.app),
             )
             assert result.content == "没有权限，未写入。"
             assert result.actions == []
@@ -278,6 +286,7 @@ def test_reader_cannot_draft_or_update_a_skill(tmp_path) -> None:
             client.app.state.llm,
             Principal(kind="user", permissions=permissions_for(["reader"])),
             _tool_context(client.app),
+                **_unmanaged_allowance(client.app),
         )
         assert result.actions == []
         assert seen[-1]["messages"][-1]["content"] == "没有权限"
@@ -286,6 +295,7 @@ def test_reader_cannot_draft_or_update_a_skill(tmp_path) -> None:
             client.app.state.llm,
             Principal(kind="user", permissions=permissions_for(["reader"])),
             _tool_context(client.app),
+                **_unmanaged_allowance(client.app),
         )
         assert again.actions == []
         assert seen[-1]["messages"][-1]["content"] == "没有权限"
@@ -376,6 +386,7 @@ def test_list_skills_without_skill_read_does_not_leak(tmp_path) -> None:
             client.app.state.llm,
             Principal(kind="user", permissions=frozenset({"agent.qa", "skill.use"})),
             _tool_context(client.app),
+                **_unmanaged_allowance(client.app),
         )
         assert result.content == "完成"
         assert seen[1]["messages"][-1] == {
@@ -405,6 +416,7 @@ def test_draft_skill_requires_skill_use_as_well_as_agent_draft_skill(tmp_path) -
                 permissions=frozenset({"agent.qa", "agent.draft_skill"}),
             ),
             _tool_context(client.app),
+                **_unmanaged_allowance(client.app),
         )
         assert result.content == "没有权限"
         assert seen[1]["messages"][-1]["content"] == "没有权限"
@@ -503,6 +515,7 @@ def test_list_and_get_skill_scopes_stay_in_the_tool_result(tmp_path) -> None:
             client.app.state.llm,
             Principal(kind="user", permissions=frozenset({"agent.qa", "skill.read"})),
             _tool_context(client.app),
+                **_unmanaged_allowance(client.app),
         )
         assert denied.content == "已查询。"
         assert seen[-1]["messages"][-1]["content"] == "没有权限"
@@ -942,6 +955,7 @@ def test_build_artifact_requires_both_permission_codes(tmp_path) -> None:
                 client.app.state.llm,
                 Principal(kind="user", permissions=permissions),
                 _tool_context(client.app),
+                **_unmanaged_allowance(client.app),
             )
             assert result.content == "没有权限"
             assert result.actions == []
@@ -1342,6 +1356,17 @@ def _named_artifact(payload: dict, name: str) -> dict:
     body = json.loads(json.dumps(payload))
     body["artifact_name"] = name
     return body
+
+
+def _unmanaged_allowance(app) -> dict[str, object]:
+    """The allowance the loop used to fill in when callers omitted it."""
+
+    settings = app.state.settings
+    return {
+        "allowed": settings.llm_catalog(),
+        "default": settings.llm_request_default(),
+        "managed": False,
+    }
 
 
 def _tool_context(app) -> ToolContext:

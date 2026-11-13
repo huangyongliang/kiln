@@ -328,6 +328,9 @@ class Settings(BaseSettings):
         ``LLM_PROVIDER``: parsed ``LLM_MODELS``, or ``[LLM_MODEL]`` when that
         list is empty, with a missing ``LLM_MODEL`` prepended. ``mock`` and
         ``off`` still publish an empty list from ``GET /llm/provider``.
+        More than 32 unique ids is kept. Startup logs a warning that names
+        the 32 limit, and ``GET /llm/catalog`` sets ``seed_over_limit``.
+        Saving that unedited list is still rejected. The ids are not truncated.
         """
 
         listed = self.llm_model_ids()

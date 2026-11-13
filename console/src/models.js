@@ -9,15 +9,38 @@ export const DISPLAY_NAME_MAX = 128;
 export const CATALOG_MAX = 32;
 
 export const NAME_TOO_LONG = "显示名不能超过 128 个字符。";
+export const NAME_ILLEGAL = "显示名含有非法字符。";
 export const ID_TOO_LONG = "模型 id 不能超过 128 个字符，不会截断。";
+export const ID_ILLEGAL = "模型 id 含有非法字符。";
 export const ID_DUPLICATE = "模型 id 重复。";
 export const TOO_MANY = "模型目录不能超过 32 项，不会只保留前 32 项。";
+export const SEED_OVER_LIMIT = "环境变量中的模型超过 32 个，保存前请删减";
 export const SAVED_TEXT = "已保存";
 export const SAVE_FAILED_TAG = "保存失败";
 export const UNSAVED_TAG = "尚未保存";
 
+export function hasIllegalCatalogText(value) {
+  const text = String(value ?? "");
+  for (const char of text) {
+    const code = char.codePointAt(0);
+    if (code < 32) {
+      return true;
+    }
+    if ((code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069)) {
+      return true;
+    }
+    if (code === 0x200b || code === 0x2060 || code === 0xfeff) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function displayNameError(value) {
   const text = String(value ?? "").trim();
+  if (hasIllegalCatalogText(text)) {
+    return NAME_ILLEGAL;
+  }
   if (text.length > DISPLAY_NAME_MAX) {
     return NAME_TOO_LONG;
   }
@@ -54,6 +77,9 @@ export function prepareCatalogSave({ rows, globalDefault, assignments, roleDefau
   const seen = new Set();
   for (const row of list) {
     const id = String(row?.id ?? "").trim();
+    if (hasIllegalCatalogText(id)) {
+      return { ok: false, rowErrors: {}, message: ID_ILLEGAL, body: null };
+    }
     if (seen.has(id)) {
       return { ok: false, rowErrors: {}, message: ID_DUPLICATE, body: null };
     }
@@ -90,9 +116,18 @@ export function mapSaveFailure(detail, rows) {
 
 function rowsForDetail(detail, rows) {
   const list = Array.isArray(rows) ? rows : [];
-  if (detail === NAME_TOO_LONG) {
+  if (detail === NAME_TOO_LONG || detail === NAME_ILLEGAL) {
     return list.flatMap((row, index) =>
-      displayNameError(row?.displayName) ? [{ index, id: rowLabel(row, index), message: detail }] : [],
+      displayNameError(row?.displayName) === detail
+        ? [{ index, id: rowLabel(row, index), message: detail }]
+        : [],
+    );
+  }
+  if (detail === ID_ILLEGAL) {
+    return list.flatMap((row, index) =>
+      hasIllegalCatalogText(String(row?.id ?? "").trim())
+        ? [{ index, id: rowLabel(row, index), message: detail }]
+        : [],
     );
   }
   if (detail === ID_TOO_LONG) {

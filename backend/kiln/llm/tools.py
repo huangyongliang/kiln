@@ -326,22 +326,17 @@ def run_tool_loop(
     principal: Principal,
     context: ToolContext,
     *,
-    allowed: Sequence[str] | None = None,
-    default: str | None = None,
-    managed: bool = False,
+    allowed: Sequence[str],
+    default: str,
+    managed: bool,
 ) -> ChatCompletion:
     """Call the model at most MAX_MODEL_ROUNDS times, executing only known tools.
 
-    The chat route always passes ``allowed``, ``default``, and ``managed``
-    for this caller. It does not rebuild the provider. When ``allowed`` is
-    omitted, the loop uses the environment catalog. Direct tool tests use
-    that omission; the HTTP route does not.
+    ``allowed``, ``default``, and ``managed`` are required. The chat route
+    passes this caller's allowance and does not rebuild the provider. Omitting
+    any of the three raises ``TypeError``. The loop does not substitute the
+    environment catalog.
     """
-
-    if allowed is None:
-        allowed = context.settings.llm_catalog()
-        default = context.settings.llm_request_default()
-        managed = False
 
     messages = _model_messages(request)
     actions: list[ChatAction] = []
