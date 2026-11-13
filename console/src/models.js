@@ -44,6 +44,38 @@ function isCatalogSpace(char) {
   return /^\p{Zs}$/u.test(char);
 }
 
+// Python len() counts code points. String.length counts UTF-16 code units.
+export function codePointLength(value) {
+  return [...String(value ?? "")].length;
+}
+
+// Same spelling as Python str.encode("unicode_escape"), so a save note can
+// show an invisible id such as U+200B.
+export function escapeCatalogId(value) {
+  let out = "";
+  for (const char of String(value ?? "")) {
+    const code = char.codePointAt(0);
+    if (char === "\\") {
+      out += "\\\\";
+    } else if (char === "\n") {
+      out += "\\n";
+    } else if (char === "\r") {
+      out += "\\r";
+    } else if (char === "\t") {
+      out += "\\t";
+    } else if (code < 0x20 || (code >= 0x7f && code <= 0xff)) {
+      out += `\\x${code.toString(16).padStart(2, "0")}`;
+    } else if (code <= 0x7e) {
+      out += char;
+    } else if (code <= 0xffff) {
+      out += `\\u${code.toString(16).padStart(4, "0")}`;
+    } else {
+      out += `\\U${code.toString(16).padStart(8, "0")}`;
+    }
+  }
+  return out;
+}
+
 export function hasIllegalCatalogText(value) {
   return ILLEGAL_CATALOG_CHAR.test(String(value ?? ""));
 }
@@ -61,17 +93,39 @@ export function displayNameError(value) {
   if (hasIllegalCatalogText(text)) {
     return NAME_ILLEGAL;
   }
-  if (text.length > DISPLAY_NAME_MAX) {
+  if (codePointLength(text) > DISPLAY_NAME_MAX) {
     return NAME_TOO_LONG;
   }
   return "";
 }
 
-export function catalogStatusTag(source, saveRejected) {
+export function rowErrorField(message) {
+  if (message === ID_ILLEGAL || message === ID_TOO_LONG || message === ID_DUPLICATE) {
+    return "id";
+  }
+  if (message === NAME_ILLEGAL || message === NAME_TOO_LONG) {
+    return "name";
+  }
+  return "";
+}
+
+export function clearRowError(rowErrors, index, field) {
+  if (rowErrorField(rowErrors?.[index]) !== field) {
+    return rowErrors || {};
+  }
+  const next = { ...rowErrors };
+  delete next[index];
+  return next;
+}
+
+export function catalogStatusTag(source, saveRejected, dirty = false) {
   if (saveRejected) {
     return SAVE_FAILED_TAG;
   }
-  return source === "db" ? SAVED_TEXT : UNSAVED_TAG;
+  if (dirty || source !== "db") {
+    return UNSAVED_TAG;
+  }
+  return SAVED_TEXT;
 }
 
 export function prepareCatalogSave({ rows, globalDefault, assignments, roleDefaults }) {
@@ -97,6 +151,10 @@ export function prepareCatalogSave({ rows, globalDefault, assignments, roleDefau
   const idErrors = [];
   for (const [index, row] of list.entries()) {
     const id = trimCatalogText(row?.id);
+    if (codePointLength(id) > DISPLAY_NAME_MAX) {
+      idErrors.push({ index, id: rowLabel(row, index), message: ID_TOO_LONG });
+      continue;
+    }
     if (hasIllegalCatalogText(id)) {
       idErrors.push({ index, id: rowLabel(row, index), message: ID_ILLEGAL });
     }
@@ -164,7 +222,7 @@ function rowsForDetail(detail, rows) {
   }
   if (detail === ID_TOO_LONG) {
     return list.flatMap((row, index) =>
-      trimCatalogText(row?.id).length > DISPLAY_NAME_MAX
+      codePointLength(trimCatalogText(row?.id)) > DISPLAY_NAME_MAX
         ? [{ index, id: rowLabel(row, index), message: detail }]
         : [],
     );
@@ -199,15 +257,20 @@ function noteForRows(matches) {
     groups.set(item.message, labels);
   }
   return [...groups.entries()]
-    .map(([message, labels]) => `${labels.join("、")}：${message}`)
-    .join("");
+    .map(([message, labels]) => `${labels.map((label) => noteLabel(label, message)).join("、")}：${message}`)
+    .join("\n");
+}
+
+function noteLabel(label, message) {
+  return message === ID_ILLEGAL ? escapeCatalogId(label) : label;
 }
 
 function rowMessage(matches, detail) {
   const labels = [];
   for (const item of matches) {
-    if (!labels.includes(item.id)) {
-      labels.push(item.id);
+    const label = noteLabel(item.id, detail);
+    if (!labels.includes(label)) {
+      labels.push(label);
     }
   }
   return `${labels.join("、")}：${detail}`;

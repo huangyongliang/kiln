@@ -145,6 +145,39 @@ export function writeChatModel(storage, model) {
   }
 }
 
+export function clearChatStorage(storage) {
+  if (!storage || typeof storage.removeItem !== "function") {
+    return;
+  }
+  const keys = new Set([CHAT_THREAD_KEY, CHAT_MODEL_KEY]);
+  if (typeof storage.length === "number" && typeof storage.key === "function") {
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (typeof key === "string" && key.startsWith("kiln.chat.")) {
+        keys.add(key);
+      }
+    }
+  }
+  for (const key of keys) {
+    try {
+      storage.removeItem(key);
+    } catch {
+      // Logout still finishes when one key cannot be removed.
+    }
+  }
+}
+
+// Enter sends. Shift+Enter inserts a newline. An IME confirmation must not send.
+export function composerKeyAction(event) {
+  if (!event || event.isComposing || event.key === "Process" || event.keyCode === 229) {
+    return "insert";
+  }
+  if (event.key === "Enter" && !event.shiftKey) {
+    return "send";
+  }
+  return "insert";
+}
+
 export function chatRequestMessages(history, content) {
   const prior = [];
   for (const item of history || []) {

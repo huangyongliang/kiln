@@ -95,3 +95,26 @@ test("unsanitized html does not appear as-is", () => {
   assert.equal(renderChatMarkdown(null), "");
   assert.equal(renderChatMarkdown(""), "");
 });
+
+test("markdown links write the sanitized href, not the original", () => {
+  const spaced = renderChatMarkdown("[文档](<https://example.com/a b>)");
+  assert.match(spaced, /href="https:\/\/example.com\/ab"/);
+  assert.equal(spaced.includes("%20"), false);
+  assert.equal(spaced.includes("a b"), false);
+
+  const hidden = renderChatMarkdown("[文档](<https://example.com/a\u0000b>)");
+  const href = /href="([^"]*)"/.exec(hidden)?.[1] ?? "";
+  assert.equal(href, "https://example.com/ab");
+  assert.equal(href.includes("\u0000"), false);
+  assert.equal(href.includes("%00"), false);
+
+  const tabbed = renderChatMarkdown("[文档](<https://example.com/a\tb>)");
+  assert.match(tabbed, /href="https:\/\/example.com\/ab"/);
+  assert.equal(tabbed.includes("%09"), false);
+  assert.equal(tabbed.includes("\t"), false);
+
+  const brokenScheme = renderChatMarkdown("[点我](<java\nscript:alert(1)>)");
+  assert.equal(/<a\b/i.test(brokenScheme), false);
+  assert.equal(/javascript:/i.test(brokenScheme), false);
+  assert.match(brokenScheme, /点我/);
+});

@@ -60,6 +60,14 @@ const parser = new Marked({
     image({ text } = {}) {
       return escapeText(text || "");
     },
+    link({ href, text, tokens } = {}) {
+      const label = Array.isArray(tokens) ? this.parser.parseInline(tokens) : escapeText(text || "");
+      const safe = httpHref(href);
+      if (!safe) {
+        return label;
+      }
+      return `<a href="${escapeText(safe)}">${label}</a>`;
+    },
   },
 });
 
@@ -78,8 +86,9 @@ function cleanUrl(value) {
     .replace(/<!--[\s\S]*?-->/g, "");
 }
 
-function isHttpUrl(value) {
-  return /^https?:\/\//i.test(cleanUrl(value));
+function httpHref(value) {
+  const href = cleanUrl(value);
+  return /^https?:\/\//i.test(href) ? href : "";
 }
 
 function sanitizeChatHtml(unsafe) {
@@ -95,8 +104,8 @@ function sanitizeChatHtml(unsafe) {
     disallowedTagsMode: "discard",
     transformTags: {
       a(_tagName, attribs) {
-        const href = typeof attribs.href === "string" ? attribs.href : "";
-        if (!isHttpUrl(href)) {
+        const href = httpHref(attribs.href);
+        if (!href) {
           return { tagName: "span", attribs: {} };
         }
         return {

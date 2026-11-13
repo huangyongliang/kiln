@@ -16,7 +16,9 @@ import {
   UNSAVED_TAG,
   addModelIdError,
   catalogStatusTag,
+  codePointLength,
   displayNameError,
+  escapeCatalogId,
   mapSaveFailure,
   prepareCatalogSave,
 } from "./models.js";
@@ -115,7 +117,8 @@ test("control, invisible, and bidi characters are rejected and CJK names pass", 
     assert.equal(badId.ok, false);
     assert.equal(badId.body, null);
     assert.equal(badId.rowErrors[0], ID_ILLEGAL);
-    assert.equal(badId.message, `review-${sample}a：${ID_ILLEGAL}`);
+    assert.equal(badId.message, `${escapeCatalogId(`review-${sample}a`)}：${ID_ILLEGAL}`);
+    assert.equal(badId.message.includes(sample), false);
   }
   assert.equal(displayNameError("通义千问"), "");
   const saved = prepareCatalogSave({
@@ -143,7 +146,8 @@ test("listed format characters are rejected and CJK names still pass", () => {
     });
     assert.equal(prepared.ok, false);
     assert.equal(prepared.rowErrors[0], ID_ILLEGAL);
-    assert.equal(prepared.message, `model-${sample}a：${ID_ILLEGAL}`);
+    assert.equal(prepared.message, `${escapeCatalogId(`model-${sample}a`)}：${ID_ILLEGAL}`);
+    assert.equal(prepared.message.includes(sample), false);
   }
   assert.equal(displayNameError("通义千问"), "");
   assert.equal(addModelIdError("model-tongyi"), "");
@@ -179,9 +183,7 @@ test("the save note uses the row's own error text", () => {
   });
   assert.equal(mixed.rowErrors[0], NAME_ILLEGAL);
   assert.equal(mixed.rowErrors[1], NAME_TOO_LONG);
-  assert.equal(mixed.message.includes(`env-00：${NAME_ILLEGAL}`), true);
-  assert.equal(mixed.message.includes(`env-01：${NAME_TOO_LONG}`), true);
-  assert.equal(mixed.message.includes(NAME_TOO_LONG) && mixed.message.startsWith(`env-00：${NAME_ILLEGAL}`), true);
+  assert.equal(mixed.message, `env-00：${NAME_ILLEGAL}\nenv-01：${NAME_TOO_LONG}`);
 });
 
 test("an illegal model id is rejected at add time and names the row on save", () => {
@@ -201,7 +203,9 @@ test("an illegal model id is rejected at add time and names the row on save", ()
   assert.equal(blocked.body, null);
   assert.equal(blocked.rowErrors[0], undefined);
   assert.equal(blocked.rowErrors[1], ID_ILLEGAL);
-  assert.equal(blocked.message, `hidden\u200bmodel：${ID_ILLEGAL}`);
+  assert.equal(blocked.message, `${escapeCatalogId("hidden\u200bmodel")}：${ID_ILLEGAL}`);
+  assert.equal(blocked.message.includes("\u200b"), false);
+  assert.equal(blocked.message.includes("\\u200b"), true);
   const mapped = mapSaveFailure(ID_ILLEGAL, [
     { id: "plain-model", displayName: "" },
     { id: "hidden\u200bmodel", displayName: "" },
@@ -209,7 +213,8 @@ test("an illegal model id is rejected at add time and names the row on save", ()
   assert.equal(mapped.rejected, true);
   assert.equal(mapped.rowErrors[1], ID_ILLEGAL);
   assert.equal(mapped.rowErrors[0], undefined);
-  assert.equal(mapped.message, `hidden\u200bmodel：${ID_ILLEGAL}`);
+  assert.equal(mapped.message, `${escapeCatalogId("hidden\u200bmodel")}：${ID_ILLEGAL}`);
+  assert.equal(mapped.message.includes("\\u200b"), true);
 });
 
 test("gpt-4o lookalikes are illegal and a visible emoji name is kept", () => {
@@ -313,6 +318,35 @@ function parityAssignments(id) {
 function parityRoleDefaults(id) {
   return { reader: "", builder: id, publisher: "", admin: "" };
 }
+
+test("lengths count code points, matching the server", () => {
+  const emoji = "👍".repeat(128);
+  assert.equal(emoji.length, 256);
+  assert.equal(codePointLength(emoji), 128);
+  assert.equal(displayNameError(emoji), "");
+  assert.equal(displayNameError(`  ${emoji}  `), "");
+  assert.equal(displayNameError("👍".repeat(129)), NAME_TOO_LONG);
+  const mixed = `${"名".repeat(127)}👍`;
+  assert.equal(mixed.length, 129);
+  assert.equal(codePointLength(mixed), 128);
+  assert.equal(displayNameError(mixed), "");
+  const saved = prepareCatalogSave({
+    rows: [{ id: emoji, displayName: emoji }],
+    globalDefault: emoji,
+    assignments: { reader: [], builder: [], publisher: [], admin: [] },
+    roleDefaults: { reader: "", builder: "", publisher: "", admin: "" },
+  });
+  assert.equal(saved.ok, true);
+  assert.equal(codePointLength(saved.body.models[0].id), 128);
+  assert.equal(codePointLength(saved.body.models[0].display_name), 128);
+  const tooLong = mapSaveFailure(ID_TOO_LONG, [{ id: "👍".repeat(129), displayName: "" }]);
+  assert.equal(tooLong.rowErrors[0], ID_TOO_LONG);
+  const stillOk = mapSaveFailure(ID_TOO_LONG, [{ id: emoji, displayName: "" }]);
+  assert.equal(stillOk.rowErrors[0], undefined);
+  assert.equal(escapeCatalogId("hidden\u200bmodel"), "hidden\\u200bmodel");
+  assert.equal(escapeCatalogId("\u0000"), "\\x00");
+  assert.equal(escapeCatalogId("👍"), "\\U0001f44d");
+});
 
 test("a rejected save does not keep the saved status tag", () => {
   assert.equal(catalogStatusTag("db", false), SAVED_TEXT);

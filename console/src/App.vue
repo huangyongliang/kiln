@@ -4,6 +4,7 @@ import { RouterLink, RouterView, useRoute } from "vue-router";
 
 import { accessReady, account, ensureAccess, perms, roleTags } from "./access";
 import { requestJson } from "./api";
+import { clearChatStorage } from "./chat";
 import AppIcon from "./components/AppIcon.vue";
 import { pageCrumb } from "./crumb";
 import { canSee } from "./permissions";
@@ -108,6 +109,8 @@ async function logout() {
   try {
     await requestJson("/api/v1/auth/logout", { method: "POST" });
   } finally {
+    clearChatStorage(window.sessionStorage);
+    clearChatStorage(window.localStorage);
     writeApiToken("");
     clearAccount();
     window.location.assign("/login");

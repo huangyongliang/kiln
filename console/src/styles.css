@@ -1043,6 +1043,11 @@ dialog.modal::backdrop {
   max-width: none;
 }
 
+.skill-form textarea {
+  min-height: 10rem;
+  resize: vertical;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;
@@ -1114,6 +1119,11 @@ dialog.modal::backdrop {
 .banner .btn-ghost {
   color: var(--clay);
   flex: none;
+}
+
+.banner.warn {
+  background: var(--gold-soft);
+  color: var(--gold);
 }
 
 .skeleton span {
@@ -1762,12 +1772,35 @@ dialog.modal::backdrop {
   border-bottom: 1px solid var(--line);
 }
 
-.model-id {
-  display: block;
+.model-id-field {
   min-width: 0;
+}
+
+.model-id,
+input.model-id {
+  display: block;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+}
+
+input.model-id[aria-invalid="true"],
+.model-add input[aria-invalid="true"] {
+  padding: 6px 8px;
+  border-color: var(--clay);
+  background: var(--paper);
+}
+
+.model-id-field .message {
+  margin: 6px 0 0;
 }
 
 .model-list li:last-child {
@@ -1805,6 +1838,8 @@ dialog.modal::backdrop {
   line-height: 1.4;
   text-align: right;
   color: var(--glaze);
+  white-space: pre-line;
+  scroll-margin-top: 72px;
 }
 
 .save-note.error {
