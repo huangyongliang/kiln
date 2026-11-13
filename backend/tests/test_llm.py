@@ -4,9 +4,17 @@ import httpx
 from fastapi.testclient import TestClient
 
 from kiln.llm.provider import chat_completions_url
-from kiln.llm.tools import OPENAI_TOOLS
+from kiln.llm.tools import OPENAI_TOOLS, PLATFORM_SYSTEM_PROMPT
 from kiln.main import create_app
 from tests.support import app_settings, auth_headers
+
+_TOOL_NAMES = [
+    "list_skills",
+    "get_skill",
+    "draft_skill",
+    "update_skill",
+    "build_artifact",
+]
 
 
 def test_chat_completions_url() -> None:
@@ -109,14 +117,22 @@ def test_openai_mode_posts_chat_completions() -> None:
     assert seen["authorization"] == "Bearer test-key"
     assert seen["body"] == {
         "model": "demo-model",
-        "messages": [{"role": "user", "content": "ping"}],
+        "messages": [
+            {"role": "system", "content": PLATFORM_SYSTEM_PROMPT},
+            {"role": "user", "content": "ping"},
+        ],
         "tools": OPENAI_TOOLS,
     }
-    assert [item["function"]["name"] for item in OPENAI_TOOLS] == [
-        "list_skills",
-        "draft_skill",
-        "build_artifact",
-    ]
+    assert [item["function"]["name"] for item in OPENAI_TOOLS] == _TOOL_NAMES
+    assert "submit_review" not in _TOOL_NAMES
+    assert "publish_skill" not in _TOOL_NAMES
+    assert "我产出的" in PLATFORM_SYSTEM_PROMPT
+    assert "我能用的已发布 Skill" in PLATFORM_SYSTEM_PROMPT
+    assert "不能提交审核" in PLATFORM_SYSTEM_PROMPT
+    assert "也不能发布" in PLATFORM_SYSTEM_PROMPT
+    assert "不会执行" in PLATFORM_SYSTEM_PROMPT
+    assert "只有草稿状态可以改稿" in PLATFORM_SYSTEM_PROMPT
+    assert "构建必须使用已发布的 Skill" in PLATFORM_SYSTEM_PROMPT
 
 
 def test_openai_forwards_prior_turns() -> None:
@@ -160,7 +176,15 @@ def test_openai_forwards_prior_turns() -> None:
     assert response.json()["actions"] == []
     body = seen["body"]
     assert isinstance(body, dict)
-    assert body["messages"] == prior
+    assert body["messages"] == [
+        {"role": "system", "content": PLATFORM_SYSTEM_PROMPT},
+        {"role": "user", "content": "第一问"},
+        {"role": "assistant", "content": "第一答"},
+        {"role": "user", "content": "第二问"},
+    ]
+    assert body["messages"][0]["content"].startswith("你协助用户产出可以送审的 Skill。")
+    assert all(item["content"] != "只回答构建问题" for item in body["messages"])
+    assert [item for item in body["messages"] if item["role"] == "system"] == [body["messages"][0]]
 
 
 def test_openai_mode_omits_authorization_when_key_is_empty() -> None:

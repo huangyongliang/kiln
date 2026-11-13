@@ -8,13 +8,16 @@ A caller missing a tool's permission codes does not write. The tool result is
 「没有权限」, and the loop continues until the model returns content or the
 round cap is reached. The cap is a code constant, not an environment variable.
 
-``build_artifact`` starts a product build the same way as POST /builds. It
-needs ``agent.build_artifact``, ``executor.run``, and ``skill.use``.
+The loop prepends one platform system prompt and drops client ``system``
+messages so they cannot replace that contract. There is no submit or publish
+tool. ``build_artifact`` starts a product build the same way as POST /builds.
+It needs ``agent.build_artifact``, ``executor.run``, and ``skill.use``.
 """
 
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from uuid import UUID
 
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -25,7 +28,13 @@ from kiln.db.builds import BuildStore
 from kiln.db.store import PostgresStore
 from kiln.domain.builds import ProductBuildCreate
 from kiln.domain.rbac import ALL_PERMISSIONS
-from kiln.domain.skills import SkillCreate, SkillList, SkillStatus
+from kiln.domain.skills import (
+    SkillCreate,
+    SkillList,
+    SkillScope,
+    SkillStatus,
+    may_revise_skill,
+)
 from kiln.errors import (
     GIT_SOURCE_UNCONFIGURED_DETAIL,
     JENKINS_UNCONFIGURED_DETAIL,
@@ -53,6 +62,18 @@ MAX_MODEL_ROUNDS = 4
 
 TOOL_DENIED = "没有权限"
 ROUND_CAP_CONTENT = "已达到对话工具轮次上限。"
+DRAFT_ONLY = "只有草稿可以修改"
+
+# Fixed contract for the model. Client system messages are discarded.
+PLATFORM_SYSTEM_PROMPT = (
+    "你协助用户产出可以送审的 Skill。"
+    "步骤是数据，不会执行。"
+    "你不能提交审核，也不能发布。"
+    "只有草稿状态可以改稿。"
+    "构建必须使用已发布的 Skill。"
+    "用 list_skills 和 get_skill 查询「我产出的」和「我能用的已发布 Skill」。"
+    "起草或改稿成功后，告诉用户到 Skill 页提交审核。"
+)
 
 @dataclass(frozen=True)
 class ToolContext:
@@ -76,15 +97,30 @@ class ToolResult:
     action: ChatAction | None = None
 
 
-_Handler = Callable[[object, ToolContext], ToolResult]
+_Handler = Callable[[object, ToolContext, Principal], ToolResult]
 
 
 class ListSkillsArguments(BaseModel):
-    """Optional status filter. Same values as GET /skills. No other fields."""
+    """Optional status and scope. Same values as GET /skills. No other fields."""
 
     model_config = ConfigDict(extra="forbid")
 
     status: SkillStatus | None = None
+    scope: SkillScope | None = None
+
+
+class GetSkillArguments(BaseModel):
+    """Fetch one skill by id. No other fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+
+
+class UpdateSkillArguments(SkillCreate):
+    """Full replacement of a draft, plus the id of the skill to update."""
+
+    id: UUID
 
 
 @dataclass(frozen=True)
@@ -100,21 +136,59 @@ def _json(model: BaseModel) -> str:
     return json.dumps(jsonable_encoder(model), ensure_ascii=False, separators=(",", ":"))
 
 
-def _list_skills(payload: object, context: ToolContext) -> ToolResult:
+def _account_id(principal: Principal) -> UUID | None:
+    if principal.account is None:
+        return None
+    return principal.account.id
+
+
+def _list_skills(payload: object, context: ToolContext, principal: Principal) -> ToolResult:
     parsed = ListSkillsArguments.model_validate(payload)
-    listed = SkillList(items=context.catalog.list_skills(parsed.status))
+    if parsed.scope is SkillScope.usable and "skill.use" not in principal.permissions:
+        return ToolResult(TOOL_DENIED)
+    listed = SkillList(
+        items=context.catalog.list_skills(
+            parsed.status,
+            scope=parsed.scope,
+            account_id=_account_id(principal),
+        )
+    )
     return ToolResult(_json(listed))
 
 
-def _draft_skill(payload: object, context: ToolContext) -> ToolResult:
-    created = context.catalog.create_skill(SkillCreate.model_validate(payload))
+def _get_skill(payload: object, context: ToolContext, principal: Principal) -> ToolResult:
+    del principal
+    parsed = GetSkillArguments.model_validate(payload)
+    return ToolResult(_json(context.catalog.get_skill(parsed.id)))
+
+
+def _draft_skill(payload: object, context: ToolContext, principal: Principal) -> ToolResult:
+    created = context.catalog.create_skill(
+        SkillCreate.model_validate(payload),
+        _account_id(principal),
+    )
     return ToolResult(
         _json(created),
         ChatAction(type="skill_drafted", id=created.id, name=created.name),
     )
 
 
-def _build_artifact(payload: object, context: ToolContext) -> ToolResult:
+def _update_skill(payload: object, context: ToolContext, principal: Principal) -> ToolResult:
+    parsed = UpdateSkillArguments.model_validate(payload)
+    current = context.catalog.get_skill(parsed.id)
+    if not may_revise_skill(principal.permissions, _account_id(principal), current):
+        return ToolResult(TOOL_DENIED)
+    if current.status != SkillStatus.draft:
+        return ToolResult(DRAFT_ONLY)
+    updated = context.catalog.update_skill(parsed.id, parsed)
+    return ToolResult(
+        _json(updated),
+        ChatAction(type="skill_updated", id=updated.id, name=updated.name),
+    )
+
+
+def _build_artifact(payload: object, context: ToolContext, principal: Principal) -> ToolResult:
+    del principal
     created = ProductBuildCreate.model_validate(payload)
     jenkins = context.jenkins
     source = context.git_source
@@ -142,21 +216,42 @@ _TOOLS: tuple[_Tool, ...] = (
         name="list_skills",
         description=(
             "列出 skill。可按 status 筛选 draft、in_review 或 published。"
-            "结果与 GET /skills 相同，不附加字段。"
+            "可选 scope：mine 是「我产出的」，usable 是「我能用的已发布 Skill」。"
+            "省略 scope 时与 GET /skills 相同，返回全库列表。"
+            "scope 可与 status 同时使用。"
         ),
         permissions=frozenset({"skill.read"}),
         parameters=ListSkillsArguments,
         handler=_list_skills,
     ),
     _Tool(
+        name="get_skill",
+        description="按 id 查看一条 skill。参数不符或没有这条 skill 时，错误写在工具结果里。",
+        permissions=frozenset({"skill.read"}),
+        parameters=GetSkillArguments,
+        handler=_get_skill,
+    ),
+    _Tool(
         name="draft_skill",
         description=(
             "创建一条 skill 草稿。参数与创建草稿相同，包含名称、版本、输入、步骤和范围。"
             "只保存草稿，不提交审核，不发布，不执行步骤。"
+            "成功后告诉用户到 Skill 页提交审核。"
         ),
         permissions=frozenset({"agent.draft_skill", "skill.use"}),
         parameters=SkillCreate,
         handler=_draft_skill,
+    ),
+    _Tool(
+        name="update_skill",
+        description=(
+            "完整替换一条草稿的可变字段。参数与创建草稿相同，并额外需要 id。"
+            "只更新草稿，不改变状态，不清空退回记录，不提交审核，不发布，不执行步骤。"
+            "审核中或已发布不能改。成功后告诉用户到 Skill 页提交审核。"
+        ),
+        permissions=frozenset({"agent.draft_skill", "skill.use"}),
+        parameters=UpdateSkillArguments,
+        handler=_update_skill,
     ),
     _Tool(
         name="build_artifact",
@@ -233,9 +328,7 @@ def run_tool_loop(
 ) -> ChatCompletion:
     """Call the model at most MAX_MODEL_ROUNDS times, executing only known tools."""
 
-    messages: list[dict[str, object]] = [
-        {"role": item.role, "content": item.content} for item in request.messages
-    ]
+    messages = _model_messages(request)
     actions: list[ChatAction] = []
     turn: ModelTurn | None = None
     for _ in range(MAX_MODEL_ROUNDS):
@@ -297,11 +390,24 @@ def execute_tool(
     except ValueError as exc:
         return ToolResult(f"参数不符合要求。{exc}")
     try:
-        return tool.handler(payload, context)
+        return tool.handler(payload, context, principal)
     except ValidationError as exc:
         return ToolResult(_format_validation(exc))
     except (BadRequest, Conflict, NotConfigured, NotFound, Unprocessable, UpstreamFailure) as exc:
         return ToolResult(exc.detail)
+
+
+def _model_messages(request: ChatRequest) -> list[dict[str, object]]:
+    """Platform system prompt first. Client system messages are dropped."""
+
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": PLATFORM_SYSTEM_PROMPT},
+    ]
+    for item in request.messages:
+        if item.role == "system":
+            continue
+        messages.append({"role": item.role, "content": item.content})
+    return messages
 
 
 def _assistant_tool_message(turn: ModelTurn) -> dict[str, object]:

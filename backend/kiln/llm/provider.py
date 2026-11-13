@@ -38,7 +38,7 @@ class ChatAction(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["skill_drafted", "build_started"]
+    type: Literal["skill_drafted", "skill_updated", "build_started"]
     id: UUID
     name: str
 

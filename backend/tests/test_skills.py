@@ -300,6 +300,169 @@ def test_skill_name_rejects_invisible_controls(client: TestClient) -> None:
     assert zwnj.json()["name"] == "名称\u200c甲"
 
 
+def test_created_by_scope_and_draft_patch(client: TestClient) -> None:
+    historical = _draft(client, name="historical-draft")
+    assert historical["created_by"] is None
+    published = _draft(client, name="shared-published")
+    assert client.post(f"/api/v1/skills/{published['id']}/submit-review").status_code == 200
+    assert client.post(f"/api/v1/skills/{published['id']}/publish").status_code == 200
+
+    builder = _login(client, "ada_builder", ["builder"])
+    builder_id = builder.get("/api/v1/auth/me").json()["account"]["id"]
+    own = builder.post("/api/v1/skills", json=_skill_body("builder-draft")).json()
+    assert own["created_by"] == builder_id
+    assert own["status"] == "draft"
+
+    other = _login(client, "ada_other", ["builder"])
+    other_id = other.get("/api/v1/auth/me").json()["account"]["id"]
+    foreign = other.post("/api/v1/skills", json=_skill_body("other-draft")).json()
+    assert foreign["created_by"] == other_id
+
+    mine = builder.get("/api/v1/skills", params={"scope": "mine"})
+    assert mine.status_code == 200
+    assert [item["id"] for item in mine.json()["items"]] == [own["id"]]
+    mine_published = builder.get("/api/v1/skills", params={"scope": "mine", "status": "published"})
+    assert mine_published.json()["items"] == []
+    usable = builder.get("/api/v1/skills", params={"scope": "usable"})
+    assert [item["id"] for item in usable.json()["items"]] == [published["id"]]
+    assert usable.json()["items"][0]["status"] == "published"
+    usable_drafts = builder.get("/api/v1/skills", params={"scope": "usable", "status": "draft"})
+    assert usable_drafts.json()["items"] == []
+    machine_mine = client.get("/api/v1/skills", params={"scope": "mine"})
+    assert machine_mine.status_code == 200
+    assert machine_mine.json()["items"] == []
+
+    reader = _login(client, "ada_reader", ["reader"])
+    denied_usable = reader.get("/api/v1/skills", params={"scope": "usable"})
+    assert denied_usable.status_code == 403
+    assert denied_usable.json()["detail"] == "没有权限"
+    reader_mine = reader.get("/api/v1/skills", params={"scope": "mine"})
+    assert reader_mine.status_code == 200
+    assert reader_mine.json()["items"] == []
+    catalog = reader.get("/api/v1/skills")
+    assert catalog.status_code == 200
+    names = {item["name"] for item in catalog.json()["items"]}
+    assert names == {"historical-draft", "shared-published", "builder-draft", "other-draft"}
+    assert any(item["created_by"] is None for item in catalog.json()["items"])
+
+    assert builder.post(f"/api/v1/skills/{own['id']}/submit-review").status_code == 200
+    publisher = _login(client, "ada_publisher", ["publisher"])
+    publisher_id = publisher.get("/api/v1/auth/me").json()["account"]["id"]
+    rejected = publisher.post(
+        f"/api/v1/skills/{own['id']}/reject",
+        json={"reason": "请补充说明"},
+    )
+    assert rejected.status_code == 200
+    note = rejected.json()["review_note"]
+    rejected_at = rejected.json()["rejected_at"]
+    assert rejected.json()["rejected_by"] == publisher_id
+    assert rejected.json()["status"] == "draft"
+
+    revised = builder.patch(
+        f"/api/v1/skills/{own['id']}",
+        json=_skill_body("builder-draft", description="改过的说明"),
+    )
+    assert revised.status_code == 200, revised.text
+    body = revised.json()
+    assert body["description"] == "改过的说明"
+    assert body["status"] == "draft"
+    assert body["created_by"] == builder_id
+    assert body["review_note"] == note
+    assert body["rejected_at"] == rejected_at
+    assert body["rejected_by"] == publisher_id
+
+    partial = builder.patch(
+        f"/api/v1/skills/{own['id']}",
+        json={"description": "只改说明"},
+    )
+    assert partial.status_code == 422
+    assert builder.get(f"/api/v1/skills/{own['id']}").json()["description"] == "改过的说明"
+
+    extra = _skill_body("builder-draft", description="改过的说明")
+    extra["review_note"] = ""
+    forbidden_field = builder.patch(f"/api/v1/skills/{own['id']}", json=extra)
+    assert forbidden_field.status_code == 422
+    assert builder.get(f"/api/v1/skills/{own['id']}").json()["review_note"] == note
+
+    assert builder.post(f"/api/v1/skills/{own['id']}/submit-review").status_code == 200
+    reviewing = builder.patch(
+        f"/api/v1/skills/{own['id']}",
+        json=_skill_body("builder-draft", description="审核中"),
+    )
+    assert reviewing.status_code == 409
+    assert reviewing.json()["detail"] == "只有草稿可以修改"
+    assert builder.get(f"/api/v1/skills/{own['id']}").json()["status"] == "in_review"
+    assert builder.get(f"/api/v1/skills/{own['id']}").json()["description"] == "改过的说明"
+    assert publisher.post(f"/api/v1/skills/{own['id']}/publish").status_code == 200
+    published_edit = builder.patch(
+        f"/api/v1/skills/{own['id']}",
+        json=_skill_body("builder-draft", description="已发布"),
+    )
+    assert published_edit.status_code == 409
+    assert client.get(f"/api/v1/skills/{own['id']}").json()["status"] == "published"
+    assert client.get(f"/api/v1/skills/{own['id']}").json()["description"] == "改过的说明"
+
+    stolen = builder.patch(
+        f"/api/v1/skills/{foreign['id']}",
+        json=_skill_body("other-draft", description="偷改"),
+    )
+    assert stolen.status_code == 403
+    assert stolen.json()["detail"] == "没有权限"
+    stored_foreign = other.get(f"/api/v1/skills/{foreign['id']}").json()
+    assert stored_foreign["description"] == foreign["description"]
+
+    reader_edit = reader.patch(
+        f"/api/v1/skills/{foreign['id']}",
+        json=_skill_body("other-draft", description="只读改"),
+    )
+    assert reader_edit.status_code == 403
+    missing = "00000000-0000-4000-8000-000000000077"
+    missing_builder = builder.patch(f"/api/v1/skills/{missing}", json=_skill_body("missing"))
+    assert missing_builder.status_code == 404
+    missing_reader = reader.patch(f"/api/v1/skills/{missing}", json=_skill_body("missing"))
+    assert missing_reader.status_code == 403
+
+    historical_edit = publisher.patch(
+        f"/api/v1/skills/{historical['id']}",
+        json=_skill_body("historical-draft", description="发布者改历史草稿"),
+    )
+    assert historical_edit.status_code == 200, historical_edit.text
+    assert historical_edit.json()["created_by"] is None
+    assert historical_edit.json()["status"] == "draft"
+    assert historical_edit.json()["description"] == "发布者改历史草稿"
+    assert historical_edit.json()["review_note"] is None
+
+    clash = other.patch(
+        f"/api/v1/skills/{foreign['id']}",
+        json=_skill_body("historical-draft"),
+    )
+    assert clash.status_code == 409
+    assert clash.json()["detail"] == "同名同版本的 skill 已存在"
+    assert other.get(f"/api/v1/skills/{foreign['id']}").json()["name"] == "other-draft"
+
+
+def _skill_body(name: str, **overrides: object) -> dict:
+    payload = {
+        "name": name,
+        "version": "0.1.0",
+        "description": "把 Maven 工程打成包",
+        "inputs": [{"name": "branch", "description": "分支", "required": True}],
+        "toolchain": "jdk17",
+        "environment": "maven",
+        "allowed_repositories": ["group/demo"],
+        "allowed_dependencies": ["maven-central"],
+        "steps": [
+            {"kind": "checkout", "description": "检出"},
+            {"kind": "compile", "description": "编译"},
+            {"kind": "package", "description": "打包"},
+            {"kind": "archive", "description": "归档"},
+        ],
+        "output_spec": "jar",
+    }
+    payload.update(overrides)
+    return payload
+
+
 LOCAL_PASSWORD = "correct-horse-1"
 
 

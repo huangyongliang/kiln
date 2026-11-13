@@ -1,11 +1,12 @@
 <script setup>
-import { computed, onMounted, ref, watch } from "vue";
-import { RouterLink, useRoute } from "vue-router";
+import { computed, onMounted, reactive, ref, watch } from "vue";
+import { RouterLink, useRoute, useRouter } from "vue-router";
 
-import { accessReady, actionDeniedText, perms } from "../access";
-import { errorText, getJson, isForbidden, postEmpty, postJson } from "../api";
+import { accessReady, account, actionDeniedText, perms } from "../access";
+import { errorText, getJson, isForbidden, patchJson, postEmpty, postJson } from "../api";
 import FormDialog from "../components/FormDialog.vue";
 import PageIntro from "../components/PageIntro.vue";
+import SkillDraftForm from "../components/SkillDraftForm.vue";
 import StatePanel from "../components/StatePanel.vue";
 import StatusTag from "../components/StatusTag.vue";
 import { pageCrumb } from "../crumb";
@@ -13,8 +14,10 @@ import { codePointLength, fieldErrors, rejectReasonError } from "../forms";
 import { formatTime, stepLabel } from "../format";
 import { apiPath, isUuid } from "../paths";
 import { canDo, canSee } from "../permissions";
+import { canReviseSkill } from "../skillLists";
 
 const route = useRoute();
+const router = useRouter();
 const skill = ref(null);
 const mode = ref("loading");
 const error = ref("");
@@ -27,7 +30,13 @@ const rejectReason = ref("");
 const rejectError = ref("");
 const rejectField = ref("");
 const rejectorName = ref("");
+const editing = ref(false);
+const editError = ref("");
+const editErrors = reactive({});
 
+const canEdit = computed(() =>
+  canReviseSkill(skill.value, perms.value, account.value?.id || ""),
+);
 const canSubmit = computed(
   () => skill.value?.status === "draft" && canDo("skill.submit", perms.value),
 );
@@ -71,9 +80,60 @@ watch(skill, (value) => {
   loadRejector(value);
 });
 
+function clearEditErrors() {
+  for (const key of Object.keys(editErrors)) {
+    delete editErrors[key];
+  }
+}
+
+function cancelEdit() {
+  editing.value = false;
+  editError.value = "";
+  clearEditErrors();
+  if (route.query.edit) {
+    router.replace({ name: "skill", params: { id: route.params.id } });
+  }
+}
+
+async function saveEdit(payload) {
+  const id = route.params.id;
+  if (busy.value || !isUuid(id)) return;
+  editError.value = "";
+  clearEditErrors();
+  busy.value = "edit";
+  try {
+    const updated = await patchJson(apiPath`/api/v1/skills/${id}`, payload);
+    if (route.query.edit) {
+      await router.replace({ name: "skill", params: { id: updated.id } });
+    }
+    skill.value = updated;
+    pageCrumb.value = `Skill / ${skill.value.name}`;
+    editing.value = false;
+  } catch (caught) {
+    if (isForbidden(caught)) {
+      editError.value = actionDeniedText("skill.use");
+      return;
+    }
+    if (caught?.status === 409 && String(caught.message || "").includes("同名同版本")) {
+      editErrors.version = caught.message;
+      return;
+    }
+    const mapped = fieldErrors(caught?.detail);
+    if (Object.keys(mapped).length) {
+      Object.assign(editErrors, mapped);
+      return;
+    }
+    editError.value = errorText(caught, "无法保存草稿");
+  } finally {
+    busy.value = "";
+  }
+}
+
 async function load() {
+  editing.value = false;
   forbidden.value = false;
   actionError.value = "";
+  editError.value = "";
   missing.value = false;
   const id = route.params.id;
   if (!isUuid(id)) {
@@ -92,6 +152,7 @@ async function load() {
   try {
     skill.value = await getJson(apiPath`/api/v1/skills/${id}`);
     pageCrumb.value = `Skill / ${skill.value.name}`;
+    editing.value = route.query.edit === "1" && canEdit.value;
     mode.value = "ready";
   } catch (caught) {
     if (isForbidden(caught)) {
@@ -203,7 +264,10 @@ async function submitReject() {
           <span class="mono">{{ skill.version }}</span>
         </p>
       </template>
-      <template v-if="canSubmit || canPublish || canReject || canStartBuild" #actions>
+      <template v-if="!editing && (canEdit || canSubmit || canPublish || canReject || canStartBuild)" #actions>
+        <button v-if="canEdit" type="button" class="btn btn-secondary" :disabled="Boolean(busy)" @click="editing = true">
+          编辑
+        </button>
         <button v-if="canSubmit" type="button" class="btn" :disabled="Boolean(busy)" @click="act('submit')">
           <span v-if="busy === 'submit'" class="spinner" aria-hidden="true"></span>
           提交审核
@@ -224,7 +288,7 @@ async function submitReject() {
         </RouterLink>
       </template>
     </PageIntro>
-    <p v-if="skill?.description" class="prose">{{ skill.description }}</p>
+    <p v-if="skill?.description && !editing" class="prose">{{ skill.description }}</p>
     <section v-if="skill && reviewTitle" class="panel">
       <div class="panel-head">
         <h2>{{ reviewTitle }}</h2>
@@ -233,7 +297,20 @@ async function submitReject() {
       <p class="hint">{{ formatTime(skill.rejected_at) }} · {{ rejectorName || "—" }}</p>
     </section>
     <p v-if="actionError" class="message error" role="alert">{{ actionError }}</p>
+    <SkillDraftForm
+      v-if="editing && skill && mode === 'ready'"
+      :initial="skill"
+      lead="步骤只作为数据保存，不会执行。"
+      submit-label="保存"
+      show-cancel
+      :busy="busy === 'edit'"
+      :form-error="editError"
+      :server-errors="editErrors"
+      @submit="saveEdit"
+      @cancel="cancelEdit"
+    />
     <StatePanel
+      v-if="!editing"
       :loading="mode === 'loading'"
       :error="mode === 'error' ? error : ''"
       :empty="missing"

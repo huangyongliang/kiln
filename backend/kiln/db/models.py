@@ -256,6 +256,14 @@ class SkillRow(Base):
             ondelete="SET NULL",
         ),
     )
+    created_by: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "accounts.id",
+            name="fk_skills_created_by_accounts",
+            ondelete="SET NULL",
+        ),
+    )
     inputs: Mapped[list[SkillInputRow]] = relationship(
         back_populates="skill",
         order_by="SkillInputRow.position",

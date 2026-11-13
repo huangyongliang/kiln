@@ -150,8 +150,8 @@ docker compose --profile lab up
 - 保存字节：`PUT /artifacts/{id}/versions/{version}/content`，请求体是原始字节，并用 `X-Kiln-Checksum-Algorithm`、`X-Kiln-Checksum` 声明校验和。成功后该版本的 `content_available` 为 true
 - 下载预约：`POST /artifacts/{id}/versions/{version}/download-reservations`
 - 取包：`GET /retrieve/{reservation_id}` 返回预约信息。字节已保存时 `content_available` 为 true，`GET /retrieve/{reservation_id}/content` 返回这些字节
-- Skill：`GET /skills` 与 `GET /skills/{id}` 需要 `skill.read`。`POST /skills` 创建草稿，需要 `skill.use`。`POST /skills/{id}/submit-review` 需要 `skill.submit`。`POST /skills/{id}/publish` 需要 `skill.publish`。`POST /skills/{id}/reject` 需要 `skill.publish`，把审核中的 skill 退回草稿，正文 `{"reason":"…"}` 必填
-- 模型：`GET /llm/provider` 仍只需会话或机器令牌，`POST /llm/chat`。对话写入需要 `agent.qa`。只读角色不能调用。对话工具只在 `LLM_PROVIDER=openai` 时运行，可在授权下起草 skill 草稿，或在 skill 发布后发起与 POST /builds 相同的产品构建。`mock` 与 `off` 不调用工具。
+- Skill：`GET /skills` 与 `GET /skills/{id}` 需要 `skill.read`。`POST /skills` 创建草稿，需要 `skill.use`，登录账号会记下 `created_by`。`PATCH /skills/{id}` 用与创建相同的正文替换草稿的可变字段，不改变状态，也不改退回记录。创建者（有 `skill.use`）或有 `skill.publish` 的人可以改草稿；审核中和已发布返回 409。`GET /skills` 可选 `scope=mine`（我产出的）或 `scope=usable`（我能用的已发布 Skill，还需要 `skill.use`），可与 `status` 一起用。省略 `scope` 仍列出全库。`POST /skills/{id}/submit-review` 需要 `skill.submit`。`POST /skills/{id}/publish` 需要 `skill.publish`。`POST /skills/{id}/reject` 需要 `skill.publish`，把审核中的 skill 退回草稿，正文 `{"reason":"…"}` 必填
+- 模型：`GET /llm/provider` 仍只需会话或机器令牌，`POST /llm/chat`。对话写入需要 `agent.qa`。只读角色不能调用。对话可协助起草和改稿，但不能提交审核或发布。列出「我产出的 / 我能用的」使用 `scope`。工具只在 `LLM_PROVIDER=openai` 时运行；`mock` 与 `off` 不调用工具。模型关闭时用表单新建和编辑草稿。发布后的构建仍与 POST /builds 相同。
 - 执行器：`GET /executor`，`POST /jobs`（需要 `executor.run`），`GET /jobs`，`GET /jobs/{id}`，`GET /jobs/{id}/log`。任务记录在 PostgreSQL。状态和日志来自 Jenkins。响应里 `deploys_to_runtime` 为 false。兼容任务只打印调用方给出的标记。读取执行器状态、任务和日志需要 `executor.read`。只读角色没有这项权限
 - 产品构建：`POST /builds`（需要 `executor.run` 与 `skill.use`），`GET /builds`，`GET /builds/{id}`，`GET /builds/{id}/log`。请求体必须给出已发布 skill 的 `skill_id`，以及 `repository`、`ref`、`artifact_name`、`version`、`package_type`。kiln 用当前代码源适配器解析提交，Jenkins 克隆该提交并运行仓库根目录的 `kiln-build.sh`。脚本必须写出 `kiln-dist/artifact.bin`。Skill 步骤不会被执行。构建成功后，这些字节写入 `KILN_ARTIFACT_ROOT`，对应版本的 `content_available` 为 true，`source` 为 `build`。取包接口返回同一组字节。响应里 `deploys_to_runtime` 为 false。读取构建和日志需要 `executor.read`
 - 依赖代理：`GET /dependency-proxy` 需要 `executor.read`。未配置时 `configured` 为 false，`publishes_artifacts` 为 false，并且不向外连接。配置后探测是否可达；失败仍返回 200，`reachable` 为 false。响应不包含口令。制品不发布到 Nexus
@@ -159,7 +159,7 @@ docker compose --profile lab up
 
 Skill 步骤不会被执行。kiln 进程本身不运行 shell。产品构建的 shell 跑在 Jenkins 上。
 
-产品构建必须带一条已发布的 Skill。控制台、`POST /builds` 和对话里的 `build_artifact` 使用同一套请求。对话工具只在 `LLM_PROVIDER=openai` 时运行；`mock` 与 `off` 不调用工具。实验室把已经在跑的 Jenkins 与 Gitea 接到 kiln-app 时，只在本机被 git 忽略的 `.env` 里填写 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN`、`GIT_PROVIDER`、`GIT_BASE_URL`、`GIT_TOKEN`，以及 API 与 Jenkins 网络视角不同时的 `GIT_CLONE_BASE_URL`。地址要填 kiln-app 进程能到达的位置：进程在容器里时，`127.0.0.1` 是容器自己，不是宿主机。不要把地址或令牌写进仓库。`examples/kiln-build.sh` 供运维复制到实验室仓库，不在日常 CI 里对真实 Jenkins 执行。制品字节留在 `KILN_ARTIFACT_ROOT`，不发布、不同步到 Nexus。日常构建保持 `KILN_NEXUS_*` 为空，不使用公司 Nexus。
+产品构建必须带一条已发布的 Skill。控制台、`POST /builds` 和对话里的 `build_artifact` 使用同一套请求。对话可协助起草并改稿，但不能审核或发布；模型关闭时走表单。对话工具只在 `LLM_PROVIDER=openai` 时运行；`mock` 与 `off` 不调用工具。实验室把已经在跑的 Jenkins 与 Gitea 接到 kiln-app 时，只在本机被 git 忽略的 `.env` 里填写 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN`、`GIT_PROVIDER`、`GIT_BASE_URL`、`GIT_TOKEN`，以及 API 与 Jenkins 网络视角不同时的 `GIT_CLONE_BASE_URL`。地址要填 kiln-app 进程能到达的位置：进程在容器里时，`127.0.0.1` 是容器自己，不是宿主机。不要把地址或令牌写进仓库。`examples/kiln-build.sh` 供运维复制到实验室仓库，不在日常 CI 里对真实 Jenkins 执行。制品字节留在 `KILN_ARTIFACT_ROOT`，不发布、不同步到 Nexus。日常构建保持 `KILN_NEXUS_*` 为空，不使用公司 Nexus。
 
 ## 测试
 

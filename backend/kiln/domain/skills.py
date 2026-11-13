@@ -21,6 +21,13 @@ class SkillStatus(str, Enum):
     published = "published"
 
 
+class SkillScope(str, Enum):
+    """Optional list filter. Omitting it keeps the full catalog."""
+
+    mine = "mine"
+    usable = "usable"
+
+
 STATUS_LABELS = {
     SkillStatus.draft: "草稿",
     SkillStatus.in_review: "审核中",
@@ -123,6 +130,7 @@ class Skill(BaseModel):
     output_spec: str | None
     created_at: datetime
     updated_at: datetime
+    created_by: UUID | None = None
     review_note: str | None = None
     rejected_at: datetime | None = None
     rejected_by: UUID | None = None
@@ -136,3 +144,25 @@ class Skill(BaseModel):
 class SkillList(BaseModel):
     persistence: Literal["postgres"] = "postgres"
     items: list[Skill]
+
+
+def may_revise_skill(
+    permissions: frozenset[str] | set[str],
+    account_id: UUID | None,
+    skill: Skill,
+) -> bool:
+    """A publisher may revise any draft. A user may revise their own draft.
+
+    ``skill.use`` plus a matching ``created_by`` is the owner path. Historical
+    rows with a null author are not owned by anyone, so only ``skill.publish``
+    can revise them. Status is checked separately: this does not allow
+    in-review or published skills to be written.
+    """
+
+    if "skill.publish" in permissions:
+        return True
+    return (
+        "skill.use" in permissions
+        and account_id is not None
+        and skill.created_by == account_id
+    )
