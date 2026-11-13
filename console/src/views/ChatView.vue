@@ -10,7 +10,7 @@ import {
   chatModelState,
   chatRequestBody,
   failOutgoingMessage,
-  isDisallowedModelError,
+  shouldRefetchProvider,
   readChatModel,
   readChatThread,
   showModelPicker,
@@ -265,7 +265,7 @@ async function send() {
     const failed = failOutgoingMessage(messages.value, prompt.value);
     messages.value = failed.messages;
     prompt.value = failed.prompt;
-    if (isDisallowedModelError(caught)) {
+    if (shouldRefetchProvider(caught)) {
       await refetchDisallowedModel(outboundModel);
     }
     error.value = isForbidden(caught) ? actionDeniedText("agent.qa") : errorText(caught, "发送失败");

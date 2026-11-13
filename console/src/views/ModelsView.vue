@@ -1,20 +1,26 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 
 import { accessReady, perms } from "../access";
 import { errorText, getJson, isForbidden, putJson } from "../api";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
+import {
+  CATALOG_MAX,
+  DISPLAY_NAME_MAX,
+  ID_DUPLICATE,
+  ID_TOO_LONG,
+  NAME_TOO_LONG,
+  ROLE_ORDER,
+  SAVED_TEXT,
+  TOO_MANY,
+  catalogStatusTag,
+  mapSaveFailure,
+  prepareCatalogSave,
+} from "../models";
 import { canDo, canSee } from "../permissions";
 
-const ROLE_ORDER = ["reader", "builder", "publisher", "admin"];
-const ID_MAX = 128;
-const CATALOG_MAX = 32;
 const ID_EMPTY = "模型 id 不能为空。";
-const ID_TOO_LONG = "模型 id 不能超过 128 个字符，不会截断。";
-const TOO_MANY = "模型目录不能超过 32 项，不会只保留前 32 项。";
-const ID_DUPLICATE = "模型 id 重复。";
-const NAME_TOO_LONG = "显示名不能超过 128 个字符。";
 
 const lead = "维护平台模型目录，并把目录中的模型分配给固定角色。";
 const note =
@@ -34,11 +40,15 @@ const draftName = ref("");
 const mode = ref("loading");
 const error = ref("");
 const formError = ref("");
-const saveError = ref("");
+const saveNotice = ref(null);
+const saveRejected = ref(false);
+const rowErrors = ref({});
+const saveFeedback = ref(null);
 const saving = ref(false);
 const forbidden = ref(false);
 
 const canSave = computed(() => canDo("llm.catalog.update", perms.value));
+const statusTag = computed(() => catalogStatusTag(source.value, saveRejected.value));
 const roleCards = computed(() =>
   ROLE_ORDER.map((id) => {
     const role = roleCatalog.value.find((item) => item && item.id === id);
@@ -123,11 +133,11 @@ function addModel() {
     formError.value = ID_EMPTY;
     return;
   }
-  if (id.length > ID_MAX) {
+  if (id.length > DISPLAY_NAME_MAX) {
     formError.value = ID_TOO_LONG;
     return;
   }
-  if (displayName.length > ID_MAX) {
+  if (displayName.length > DISPLAY_NAME_MAX) {
     formError.value = NAME_TOO_LONG;
     return;
   }
@@ -193,42 +203,64 @@ function roleModels(roleId) {
   return selected[roleId];
 }
 
+function showSaveResult(kind, text) {
+  saveNotice.value = { kind, text };
+  revealSaveResult();
+}
+
+function revealSaveResult() {
+  nextTick(() => {
+    saveFeedback.value?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+}
+
+function clearRowError(index) {
+  if (!rowErrors.value[index]) {
+    return;
+  }
+  const next = { ...rowErrors.value };
+  delete next[index];
+  rowErrors.value = next;
+}
+
+function rejectSave(message, errors) {
+  saveRejected.value = true;
+  rowErrors.value = errors || {};
+  showSaveResult("error", message);
+}
+
 async function save() {
   if (saving.value || !canSave.value) {
     return;
   }
-  saveError.value = "";
-  const ids = rows.value.map((row) => row.id);
-  if (ids.length > CATALOG_MAX) {
-    saveError.value = TOO_MANY;
+  const prepared = prepareCatalogSave({
+    rows: rows.value,
+    globalDefault: globalDefault.value,
+    assignments: selected,
+    roleDefaults: roleDefault,
+  });
+  if (!prepared.ok) {
+    rejectSave(prepared.message, prepared.rowErrors);
     return;
   }
-  if (new Set(ids).size !== ids.length) {
-    saveError.value = ID_DUPLICATE;
-    return;
-  }
-  const payload = {
-    models: rows.value.map((row) => ({
-      id: row.id,
-      display_name: row.displayName.trim() || null,
-    })),
-    default_model: globalDefault.value || null,
-    assignments: ROLE_ORDER.map((roleId) => ({
-      role_id: roleId,
-      models: [...selected[roleId]],
-      default_model: roleDefault[roleId] || null,
-    })),
-  };
   saving.value = true;
   try {
-    const saved = await putJson("/api/v1/llm/catalog", payload);
+    const saved = await putJson("/api/v1/llm/catalog", prepared.body);
     applyDocument(saved);
+    saveRejected.value = false;
+    rowErrors.value = {};
+    showSaveResult("ok", SAVED_TEXT);
   } catch (caught) {
-    if (isForbidden(caught)) {
-      saveError.value = "没有权限（需要：管理模型目录及角色可用模型）";
+    if (caught?.status === 422) {
+      const mapped = mapSaveFailure(errorText(caught, "无法保存模型配置"), rows.value);
+      rejectSave(mapped.message, mapped.rowErrors);
       return;
     }
-    saveError.value = errorText(caught, "无法保存模型配置");
+    if (isForbidden(caught)) {
+      rejectSave("没有权限（需要：管理模型目录及角色可用模型）", {});
+      return;
+    }
+    rejectSave(errorText(caught, "无法保存模型配置"), {});
   } finally {
     saving.value = false;
   }
@@ -240,6 +272,15 @@ async function save() {
   <template v-else>
     <PageIntro title="模型配置" :lead="lead" :note="note">
       <template v-if="mode === 'ready' && canSave" #actions>
+        <p
+          v-if="saveNotice"
+          ref="saveFeedback"
+          class="save-note"
+          :class="{ error: saveNotice.kind === 'error' }"
+          :role="saveNotice.kind === 'error' ? 'alert' : 'status'"
+        >
+          {{ saveNotice.text }}
+        </p>
         <button type="button" class="btn" :disabled="saving" @click="save">
           {{ saving ? "正在保存" : "保存" }}
         </button>
@@ -249,7 +290,9 @@ async function save() {
       <section class="panel" aria-label="连接状态">
         <div class="panel-head">
           <h2>连接状态</h2>
-          <span class="tag">{{ source === "db" ? "已保存" : "尚未保存" }}</span>
+          <span class="tag" :class="{ fail: saveRejected, ok: !saveRejected && source === 'db' }">
+            {{ statusTag }}
+          </span>
         </div>
         <dl class="model-status">
           <div>
@@ -303,10 +346,17 @@ async function save() {
               />
               全局默认
             </label>
-            <span class="mono model-id">{{ row.id }}</span>
+            <span class="mono model-id" :title="row.id">{{ row.id }}</span>
             <label class="field model-name-field">
               显示名
-              <input v-model="row.displayName" type="text" autocomplete="off" />
+              <input
+                v-model="row.displayName"
+                type="text"
+                autocomplete="off"
+                :aria-invalid="Boolean(rowErrors[index])"
+                @input="clearRowError(index)"
+              />
+              <span v-if="rowErrors[index]" class="message error">{{ rowErrors[index] }}</span>
             </label>
             <span class="model-order">
               <button type="button" class="btn btn-ghost" :disabled="index === 0" @click="moveModel(index, -1)">
@@ -346,8 +396,8 @@ async function save() {
                     :checked="roleModels(role.id).includes(row.id)"
                     @change="toggleRoleModel(role.id, row.id, $event.target.checked)"
                   />
-                  <span class="mono">{{ row.id }}</span>
-                  <span v-if="row.displayName">{{ row.displayName }}</span>
+                  <span class="mono" :title="row.id">{{ row.id }}</span>
+                  <span v-if="row.displayName" class="check-name">{{ row.displayName }}</span>
                 </label>
               </li>
             </ul>
@@ -361,7 +411,6 @@ async function save() {
           </article>
         </div>
       </section>
-      <p v-if="saveError" class="message error" role="alert">{{ saveError }}</p>
     </StatePanel>
   </template>
 </template>

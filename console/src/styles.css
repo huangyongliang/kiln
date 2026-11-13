@@ -485,8 +485,10 @@ h2,
 
 .content {
   width: min(1140px, 100%);
+  min-width: 0;
   padding: 22px 28px 40px;
   flex: 1;
+  overflow-x: clip;
 }
 
 .content.chat {
@@ -917,6 +919,12 @@ label {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 14px;
+}
+
+ul.checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 
 .check {
@@ -1741,15 +1749,25 @@ dialog.modal::backdrop {
   list-style: none;
   margin: 12px 0 0;
   padding: 0;
+  min-width: 0;
 }
 
 .model-list li {
   display: grid;
-  grid-template-columns: auto minmax(120px, 1.2fr) minmax(100px, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1.2fr) minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
+  min-width: 0;
   padding: 8px 0;
   border-bottom: 1px solid var(--line);
+}
+
+.model-id {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .model-list li:last-child {
@@ -1764,10 +1782,34 @@ dialog.modal::backdrop {
   max-width: none;
 }
 
+.model-name-field input[aria-invalid="true"] {
+  border-color: var(--clay);
+}
+
+.model-name-field .message {
+  margin: 6px 0 0;
+}
+
 .model-order {
   display: flex;
+  flex-shrink: 0;
   gap: 4px;
   justify-content: flex-end;
+}
+
+.save-note {
+  margin: 0;
+  max-width: 360px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: right;
+  color: var(--glaze);
+}
+
+.save-note.error {
+  color: var(--clay);
+  font-weight: 500;
 }
 
 .role-grid {
@@ -1777,6 +1819,7 @@ dialog.modal::backdrop {
 }
 
 .role-card {
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   padding: 12px 14px;
@@ -1793,7 +1836,25 @@ dialog.modal::backdrop {
 }
 
 .role-card .checks {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
   margin: 8px 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.role-card .check {
+  min-width: 0;
+  max-width: 100%;
+  align-items: flex-start;
+}
+
+.role-card .check .mono,
+.role-card .check-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 :focus-visible {
