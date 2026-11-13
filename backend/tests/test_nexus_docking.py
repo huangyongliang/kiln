@@ -254,22 +254,47 @@ def _build_settings(targets: DockingTargets, root: Path):
     )
 
 
+_BUILD_SCRIPT = r"""#!/bin/sh
+if [ -z "${KILN_CURL_BASH:-}" ]; then
+  KILN_CURL_BASH=1 exec bash "$0" "$@"
+fi
+set +x
+set -eu
+mkdir -p kiln-dist
+url="${KILN_NEXUS_URL%/}/repository/${KILN_NEXUS_REPOSITORY}/__FIXTURE__"
+curl_user_config() {
+  u=$1
+  p=$2
+  case "$u" in
+    *$'\n'*|*$'\r'*)
+      echo "refusing a credential that contains a newline" >&2
+      exit 1
+      ;;
+  esac
+  case "$p" in
+    *$'\n'*|*$'\r'*)
+      echo "refusing a credential that contains a newline" >&2
+      exit 1
+      ;;
+  esac
+  u=${u//\\/\\\\}; u=${u//\"/\\\"}
+  p=${p//\\/\\\\}; p=${p//\"/\\\"}
+  printf 'user = "%s:%s"\n' "$u" "$p"
+}
+if [ -n "${KILN_NEXUS_USERNAME}" ]; then
+  config="$(curl_user_config "$KILN_NEXUS_USERNAME" "$KILN_NEXUS_PASSWORD")" || exit 1
+  printf '%s\n' "$config" | curl -K - -fsS -o kiln-dist/artifact.bin "$url"
+else
+  curl -fsS -o kiln-dist/artifact.bin "$url"
+fi
+test -s kiln-dist/artifact.bin
+"""
+
+
 def _build_script(fixture_path: str) -> str:
-    return (
-        "#!/bin/sh\n"
-        "set +x\n"
-        "set -eu\n"
-        "mkdir -p kiln-dist\n"
-        'url="${KILN_NEXUS_URL%/}/repository/${KILN_NEXUS_REPOSITORY}/'
-        f'{fixture_path}"\n'
-        'if [ -n "${KILN_NEXUS_USERNAME}" ]; then\n'
-        '  curl -fsS --user "${KILN_NEXUS_USERNAME}:${KILN_NEXUS_PASSWORD}" '
-        '-o kiln-dist/artifact.bin "$url"\n'
-        "else\n"
-        '  curl -fsS -o kiln-dist/artifact.bin "$url"\n'
-        "fi\n"
-        "test -s kiln-dist/artifact.bin\n"
-    )
+    if "\n" in fixture_path or "__FIXTURE__" in fixture_path:
+        raise ValueError("fixture path is not safe to embed")
+    return _BUILD_SCRIPT.replace("__FIXTURE__", fixture_path, 1)
 
 
 def _download_fixture(targets: DockingTargets) -> bytes:
