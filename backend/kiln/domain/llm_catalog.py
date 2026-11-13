@@ -6,6 +6,7 @@ does not truncate an illegal list.
 """
 
 import logging
+import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
@@ -13,8 +14,10 @@ from pydantic import BaseModel, ConfigDict
 
 from kiln.config import LLM_MODEL_ID_MAX_LENGTH, LLM_MODELS_MAX_ITEMS, Settings
 from kiln.domain.rbac import ROLES
-from kiln.domain.text import has_invisible_control
 from kiln.errors import Unprocessable
+
+_ILLEGAL_CATALOG_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cs"})
+_HANGUL_FILLER = "\u3164"
 
 logger = logging.getLogger(__name__)
 
@@ -261,7 +264,7 @@ def _assignments(
 
 
 def _model_id(value: str, *, empty: str) -> str:
-    text = value.strip()
+    text = _trim_catalog_text(value)
     if not text:
         raise Unprocessable(empty)
     if len(text) > LLM_MODEL_ID_MAX_LENGTH:
@@ -274,7 +277,7 @@ def _model_id(value: str, *, empty: str) -> str:
 def _optional_model_id(value: str | None) -> str | None:
     if value is None:
         return None
-    text = value.strip()
+    text = _trim_catalog_text(value)
     if not text:
         return None
     if len(text) > LLM_MODEL_ID_MAX_LENGTH:
@@ -287,7 +290,7 @@ def _optional_model_id(value: str | None) -> str | None:
 def _display_name(value: str | None) -> str | None:
     if value is None:
         return None
-    text = value.strip()
+    text = _trim_catalog_text(value)
     if not text:
         return None
     if _illegal_catalog_text(text):
@@ -297,11 +300,32 @@ def _display_name(value: str | None) -> str | None:
     return text
 
 
-def _illegal_catalog_text(text: str) -> bool:
-    """Reject C0 controls, including NUL, plus bidi and zero-width marks.
+def _trim_catalog_text(value: str) -> str:
+    """Trim only Unicode Zs separators. U+0020 is Zs, so an ASCII space is included.
 
-    The invisible set is ``has_invisible_control``. Characters at or above
-    U+0020 that the helper allows, including normal CJK, stay allowed.
+    This is not ``str.strip()``. Tabs, newlines, vertical tabs, form feeds,
+    U+001C–U+001F, and U+FEFF stay in place. The console trims the same set
+    before the same reject check.
     """
 
-    return any(ord(char) < 32 for char in text) or has_invisible_control(text)
+    start = 0
+    end = len(value)
+    while start < end and unicodedata.category(value[start]) == "Zs":
+        start += 1
+    while end > start and unicodedata.category(value[end - 1]) == "Zs":
+        end -= 1
+    return value[start:end]
+
+
+def _illegal_catalog_text(text: str) -> bool:
+    """Reject controls, format marks, separators, private use, and surrogates.
+
+    Categories Cc, Cf, Zl, Zp, Co, and Cs cover NUL, DEL, C1, bidi overrides,
+    zero-width marks, line and paragraph separators, and tag characters.
+    U+3164 is rejected as well: its category is Lo. Normal CJK stays allowed.
+    """
+
+    for char in text:
+        if char == _HANGUL_FILLER or unicodedata.category(char) in _ILLEGAL_CATALOG_CATEGORIES:
+            return True
+    return False

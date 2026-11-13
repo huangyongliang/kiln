@@ -1,7 +1,9 @@
 """Admin model catalog, role assignment, and per-caller chat enforcement."""
 
 import asyncio
+import json
 import logging
+from pathlib import Path
 
 import httpx
 import pytest
@@ -24,8 +26,11 @@ from kiln.domain.llm_catalog import (
     ROLE_SET_INVALID,
     SEED_OVER_LIMIT_MESSAGE,
     TOO_MANY,
+    CatalogReplace,
+    validate_catalog_replace,
 )
 from kiln.domain.rbac import permissions_for
+from kiln.errors import Unprocessable
 from kiln.main import create_app
 from tests.support import app_settings, auth_headers, truncate_domain
 
@@ -526,6 +531,127 @@ def test_mock_ignores_a_saved_catalog_and_still_hides_models() -> None:
     assert SECRET not in catalog.text
     assert chat.status_code == 200
     assert chat.json()["model"] == "not-assigned"
+
+
+_LISTED_ILLEGAL_CODEPOINTS = (
+    0x007F,
+    0x0085,
+    0x00AD,
+    0x061C,
+    0x200C,
+    0x200D,
+    0x200E,
+    0x200F,
+    0x2028,
+    0x2029,
+    0x3164,
+    0xE0001,
+)
+
+
+@pytest.mark.parametrize("codepoint", _LISTED_ILLEGAL_CODEPOINTS)
+def test_catalog_rejects_each_listed_illegal_codepoint_in_id_and_display_name(
+    codepoint: int,
+) -> None:
+    sample = chr(codepoint)
+    app = create_app(
+        app_settings(
+            llm_provider="openai",
+            llm_base_url="http://llm.example/v1",
+            llm_model="model-a",
+            llm_models="model-a",
+        )
+    )
+    with TestClient(app, headers=auth_headers()) as client:
+        truncate_domain(client.app.state.engine)
+        before = client.get("/api/v1/llm/catalog").json()
+        bad_id = client.put(
+            "/api/v1/llm/catalog",
+            json=_replace(
+                [{"id": f"model-{sample}a", "display_name": "通义千问"}],
+                None,
+                {},
+            ),
+        )
+        bad_name = client.put(
+            "/api/v1/llm/catalog",
+            json=_replace(
+                [{"id": "model-a", "display_name": f"通义{sample}千问"}],
+                "model-a",
+                {},
+            ),
+        )
+        assert bad_id.status_code == 422, bad_id.text
+        assert bad_id.json()["detail"] == ID_ILLEGAL
+        assert bad_name.status_code == 422, bad_name.text
+        assert bad_name.json()["detail"] == NAME_ILLEGAL
+        assert client.get("/api/v1/llm/catalog").json() == before
+
+
+def test_catalog_trim_parity_matches_the_shared_fixture() -> None:
+    fixture = json.loads(
+        (Path(__file__).resolve().parent / "fixtures" / "catalog_trim_parity.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    id_base = fixture["idBase"]
+    name_base = fixture["nameBase"]
+    for case in fixture["cases"]:
+        sample = chr(int(case["cp"], 16))
+        for where in ("start", "interior", "end"):
+            verdict = case[where]
+            _assert_id_trim(sample, id_base, where, verdict)
+            _assert_name_trim(sample, name_base, where, verdict)
+
+
+def _assert_id_trim(sample: str, base: str, where: str, verdict: str) -> None:
+    placed = _place_catalog_text(base, sample, where)
+    payload = _replace(
+        [{"id": placed, "display_name": "通义千问"}],
+        placed,
+        {"builder": ([placed], placed)},
+    )
+    try:
+        snapshot = validate_catalog_replace(CatalogReplace.model_validate(payload))
+    except Unprocessable as exc:
+        assert verdict == "reject", (hex(ord(sample)), where, exc.detail)
+        assert exc.detail == ID_ILLEGAL
+        return
+    assert verdict in {"trim", "keep"}, (hex(ord(sample)), where)
+    expected = base if verdict == "trim" else placed
+    assert snapshot.model_ids() == (expected,)
+    assert snapshot.default_model == expected
+    builder = next(item for item in snapshot.assignments if item.role_id == "builder")
+    assert builder.models == (expected,)
+    assert builder.default_model == expected
+
+
+def _assert_name_trim(sample: str, base: str, where: str, verdict: str) -> None:
+    placed = _place_catalog_text(base, sample, where)
+    payload = _replace(
+        [{"id": "model-a", "display_name": placed}],
+        "model-a",
+        {},
+    )
+    try:
+        snapshot = validate_catalog_replace(CatalogReplace.model_validate(payload))
+    except Unprocessable as exc:
+        assert verdict == "reject", (hex(ord(sample)), where, exc.detail)
+        assert exc.detail == NAME_ILLEGAL
+        return
+    assert verdict in {"trim", "keep"}, (hex(ord(sample)), where)
+    expected = base if verdict == "trim" else placed
+    assert snapshot.models[0].display_name == expected
+
+
+def _place_catalog_text(base: str, sample: str, where: str) -> str:
+    if where == "start":
+        return sample + base
+    if where == "end":
+        return base + sample
+    chars = list(base)
+    mid = len(chars) // 2
+    return "".join(chars[:mid] + [sample] + chars[mid:])
 
 
 def test_catalog_text_rejects_control_invisible_and_bidi_characters() -> None:

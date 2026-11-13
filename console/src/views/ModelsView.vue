@@ -15,6 +15,8 @@ import {
   SAVED_TEXT,
   SEED_OVER_LIMIT,
   TOO_MANY,
+  addModelIdError,
+  trimCatalogText,
   catalogStatusTag,
   mapSaveFailure,
   prepareCatalogSave,
@@ -130,10 +132,15 @@ function applyDocument(body) {
 
 function addModel() {
   formError.value = "";
-  const id = draftId.value.trim();
-  const displayName = draftName.value.trim();
+  const id = trimCatalogText(draftId.value);
+  const displayName = trimCatalogText(draftName.value);
   if (!id) {
     formError.value = ID_EMPTY;
+    return;
+  }
+  const illegalId = addModelIdError(id);
+  if (illegalId) {
+    formError.value = illegalId;
     return;
   }
   if (id.length > DISPLAY_NAME_MAX) {

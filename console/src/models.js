@@ -19,25 +19,42 @@ export const SAVED_TEXT = "已保存";
 export const SAVE_FAILED_TAG = "保存失败";
 export const UNSAVED_TAG = "尚未保存";
 
-export function hasIllegalCatalogText(value) {
-  const text = String(value ?? "");
-  for (const char of text) {
-    const code = char.codePointAt(0);
-    if (code < 32) {
-      return true;
-    }
-    if ((code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069)) {
-      return true;
-    }
-    if (code === 0x200b || code === 0x2060 || code === 0xfeff) {
-      return true;
-    }
+const ILLEGAL_CATALOG_CHAR = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cs}\u3164]/u;
+
+// Trim only Unicode Zs separators, including ASCII space U+0020.
+// Do not use String.prototype.trim(): it also strips U+FEFF and does not
+// strip U+001C–U+001F, which would disagree with the server.
+export function trimCatalogText(value) {
+  const chars = [...String(value ?? "")];
+  let start = 0;
+  let end = chars.length;
+  while (start < end && isCatalogSpace(chars[start])) {
+    start += 1;
   }
-  return false;
+  while (end > start && isCatalogSpace(chars[end - 1])) {
+    end -= 1;
+  }
+  return chars.slice(start, end).join("");
+}
+
+function isCatalogSpace(char) {
+  return /^\p{Zs}$/u.test(char);
+}
+
+export function hasIllegalCatalogText(value) {
+  return ILLEGAL_CATALOG_CHAR.test(String(value ?? ""));
+}
+
+export function addModelIdError(value) {
+  const text = trimCatalogText(value);
+  if (hasIllegalCatalogText(text)) {
+    return ID_ILLEGAL;
+  }
+  return "";
 }
 
 export function displayNameError(value) {
-  const text = String(value ?? "").trim();
+  const text = trimCatalogText(value);
   if (hasIllegalCatalogText(text)) {
     return NAME_ILLEGAL;
   }
@@ -67,19 +84,31 @@ export function prepareCatalogSave({ rows, globalDefault, assignments, roleDefau
     return {
       ok: false,
       rowErrors: indexMap(nameErrors),
-      message: rowMessage(nameErrors, NAME_TOO_LONG),
+      message: noteForRows(nameErrors),
       body: null,
     };
   }
   if (list.length > CATALOG_MAX) {
     return { ok: false, rowErrors: {}, message: TOO_MANY, body: null };
   }
+  const idErrors = [];
+  for (const [index, row] of list.entries()) {
+    const id = trimCatalogText(row?.id);
+    if (hasIllegalCatalogText(id)) {
+      idErrors.push({ index, id: rowLabel(row, index), message: ID_ILLEGAL });
+    }
+  }
+  if (idErrors.length) {
+    return {
+      ok: false,
+      rowErrors: indexMap(idErrors),
+      message: noteForRows(idErrors),
+      body: null,
+    };
+  }
   const seen = new Set();
   for (const row of list) {
-    const id = String(row?.id ?? "").trim();
-    if (hasIllegalCatalogText(id)) {
-      return { ok: false, rowErrors: {}, message: ID_ILLEGAL, body: null };
-    }
+    const id = trimCatalogText(row?.id);
     if (seen.has(id)) {
       return { ok: false, rowErrors: {}, message: ID_DUPLICATE, body: null };
     }
@@ -91,14 +120,14 @@ export function prepareCatalogSave({ rows, globalDefault, assignments, roleDefau
     message: "",
     body: {
       models: list.map((row) => ({
-        id: row.id,
-        display_name: String(row.displayName ?? "").trim() || null,
+        id: trimCatalogText(row?.id),
+        display_name: trimCatalogText(row?.displayName) || null,
       })),
-      default_model: globalDefault || null,
+      default_model: trimCatalogText(globalDefault) || null,
       assignments: ROLE_ORDER.map((roleId) => ({
         role_id: roleId,
-        models: [...(assignments?.[roleId] || [])],
-        default_model: roleDefaults?.[roleId] || null,
+        models: [...(assignments?.[roleId] || [])].map((id) => trimCatalogText(id)),
+        default_model: trimCatalogText(roleDefaults?.[roleId]) || null,
       })),
     },
   };
@@ -125,14 +154,14 @@ function rowsForDetail(detail, rows) {
   }
   if (detail === ID_ILLEGAL) {
     return list.flatMap((row, index) =>
-      hasIllegalCatalogText(String(row?.id ?? "").trim())
+      hasIllegalCatalogText(trimCatalogText(row?.id))
         ? [{ index, id: rowLabel(row, index), message: detail }]
         : [],
     );
   }
   if (detail === ID_TOO_LONG) {
     return list.flatMap((row, index) =>
-      String(row?.id ?? "").trim().length > DISPLAY_NAME_MAX
+      trimCatalogText(row?.id).length > DISPLAY_NAME_MAX
         ? [{ index, id: rowLabel(row, index), message: detail }]
         : [],
     );
@@ -140,11 +169,11 @@ function rowsForDetail(detail, rows) {
   if (detail === ID_DUPLICATE) {
     const counts = new Map();
     for (const row of list) {
-      const id = String(row?.id ?? "").trim();
+      const id = trimCatalogText(row?.id);
       counts.set(id, (counts.get(id) || 0) + 1);
     }
     return list.flatMap((row, index) =>
-      counts.get(String(row?.id ?? "").trim()) > 1
+      counts.get(trimCatalogText(row?.id)) > 1
         ? [{ index, id: rowLabel(row, index), message: detail }]
         : [],
     );
@@ -153,8 +182,22 @@ function rowsForDetail(detail, rows) {
 }
 
 function rowLabel(row, index) {
-  const id = String(row?.id ?? "").trim();
+  const id = trimCatalogText(row?.id);
   return id || `第 ${index + 1} 项`;
+}
+
+function noteForRows(matches) {
+  const groups = new Map();
+  for (const item of matches) {
+    const labels = groups.get(item.message) ?? [];
+    if (!labels.includes(item.id)) {
+      labels.push(item.id);
+    }
+    groups.set(item.message, labels);
+  }
+  return [...groups.entries()]
+    .map(([message, labels]) => `${labels.join("、")}：${message}`)
+    .join("");
 }
 
 function rowMessage(matches, detail) {
