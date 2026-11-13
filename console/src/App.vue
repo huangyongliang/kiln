@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 
-import { accessReady, account, loadAccess, perms, roleTags } from "./access";
+import { accessReady, account, ensureAccess, perms, roleTags } from "./access";
 import { requestJson } from "./api";
 import AppIcon from "./components/AppIcon.vue";
 import { pageCrumb } from "./crumb";
@@ -33,6 +33,7 @@ const baseCrumbs = {
   artifact: "制品",
   skills: "Skill",
   skill: "Skill",
+  "skill-new": "Skill",
   access: "账号与权限",
   chat: "对话",
 };
@@ -58,7 +59,7 @@ watch(
       return;
     }
     token.value = readApiToken();
-    loadAccess().catch(() => {});
+    ensureAccess().catch(() => {});
     if (!healthStarted) {
       healthStarted = true;
       loadHealth();
@@ -75,7 +76,7 @@ function navActive(link) {
     return route.name === "artifacts" || route.name === "artifact";
   }
   if (link.route === "skills") {
-    return route.name === "skills" || route.name === "skill";
+    return route.name === "skills" || route.name === "skill" || route.name === "skill-new";
   }
   return route.name === link.route;
 }

@@ -2,13 +2,16 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
-import { accessReady, perms } from "../access";
-import { errorText, getJson, isForbidden, postEmpty } from "../api";
+import { accessReady, actionDeniedText, perms } from "../access";
+import { errorText, getJson, isForbidden, postEmpty, postJson } from "../api";
+import FormDialog from "../components/FormDialog.vue";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
 import StatusTag from "../components/StatusTag.vue";
 import { pageCrumb } from "../crumb";
-import { stepLabel } from "../format";
+import { codePointLength, fieldErrors, rejectReasonError } from "../forms";
+import { formatTime, stepLabel } from "../format";
+import { apiPath, isUuid } from "../paths";
 import { canDo, canSee } from "../permissions";
 
 const route = useRoute();
@@ -16,8 +19,14 @@ const skill = ref(null);
 const mode = ref("loading");
 const error = ref("");
 const forbidden = ref(false);
+const missing = ref(false);
 const busy = ref("");
 const actionError = ref("");
+const rejectOpen = ref(false);
+const rejectReason = ref("");
+const rejectError = ref("");
+const rejectField = ref("");
+const rejectorName = ref("");
 
 const canSubmit = computed(
   () => skill.value?.status === "draft" && canDo("skill.submit", perms.value),
@@ -25,6 +34,22 @@ const canSubmit = computed(
 const canPublish = computed(
   () => skill.value?.status === "in_review" && canDo("skill.publish", perms.value),
 );
+const canReject = computed(
+  () => skill.value?.status === "in_review" && canDo("skill.reject", perms.value),
+);
+const reviewTitle = computed(() => {
+  if (!skill.value?.review_note || skill.value.status === "published") {
+    return "";
+  }
+  if (skill.value.status === "draft") {
+    return "退回原因";
+  }
+  if (skill.value.status === "in_review") {
+    return "上次退回原因";
+  }
+  return "";
+});
+const reasonCount = computed(() => codePointLength(rejectReason.value.trim()));
 
 onMounted(load);
 watch(
@@ -36,10 +61,22 @@ watch(accessReady, (ready) => {
     load();
   }
 });
+watch(skill, (value) => {
+  loadRejector(value);
+});
 
 async function load() {
   forbidden.value = false;
   actionError.value = "";
+  missing.value = false;
+  const id = route.params.id;
+  if (!isUuid(id)) {
+    skill.value = null;
+    missing.value = true;
+    mode.value = "ready";
+    pageCrumb.value = "Skill";
+    return;
+  }
   if (accessReady.value && !canSee("skill", perms.value)) {
     forbidden.value = true;
     return;
@@ -47,7 +84,7 @@ async function load() {
   mode.value = "loading";
   error.value = "";
   try {
-    skill.value = await getJson(`/api/v1/skills/${route.params.id}`);
+    skill.value = await getJson(apiPath`/api/v1/skills/${id}`);
     pageCrumb.value = `Skill / ${skill.value.name}`;
     mode.value = "ready";
   } catch (caught) {
@@ -56,25 +93,93 @@ async function load() {
       return;
     }
     mode.value = "error";
-    error.value = errorText(caught, "无法读取 skill");
+    error.value = errorText(caught, "无法读取 Skill");
   }
 }
 
 async function act(kind) {
-  if (busy.value) {
+  const id = route.params.id;
+  if (busy.value || !isUuid(id)) {
     return;
   }
   busy.value = kind;
   actionError.value = "";
   const path =
     kind === "submit"
-      ? `/api/v1/skills/${route.params.id}/submit-review`
-      : `/api/v1/skills/${route.params.id}/publish`;
+      ? apiPath`/api/v1/skills/${id}/submit-review`
+      : apiPath`/api/v1/skills/${id}/publish`;
   try {
     skill.value = await postEmpty(path);
     pageCrumb.value = `Skill / ${skill.value.name}`;
   } catch (caught) {
-    actionError.value = errorText(caught, kind === "submit" ? "无法提交审核" : "无法发布");
+    if (isForbidden(caught)) {
+      actionError.value = actionDeniedText(kind === "submit" ? "skill.submit" : "skill.publish");
+    } else {
+      actionError.value = errorText(caught, kind === "submit" ? "无法提交审核" : "无法发布");
+    }
+  } finally {
+    busy.value = "";
+  }
+}
+
+async function loadRejector(value) {
+  rejectorName.value = "";
+  if (!value?.review_note || value.status === "published") {
+    return;
+  }
+  if (!value.rejected_by) {
+    rejectorName.value = value.rejected_at ? "机器令牌" : "—";
+    return;
+  }
+  if (!canDo("account.read", perms.value)) {
+    rejectorName.value = "—";
+    return;
+  }
+  try {
+    const person = await getJson(apiPath`/api/v1/accounts/${value.rejected_by}`);
+    rejectorName.value = person.display_name || person.username || "—";
+  } catch {
+    rejectorName.value = "—";
+  }
+}
+
+function openReject() {
+  rejectReason.value = "";
+  rejectError.value = "";
+  rejectField.value = "";
+  rejectOpen.value = true;
+}
+
+function closeReject() {
+  rejectOpen.value = false;
+}
+
+async function submitReject() {
+  const id = route.params.id;
+  const message = rejectReasonError(rejectReason.value);
+  rejectField.value = message;
+  rejectError.value = "";
+  if (message || busy.value || !isUuid(id)) {
+    return;
+  }
+  busy.value = "reject";
+  try {
+    skill.value = await postJson(apiPath`/api/v1/skills/${id}/reject`, {
+      reason: rejectReason.value.trim(),
+    });
+    pageCrumb.value = `Skill / ${skill.value.name}`;
+    rejectOpen.value = false;
+  } catch (caught) {
+    if (isForbidden(caught)) {
+      rejectError.value = actionDeniedText("skill.publish");
+      return;
+    }
+    const mapped = fieldErrors(caught?.detail);
+    if (mapped.reason) {
+      rejectField.value = mapped.reason;
+      return;
+    }
+    rejectError.value = errorText(caught, "无法退回草稿");
   } finally {
     busy.value = "";
   }
@@ -84,17 +189,21 @@ async function act(kind) {
 <template>
   <StatePanel v-if="forbidden" forbidden forbidden-code="skill.read" />
   <template v-else>
-    <PageIntro :title="skill?.name || 'Skill'" lead="步骤只作为数据保存，不会执行。">
+    <PageIntro :title="skill?.name || 'Skill'">
       <template v-if="skill" #meta>
         <p class="meta-row">
           <StatusTag :status="skill.status" :label="skill.status_label" />
+          <span v-if="skill.status === 'draft' && skill.review_note" class="tag">已退回</span>
           <span class="mono">{{ skill.version }}</span>
         </p>
       </template>
-      <template v-if="canSubmit || canPublish" #actions>
+      <template v-if="canSubmit || canPublish || canReject" #actions>
         <button v-if="canSubmit" type="button" class="btn" :disabled="Boolean(busy)" @click="act('submit')">
           <span v-if="busy === 'submit'" class="spinner" aria-hidden="true"></span>
           提交审核
+        </button>
+        <button v-if="canReject" type="button" class="btn btn-secondary" :disabled="Boolean(busy)" @click="openReject">
+          退回草稿
         </button>
         <button v-if="canPublish" type="button" class="btn" :disabled="Boolean(busy)" @click="act('publish')">
           <span v-if="busy === 'publish'" class="spinner" aria-hidden="true"></span>
@@ -103,8 +212,21 @@ async function act(kind) {
       </template>
     </PageIntro>
     <p v-if="skill?.description" class="prose">{{ skill.description }}</p>
+    <section v-if="skill && reviewTitle" class="panel">
+      <div class="panel-head">
+        <h2>{{ reviewTitle }}</h2>
+      </div>
+      <p class="review-note">{{ skill.review_note }}</p>
+      <p class="hint">{{ formatTime(skill.rejected_at) }} · {{ rejectorName || "—" }}</p>
+    </section>
     <p v-if="actionError" class="message error" role="alert">{{ actionError }}</p>
-    <StatePanel :loading="mode === 'loading'" :error="mode === 'error' ? error : ''" @retry="load">
+    <StatePanel
+      :loading="mode === 'loading'"
+      :error="mode === 'error' ? error : ''"
+      :empty="missing"
+      empty-text="不存在"
+      @retry="load"
+    >
       <div v-if="skill" class="grid-2 even">
         <section class="panel">
           <div class="panel-head">
@@ -144,5 +266,20 @@ async function act(kind) {
         </section>
       </div>
     </StatePanel>
+    <FormDialog
+      v-if="rejectOpen"
+      title="退回草稿"
+      :busy="busy === 'reject'"
+      :error="rejectError"
+      @close="closeReject"
+      @submit="submitReject"
+    >
+      <div class="field">
+        <label for="reject-reason">原因</label>
+        <textarea id="reject-reason" v-model="rejectReason" rows="5"></textarea>
+        <p class="counter">{{ reasonCount }}/500</p>
+        <p v-if="rejectField" class="field-error">{{ rejectField }}</p>
+      </div>
+    </FormDialog>
   </template>
 </template>

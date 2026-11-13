@@ -87,6 +87,14 @@ h2,
   letter-spacing: -0.01em;
 }
 
+.section-gap {
+  margin: 18px 0 10px;
+}
+
+.perm-line {
+  margin: 2px 0;
+}
+
 .brand-lockup {
   display: flex;
   align-items: center;
@@ -484,6 +492,8 @@ h2,
 .content.chat {
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .footnote {
@@ -585,7 +595,7 @@ h2,
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(var(--n, 3), minmax(0, 1fr));
   gap: 14px;
   margin-bottom: 14px;
 }
@@ -812,6 +822,27 @@ tr:last-child td {
   text-decoration: underline;
 }
 
+.copy-control {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  vertical-align: middle;
+}
+
+.copy-fallback {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.copy-fallback input {
+  display: block;
+  width: min(420px, 70vw);
+  margin-top: 4px;
+}
+
 .field {
   margin-bottom: 12px;
 }
@@ -826,6 +857,7 @@ label {
 
 .field input,
 .field textarea,
+.field select,
 .search,
 .composer textarea,
 .login-card input {
@@ -851,6 +883,7 @@ label {
 
 .field input:focus,
 .field textarea:focus,
+.field select:focus,
 .search:focus,
 .composer textarea:focus,
 .login-card input:focus {
@@ -867,6 +900,111 @@ label {
   color: var(--muted);
   font-size: 12px;
   margin: 8px 0 0;
+}
+
+.dialog-hint {
+  margin-top: 0;
+  margin-bottom: 12px;
+}
+
+.field-error {
+  margin: 6px 0 0;
+  color: var(--clay);
+  font-size: 12px;
+}
+
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-weight: 500;
+}
+
+.check input {
+  width: auto;
+  max-width: none;
+}
+
+.review-note {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  unicode-bidi: isolate;
+}
+
+.counter {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+}
+
+.push-end {
+  margin-left: auto;
+}
+
+.repeat {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.repeat-row {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr) auto auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.steps-row {
+  grid-template-columns: 140px minmax(0, 1fr) auto;
+}
+
+dialog.modal {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 20px 22px 16px;
+  background: var(--paper);
+  color: var(--ink);
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  box-shadow: var(--shadow);
+}
+
+dialog.modal::backdrop {
+  background: rgba(25, 20, 16, 0.48);
+}
+
+.modal h2 {
+  margin-bottom: 14px;
+}
+
+.modal .field input,
+.modal .field textarea,
+.modal .field select,
+.skill-form .field input,
+.skill-form .field textarea,
+.skill-form .field select {
+  max-width: none;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.reserve-download {
+  margin: 14px 0 0;
 }
 
 .or {
@@ -1142,17 +1280,41 @@ label {
   border-color: transparent;
 }
 
+.shell:has(.content.chat) {
+  height: 100vh;
+  overflow: hidden;
+}
+
+.shell:has(.content.chat) .workspace {
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .chat-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chat-page > .page-head {
+  flex: none;
+}
+
+.chat-layout {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
 }
 
-.chat-layout {
-  display: flex;
-  flex-direction: column;
-  min-height: calc(100vh - 230px);
+.chat-layout .suggest,
+.chat-layout .composer,
+.chat-layout .hint,
+.chat-layout .message {
+  flex: none;
 }
 
 .messages {
@@ -1160,6 +1322,7 @@ label {
   flex-direction: column;
   gap: 10px;
   flex: 1;
+  min-height: 0;
   overflow: auto;
   padding-bottom: 8px;
 }
@@ -1180,10 +1343,22 @@ label {
 
 .bubble.user {
   align-self: flex-end;
-  background: var(--ember);
-  color: #fff;
+  background: var(--ember-soft);
+  color: var(--ink);
   border-color: transparent;
   border-radius: 16px 16px 6px 16px;
+}
+
+.bubble.failed {
+  border-color: var(--clay);
+}
+
+.fail-mark {
+  display: block;
+  margin-top: 4px;
+  color: var(--clay);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .suggest {

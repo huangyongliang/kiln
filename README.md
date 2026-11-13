@@ -190,7 +190,7 @@ cd console && npm run build
 
 GitHub Actions 会跑后端测试、控制台的 `npm test` 与 `npm run build`、`docker compose config`，以及单独的 `nexus-docking` 作业。该作业在 `127.0.0.1:28081` 启动一次性容器 `kiln-ci-depproxy`，不进入 compose。
 
-本地登录，以及用户信息同步的起步已经接上：控制台有登录页，口令只保存哈希，会话写在 Postgres。未配置公司用户系统时使用本地口令。配置之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。`KILN_API_TOKEN` 仍是必填的机器和开发访问令牌。
+本地登录，以及用户信息同步的起步已经接上：控制台有登录页，口令只保存哈希，会话写在 Postgres。未配置公司用户系统时使用本地口令。配置之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。`KILN_API_TOKEN` 仍是必填的机器和开发访问令牌。控制台可新建账号、起草与审核 skill、发起构建、登记与上传制品（单次 ≤1 MB）、预约下载。
 
 ## 不做的事
 

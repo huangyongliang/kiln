@@ -2,12 +2,23 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRouter } from "vue-router";
 
-import { accessReady, perms } from "../access";
+import { accessReady, actionDeniedText, perms } from "../access";
 import { errorText, getJson, isForbidden, isNotConfigured, postJson } from "../api";
+import FormDialog from "../components/FormDialog.vue";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
 import StatusTag from "../components/StatusTag.vue";
+import {
+  artifactNameError,
+  buildNameError,
+  fieldErrors,
+  packageTypeError,
+  refError,
+  repositoryError,
+  versionError,
+} from "../forms";
 import { formatTime, shortSha } from "../format";
+import { apiPath } from "../paths";
 import { canDo, canSee } from "../permissions";
 
 const note =
@@ -42,9 +53,28 @@ const active = ref(null);
 const logText = ref("");
 const busy = ref(false);
 const actionError = ref("");
+const buildOpen = ref(false);
+const buildBusy = ref(false);
+const buildError = ref("");
+const buildErrors = ref({});
+const repository = ref("");
+const refName = ref("");
+const artifactName = ref("");
+const buildVersion = ref("");
+const packageType = ref("generic");
+const taskName = ref("");
 let timer = 0;
 
 const showSource = computed(() => perms.value == null || canDo("git.read", perms.value));
+const canCreateBuild = computed(
+  () => Boolean(executor.value?.configured) && canDo("build.create", perms.value),
+);
+const PACKAGE_OPTIONS = [
+  ["maven", "Maven"],
+  ["python", "Python"],
+  ["generic", "通用包"],
+  ["frontend", "前端构建包"],
+];
 const showJobForm = computed(
   () => Boolean(executor.value?.configured) && canDo("job.create", perms.value),
 );
@@ -70,6 +100,12 @@ onUnmounted(stopPoll);
 watch(accessReady, (ready) => {
   if (ready) {
     load();
+  }
+});
+watch(repository, (value) => {
+  const match = repositories.value.find((item) => item.full_name === value.trim());
+  if (match?.default_branch) {
+    refName.value = match.default_branch;
   }
 });
 
@@ -204,7 +240,9 @@ async function createJob() {
     await refreshActive();
     await loadJobs();
   } catch (caught) {
-    actionError.value = errorText(caught, "无法创建任务");
+    actionError.value = isForbidden(caught)
+      ? actionDeniedText("executor.run")
+      : errorText(caught, "无法创建任务");
   } finally {
     busy.value = false;
   }
@@ -214,10 +252,11 @@ async function refreshActive() {
   if (!active.value) {
     return;
   }
+  const id = active.value.id;
   try {
-    active.value = await getJson(`/api/v1/jobs/${active.value.id}`);
+    active.value = await getJson(apiPath`/api/v1/jobs/${id}`);
     if (active.value.build_number) {
-      const log = await getJson(`/api/v1/jobs/${active.value.id}/log`);
+      const log = await getJson(apiPath`/api/v1/jobs/${id}/log`);
       logText.value = log.text;
     }
     if (TERMINAL.includes(active.value.status)) {
@@ -230,7 +269,92 @@ async function refreshActive() {
 }
 
 function openBuild(id) {
-  router.push(`/builds/${id}`);
+  router.push({ name: "build", params: { id } });
+}
+
+function openBuildForm() {
+  repository.value = "";
+  refName.value = "";
+  artifactName.value = "";
+  buildVersion.value = "";
+  packageType.value = "generic";
+  taskName.value = "";
+  buildError.value = "";
+  buildErrors.value = {};
+  buildOpen.value = true;
+}
+
+function closeBuildForm() {
+  buildOpen.value = false;
+}
+
+async function submitBuild() {
+  if (buildBusy.value) {
+    return;
+  }
+  const local = {};
+  const repositoryMessage = repositoryError(repository.value);
+  if (repositoryMessage) {
+    local.repository = repositoryMessage;
+  }
+  const refMessage = refError(refName.value);
+  if (refMessage) {
+    local.ref = refMessage;
+  }
+  const nameMessage = artifactNameError(artifactName.value.trim());
+  if (nameMessage) {
+    local.artifact_name = nameMessage;
+  }
+  const versionMessage = versionError(buildVersion.value.trim());
+  if (versionMessage) {
+    local.version = versionMessage;
+  }
+  const typeMessage = packageTypeError(packageType.value);
+  if (typeMessage) {
+    local.package_type = typeMessage;
+  }
+  const taskMessage = buildNameError(taskName.value);
+  if (taskMessage) {
+    local.name = taskMessage;
+  }
+  buildErrors.value = local;
+  buildError.value = "";
+  if (Object.keys(local).length) {
+    return;
+  }
+  const payload = {
+    repository: repository.value.trim(),
+    ref: refName.value.trim(),
+    artifact_name: artifactName.value.trim(),
+    version: buildVersion.value.trim(),
+    package_type: packageType.value,
+  };
+  const named = taskName.value.trim();
+  if (named) {
+    payload.name = named;
+  }
+  buildBusy.value = true;
+  try {
+    const created = await postJson("/api/v1/builds", payload);
+    buildOpen.value = false;
+    await router.push({ name: "build", params: { id: created.id } });
+  } catch (caught) {
+    if (isForbidden(caught)) {
+      buildError.value = actionDeniedText("executor.run");
+      return;
+    }
+    const mapped = fieldErrors(caught?.detail);
+    if (caught?.status === 409) {
+      mapped.artifact_name = mapped.artifact_name || caught.message;
+    }
+    if (Object.keys(mapped).length) {
+      buildErrors.value = mapped;
+      return;
+    }
+    buildError.value = errorText(caught, "无法发起构建");
+  } finally {
+    buildBusy.value = false;
+  }
 }
 </script>
 
@@ -280,6 +404,9 @@ function openBuild(id) {
           >
             {{ item[1] }}
           </button>
+          <button v-if="canCreateBuild" type="button" class="btn push-end" @click="openBuildForm">
+            发起构建
+          </button>
         </div>
         <StatePanel
           :loading="buildsMode === 'loading'"
@@ -315,7 +442,7 @@ function openBuild(id) {
                   @click="openBuild(item.id)"
                 >
                   <td class="mono nowrap">
-                    <RouterLink class="linkish" :to="`/builds/${item.id}`" @click.stop>
+                    <RouterLink class="linkish" :to="{ name: 'build', params: { id: item.id } }" @click.stop>
                       {{ item.build_number ?? "—" }}
                     </RouterLink>
                   </td>
@@ -415,5 +542,57 @@ function openBuild(id) {
         </div>
       </section>
     </StatePanel>
+    <FormDialog
+      v-if="buildOpen"
+      title="发起构建"
+      :busy="buildBusy"
+      :error="buildError"
+      @close="closeBuildForm"
+      @submit="submitBuild"
+    >
+      <p class="hint dialog-hint">每次构建会登记一个新制品，名称不能与已有的无组制品重复。</p>
+      <div class="field">
+        <label for="build-repository">仓库</label>
+        <input
+          id="build-repository"
+          v-model="repository"
+          type="text"
+          autocomplete="off"
+          placeholder="owner/name"
+          :list="repositories.length ? 'build-repos' : undefined"
+        />
+        <datalist v-if="showSource && repositories.length" id="build-repos">
+          <option v-for="item in repositories" :key="item.full_name" :value="item.full_name" />
+        </datalist>
+        <p v-if="buildErrors.repository" class="field-error">{{ buildErrors.repository }}</p>
+      </div>
+      <div class="field">
+        <label for="build-ref">引用</label>
+        <input id="build-ref" v-model="refName" type="text" autocomplete="off" />
+        <p v-if="buildErrors.ref" class="field-error">{{ buildErrors.ref }}</p>
+      </div>
+      <div class="field">
+        <label for="build-artifact">制品名</label>
+        <input id="build-artifact" v-model="artifactName" type="text" autocomplete="off" />
+        <p v-if="buildErrors.artifact_name" class="field-error">{{ buildErrors.artifact_name }}</p>
+      </div>
+      <div class="field">
+        <label for="build-version">版本</label>
+        <input id="build-version" v-model="buildVersion" type="text" autocomplete="off" />
+        <p v-if="buildErrors.version" class="field-error">{{ buildErrors.version }}</p>
+      </div>
+      <div class="field">
+        <label for="build-type">类型</label>
+        <select id="build-type" v-model="packageType">
+          <option v-for="item in PACKAGE_OPTIONS" :key="item[0]" :value="item[0]">{{ item[1] }}</option>
+        </select>
+        <p v-if="buildErrors.package_type" class="field-error">{{ buildErrors.package_type }}</p>
+      </div>
+      <div class="field">
+        <label for="build-task">任务名</label>
+        <input id="build-task" v-model="taskName" type="text" autocomplete="off" />
+        <p v-if="buildErrors.name" class="field-error">{{ buildErrors.name }}</p>
+      </div>
+    </FormDialog>
   </template>
 </template>

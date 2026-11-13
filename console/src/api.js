@@ -1,4 +1,5 @@
-import { clearAccount, writeFlash } from "./session";
+import { fieldMessage } from "./forms";
+import { clearAccount, readAccount, writeFlash } from "./session";
 import { readApiToken } from "./token";
 
 function errorDetail(body, status) {
@@ -9,7 +10,7 @@ function errorDetail(body, status) {
     return body.detail;
   }
   if (Array.isArray(body.detail)) {
-    return body.detail.map((item) => item.msg || "参数不正确").join("；");
+    return body.detail.map((item) => fieldMessage(item)).join("；");
   }
   return `请求失败（${status}）`;
 }
@@ -21,8 +22,10 @@ function isSessionExpiry(path, status) {
   return !path.startsWith("/api/v1/auth/login") && !path.startsWith("/api/v1/auth/sync");
 }
 
-export async function requestJson(path, options = {}) {
+async function send(path, options = {}) {
   const token = readApiToken();
+  const rawBody = options.body;
+  const jsonBody = rawBody != null && !(rawBody instanceof Blob);
   let response;
   try {
     response = await fetch(path, {
@@ -31,7 +34,7 @@ export async function requestJson(path, options = {}) {
       headers: {
         Accept: "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...(jsonBody ? { "Content-Type": "application/json" } : {}),
         ...(options.headers || {}),
       },
     });
@@ -52,16 +55,37 @@ export async function requestJson(path, options = {}) {
   if (!response.ok) {
     const error = new Error(errorDetail(body, response.status));
     error.status = response.status;
+    error.detail = body ? body.detail : null;
     if (isSessionExpiry(path, response.status)) {
+      const hadAccount = Boolean(readAccount());
       clearAccount();
       if (window.location.pathname !== "/login") {
-        writeFlash("登录已过期，请重新登录");
+        if (hadAccount) {
+          writeFlash("登录已过期，请重新登录");
+        }
         window.location.assign("/login");
       }
     }
     throw error;
   }
-  return body;
+  return { status: response.status, body };
+}
+
+export async function requestJson(path, options = {}) {
+  const result = await send(path, options);
+  return result.body;
+}
+
+export async function putBytes(path, blob, headers = {}) {
+  const result = await send(path, {
+    method: "PUT",
+    body: blob,
+    headers: {
+      "Content-Type": "application/octet-stream",
+      ...headers,
+    },
+  });
+  return result;
 }
 
 export function getJson(path) {

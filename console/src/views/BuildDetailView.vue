@@ -9,6 +9,7 @@ import StatePanel from "../components/StatePanel.vue";
 import StatusTag from "../components/StatusTag.vue";
 import { pageCrumb } from "../crumb";
 import { formatTime, packageLabel, shortSha } from "../format";
+import { apiPath, isUuid } from "../paths";
 import { canSee } from "../permissions";
 
 const TERMINAL = new Set(["success", "failure", "unstable", "aborted", "not_built"]);
@@ -20,6 +21,7 @@ const truncated = ref(false);
 const mode = ref("loading");
 const error = ref("");
 const forbidden = ref(false);
+const missing = ref(false);
 let timer = 0;
 
 onMounted(load);
@@ -43,6 +45,14 @@ async function load() {
   stop();
   forbidden.value = false;
   error.value = "";
+  missing.value = false;
+  if (!isUuid(route.params.id)) {
+    build.value = null;
+    missing.value = true;
+    mode.value = "ready";
+    pageCrumb.value = "构建";
+    return;
+  }
   if (accessReady.value && !canSee("build", perms.value)) {
     forbidden.value = true;
     mode.value = "ready";
@@ -56,14 +66,18 @@ async function load() {
 }
 
 async function refresh() {
+  const id = route.params.id;
+  if (!isUuid(id)) {
+    return false;
+  }
   try {
-    const next = await getJson(`/api/v1/builds/${route.params.id}`);
+    const next = await getJson(apiPath`/api/v1/builds/${id}`);
     build.value = next;
     pageCrumb.value = `构建 / ${next.build_number ? `#${next.build_number}` : shortSha(next.commit_sha)}`;
     mode.value = "ready";
     if (next.build_number) {
       try {
-        const log = await getJson(`/api/v1/builds/${next.id}/log`);
+        const log = await getJson(apiPath`/api/v1/builds/${next.id}/log`);
         logText.value = log.text || "";
         truncated.value = Boolean(log.truncated);
       } catch (caught) {
@@ -112,8 +126,8 @@ async function refresh() {
     <StatePanel
       :loading="mode === 'loading'"
       :error="mode === 'error' ? error : ''"
-      :empty="mode === 'unconfigured'"
-      empty-text="执行器未配置"
+      :empty="missing || mode === 'unconfigured'"
+      :empty-text="missing ? '不存在' : '执行器未配置'"
       @retry="load"
     >
       <section v-if="build" class="panel">
@@ -132,7 +146,7 @@ async function refresh() {
           <dd>{{ packageLabel(build.package_type) }}</dd>
           <dt>制品</dt>
           <dd>
-            <RouterLink class="linkish" :to="`/artifacts/${build.artifact_id}`">查看制品</RouterLink>
+            <RouterLink class="linkish" :to="{ name: 'artifact', params: { id: build.artifact_id } }">查看制品</RouterLink>
           </dd>
           <dt>创建</dt>
           <dd>{{ formatTime(build.created_at) }}</dd>
