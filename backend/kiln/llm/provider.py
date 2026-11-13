@@ -2,14 +2,15 @@
 
 `openai` posts to `{LLM_BASE_URL}/chat/completions`. The chat route may pass a
 server-owned `tools` array into `complete_turn`. `mock` and `off` only implement
-`complete` and never receive that array. They exist so local work can continue
-before an endpoint is ready; they are not the only path.
+`complete` and never receive that array, so their completions leave `actions`
+empty. They exist so local work can continue before an endpoint is ready; they
+are not the only path.
 """
 
 import json
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -32,6 +33,16 @@ class ChatRequest(BaseModel):
     model: str | None = Field(default=None, max_length=128)
 
 
+class ChatAction(BaseModel):
+    """A write this turn completed. Failures stay in the tool result only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["skill_drafted", "build_started"]
+    id: UUID
+    name: str
+
+
 class ChatCompletion(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -40,6 +51,7 @@ class ChatCompletion(BaseModel):
     model: str
     content: str
     finish_reason: str
+    actions: list[ChatAction] = Field(default_factory=list)
 
 
 class ProviderStatus(BaseModel):

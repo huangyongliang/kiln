@@ -134,6 +134,17 @@ async function refresh() {
         <dl class="kv">
           <dt>编号</dt>
           <dd class="mono">{{ build.build_number ?? "—" }}</dd>
+          <dt>Skill</dt>
+          <dd>
+            <RouterLink
+              v-if="build.skill_id"
+              class="linkish"
+              :to="{ name: 'skill', params: { id: build.skill_id } }"
+            >
+              {{ build.skill_name || "Skill" }}
+            </RouterLink>
+            <template v-else>无 Skill</template>
+          </dd>
           <dt>仓库</dt>
           <dd>{{ build.repository }}</dd>
           <dt>引用</dt>

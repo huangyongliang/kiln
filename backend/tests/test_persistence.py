@@ -302,11 +302,38 @@ def test_artifact_bytes_survive_api_process_restart() -> None:
         second_log.close()
 
 
+def test_product_build_skill_migration_round_trip(client: TestClient) -> None:
+    """skill_id appears at head and is gone at 0006_skill_rejection."""
+
+    cfg = _alembic_config(postgres_url())
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0007_product_build_skill"]
+    engine = client.app.state.engine
+    try:
+        command.downgrade(cfg, "0006_skill_rejection")
+        names = {column["name"] for column in inspect(engine).get_columns("product_builds")}
+        assert "skill_id" not in names
+        command.upgrade(cfg, "head")
+        columns = {
+            column["name"]: column for column in inspect(engine).get_columns("product_builds")
+        }
+        assert columns["skill_id"]["nullable"] is True
+        with engine.connect() as connection:
+            constraint = connection.execute(
+                text(
+                    "SELECT confrelid::regclass::text FROM pg_constraint "
+                    "WHERE conname = 'fk_product_builds_skill_id_skills'"
+                )
+            ).scalar_one()
+        assert constraint == "skills"
+    finally:
+        command.upgrade(cfg, "head")
+
+
 def test_skill_rejection_migration_round_trip(client: TestClient) -> None:
     """Drop the rejection columns at 0005_local_login, then restore them at head."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0006_skill_rejection"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0007_product_build_skill"]
     engine = client.app.state.engine
     try:
         command.downgrade(cfg, "0005_local_login")

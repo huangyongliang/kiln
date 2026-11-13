@@ -90,6 +90,27 @@ def require_database() -> None:
         engine.dispose()
 
 
+def publish_skill(
+    client: Any,
+    name: str,
+    repositories: list[str] | None = None,
+) -> dict[str, Any]:
+    """Create, submit, and publish a skill. Returns the published JSON body."""
+
+    payload: dict[str, Any] = {"name": name, "version": "0.1.0"}
+    if repositories is not None:
+        payload["allowed_repositories"] = list(repositories)
+    created = client.post("/api/v1/skills", json=payload)
+    assert created.status_code == 201, created.text
+    skill_id = created.json()["id"]
+    submitted = client.post(f"/api/v1/skills/{skill_id}/submit-review")
+    assert submitted.status_code == 200, submitted.text
+    published = client.post(f"/api/v1/skills/{skill_id}/publish")
+    assert published.status_code == 200, published.text
+    assert published.json()["status"] == "published"
+    return published.json()
+
+
 def truncate_domain(engine: Engine) -> None:
     if any(_IDENT.fullmatch(name) is None for name in DOMAIN_TABLES):
         raise RuntimeError("refusing to truncate an unexpected table name")

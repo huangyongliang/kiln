@@ -1338,7 +1338,18 @@ dialog.modal::backdrop {
   border: 1px solid var(--line);
   border-radius: 16px 16px 16px 6px;
   padding: 10px 14px;
+}
+
+.bubble-text {
+  margin: 0;
   white-space: pre-wrap;
+}
+
+.bubble-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 8px 0 0;
 }
 
 .bubble.user {

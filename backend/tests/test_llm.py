@@ -61,6 +61,7 @@ def test_mock_mode_does_not_call_network() -> None:
     assert "super-secret-value" not in schema
     assert chat.status_code == 200
     assert chat.json()["provider"] == "mock"
+    assert chat.json()["actions"] == []
     assert "打包" in chat.json()["content"]
 
 
@@ -103,6 +104,7 @@ def test_openai_mode_posts_chat_completions() -> None:
     assert response.json()["provider"] == "openai"
     assert response.json()["content"] == "pong"
     assert response.json()["model"] == "demo-model"
+    assert response.json()["actions"] == []
     assert seen["url"] == "http://llm.example/v1/chat/completions"
     assert seen["authorization"] == "Bearer test-key"
     assert seen["body"] == {
@@ -115,6 +117,50 @@ def test_openai_mode_posts_chat_completions() -> None:
         "draft_skill",
         "build_artifact",
     ]
+
+
+def test_openai_forwards_prior_turns() -> None:
+    seen: dict[str, object] = {}
+    prior = [
+        {"role": "system", "content": "只回答构建问题"},
+        {"role": "user", "content": "第一问"},
+        {"role": "assistant", "content": "第一答"},
+        {"role": "user", "content": "第二问"},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content.decode())
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-history",
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "第二答"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        app = create_app(
+            app_settings(
+                llm_provider="openai",
+                llm_base_url="http://llm.example/v1",
+                llm_api_key="test-key",
+                llm_model="demo-model",
+            ),
+            http_client=http_client,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
+            response = client.post("/api/v1/llm/chat", json={"messages": prior})
+    assert response.status_code == 200
+    assert response.json()["content"] == "第二答"
+    assert response.json()["actions"] == []
+    body = seen["body"]
+    assert isinstance(body, dict)
+    assert body["messages"] == prior
 
 
 def test_openai_mode_omits_authorization_when_key_is_empty() -> None:

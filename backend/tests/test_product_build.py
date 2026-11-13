@@ -17,12 +17,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from kiln.db.engine import create_db_engine
+from kiln.domain.builds import repository_in_skill_scope
+from kiln.domain.jobs import JobStatus
 from kiln.errors import BadRequest
 from kiln.executor.script import product_build_command, product_job_config
 from kiln.git.refs import parse_ref
 from kiln.main import create_app
 from tests.external import ExternalTargets, external_settings
-from tests.support import auth_headers, postgres_url, truncate_domain
+from tests.support import app_settings, auth_headers, postgres_url, publish_skill, truncate_domain
 from tests.test_persistence import _start_api, _stop, _wait_healthy
 
 _BUILD_SCRIPT = """#!/bin/sh
@@ -102,6 +104,173 @@ def test_unconfigured_product_build_does_not_deploy(client: TestClient) -> None:
     assert client.get("/api/v1/builds").status_code == 503
 
 
+def test_repository_scope_compares_normalized_owner_and_raw_entries() -> None:
+    assert repository_in_skill_scope("group/demo", []) is True
+    assert repository_in_skill_scope(" group/demo ", ["group/demo"]) is True
+    assert repository_in_skill_scope("org/team/app", ["  org/team/app  "]) is True
+    assert repository_in_skill_scope("group/demo", ["other/repo"]) is False
+    assert repository_in_skill_scope("Group/Demo", ["group/demo"]) is False
+    assert repository_in_skill_scope("group/demo", ["lab repo"]) is False
+    assert repository_in_skill_scope("group/demo", ["group/demo/"]) is False
+
+
+def test_product_build_requires_a_published_skill_and_keeps_bytes_local(tmp_path: Path) -> None:
+    app, git, jenkins = _ready_executor(tmp_path)
+    payload = b"kiln-bytes\n"
+    jenkins.payload = payload
+    with TestClient(app, headers=auth_headers()) as client:
+        truncate_domain(app.state.engine)
+        missing = client.post("/api/v1/builds", json=_body())
+        assert missing.status_code == 422
+        invalid = client.post("/api/v1/builds", json=_body(skill_id="not-a-uuid"))
+        assert invalid.status_code == 422
+        absent = client.post(
+            "/api/v1/builds",
+            json=_body(skill_id="00000000-0000-4000-8000-0000000000aa"),
+        )
+        assert absent.status_code == 404
+        assert absent.json()["detail"] == "skill 不存在"
+
+        draft = client.post(
+            "/api/v1/skills",
+            json={"name": "still-draft", "version": "0.1.0", "allowed_repositories": ["ada/demo"]},
+        )
+        assert draft.status_code == 201, draft.text
+        draft_id = draft.json()["id"]
+        denied_draft = client.post("/api/v1/builds", json=_body(skill_id=draft_id))
+        assert denied_draft.status_code == 409
+        assert denied_draft.json()["detail"] == "只有已发布的 Skill 可以发起构建"
+        submitted = client.post(f"/api/v1/skills/{draft_id}/submit-review")
+        assert submitted.status_code == 200, submitted.text
+        denied_review = client.post("/api/v1/builds", json=_body(skill_id=draft_id))
+        assert denied_review.status_code == 409
+
+        narrow = publish_skill(client, "narrow-flow", ["other/repo"])
+        outside = client.post("/api/v1/builds", json=_body(skill_id=narrow["id"]))
+        assert outside.status_code == 422
+        assert outside.json()["detail"] == "仓库不在该 Skill 的允许范围内"
+        assert jenkins.calls == []
+        assert git.calls == []
+        with app.state.engine.connect() as connection:
+            assert connection.execute(text("SELECT count(*) FROM product_builds")).scalar_one() == 0
+            assert connection.execute(text("SELECT count(*) FROM artifacts")).scalar_one() == 0
+
+        open_skill = publish_skill(client, "open-flow", [])
+        created = client.post(
+            "/api/v1/builds",
+            json=_body(skill_id=open_skill["id"], artifact_name="open-pkg"),
+        )
+        assert created.status_code == 201, created.text
+        build = created.json()
+        assert build["skill_id"] == open_skill["id"]
+        assert build["skill_name"] == "open-flow"
+        assert build["deploys_to_runtime"] is False
+        assert build["repository"] == "ada/demo"
+        finished = client.get(f"/api/v1/builds/{build['id']}")
+        assert finished.status_code == 200, finished.text
+        stored = finished.json()
+        assert stored["status"] == "success"
+        assert stored["content_available"] is True
+        assert stored["deploys_to_runtime"] is False
+        assert stored["skill_id"] == open_skill["id"]
+        digest = hashlib.sha256(payload).hexdigest()
+        assert (tmp_path / "artifacts" / "sha256" / digest).read_bytes() == payload
+        assert jenkins.parameters is None
+        assert [call[0] for call in jenkins.calls].count("trigger_build") == 1
+
+        spaced = publish_skill(client, "spaced-flow", ["  ada/demo  "])
+        matched = client.post(
+            "/api/v1/builds",
+            json=_body(
+                skill_id=spaced["id"],
+                repository=" ada/demo ",
+                artifact_name="spaced-pkg",
+            ),
+        )
+        assert matched.status_code == 201, matched.text
+        assert matched.json()["skill_name"] == "spaced-flow"
+        assert matched.json()["repository"] == "ada/demo"
+
+        legacy_id = uuid4()
+        artifact = client.post(
+            "/api/v1/artifacts",
+            json={"name": "legacy-pkg", "package_type": "generic"},
+        )
+        assert artifact.status_code == 201, artifact.text
+        app.state.builds.create_build(
+            build_id=legacy_id,
+            name="legacy",
+            jenkins_job_name=f"kiln-build-{legacy_id.hex}",
+            repository="ada/demo",
+            ref="main",
+            commit_sha="b" * 40,
+            artifact_id=artifact.json()["id"],
+            version="1.0.0",
+            package_type="generic",
+            queue_url=None,
+        )
+        app.state.builds.save_run(legacy_id, status=JobStatus.failure, build_number=1)
+        listed = client.get("/api/v1/builds")
+        assert listed.status_code == 200, listed.text
+        legacy = next(item for item in listed.json()["items"] if item["id"] == str(legacy_id))
+        assert legacy["skill_id"] is None
+        assert legacy["skill_name"] is None
+        detail = client.get(f"/api/v1/builds/{legacy_id}")
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["skill_id"] is None
+        assert detail.json()["skill_name"] is None
+        with app.state.engine.connect() as connection:
+            builds = connection.execute(text("SELECT count(*) FROM product_builds")).scalar_one()
+        assert builds == 3
+        assert [call[0] for call in jenkins.calls].count("trigger_build") == 2
+        assert git.calls
+
+
+def test_post_build_requires_executor_run_and_skill_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, git, jenkins = _ready_executor(tmp_path)
+    with TestClient(app, headers=auth_headers()) as client:
+        truncate_domain(app.state.engine)
+        skill = publish_skill(client, "gated-flow", ["ada/demo"])
+        created = client.post(
+            "/api/v1/accounts",
+            json={
+                "username": "ada_split",
+                "display_name": "拆分",
+                "password": "correct-horse-1",
+                "role_ids": ["builder"],
+            },
+        )
+        assert created.status_code == 201, created.text
+        session = TestClient(app)
+        logged = session.post(
+            "/api/v1/auth/login",
+            json={"username": "ada_split", "password": "correct-horse-1"},
+        )
+        assert logged.status_code == 200, logged.text
+        payload = _body(skill_id=skill["id"])
+        from kiln import auth
+
+        for codes in (frozenset({"executor.run"}), frozenset({"skill.use"})):
+            monkeypatch.setattr(
+                auth,
+                "permissions_for",
+                lambda _role_ids, granted=codes: granted,
+            )
+            denied = session.post("/api/v1/builds", json=payload)
+            assert denied.status_code == 403
+            assert denied.json()["detail"] == "没有权限"
+        with app.state.engine.connect() as connection:
+            builds = connection.execute(text("SELECT count(*) FROM product_builds")).scalar_one()
+            artifacts = connection.execute(text("SELECT count(*) FROM artifacts")).scalar_one()
+        assert builds == 0
+        assert artifacts == 0
+        assert jenkins.calls == []
+        assert git.calls == []
+
+
 def test_product_build_stores_repository_bytes_and_retrieve_returns_them(
     external_targets: ExternalTargets,
     tmp_path: Path,
@@ -130,9 +299,11 @@ def test_product_build_stores_repository_bytes_and_retrieve_returns_them(
         sha = _commit_sha(external_targets, full_name, "main")
         with TestClient(app, headers=auth_headers()) as client:
             truncate_domain(app.state.engine)
+            skill = publish_skill(client, f"flow-{uuid4().hex[:8]}", [full_name])
             created = client.post(
                 "/api/v1/builds",
                 json={
+                    "skill_id": skill["id"],
                     "repository": full_name,
                     "ref": "main",
                     "name": "product",
@@ -144,6 +315,8 @@ def test_product_build_stores_repository_bytes_and_retrieve_returns_them(
             assert created.status_code == 201, _show(created, token)
             _reject_secret(created.text, token)
             build = created.json()
+            assert build["skill_id"] == skill["id"]
+            assert build["skill_name"] == skill["name"]
             assert build["deploys_to_runtime"] is False
             assert build["status"] == "queued"
             assert build["content_available"] is False
@@ -433,6 +606,90 @@ def _delete_gitea_repo(targets: ExternalTargets, full_name: str) -> None:
         timeout=30,
         trust_env=False,
     )
+
+
+class _Resolved:
+    def __init__(self, sha: str) -> None:
+        self.sha = sha
+
+
+class _RecordingGit:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    def resolve_ref(self, owner: str, name: str, ref: str) -> _Resolved:
+        self.calls.append(("resolve_ref", owner, name, ref))
+        return _Resolved("a" * 40)
+
+    def authenticated_username(self) -> str:
+        self.calls.append(("authenticated_username",))
+        return "kiln"
+
+
+class _RecordingJenkins:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.parameters: dict[str, str] | None = None
+        self.payload = b"kiln-bytes\n"
+
+    def create_product_job(self, job_name: str, **_kwargs: object) -> None:
+        self.calls.append(("create_product_job", job_name))
+
+    def trigger_build(
+        self,
+        job_name: str,
+        *,
+        parameters: dict[str, str] | None = None,
+    ) -> str:
+        self.calls.append(("trigger_build", job_name))
+        self.parameters = parameters
+        return "http://127.0.0.1:9/queue/item/1/"
+
+    def delete_job(self, job_name: str) -> None:
+        self.calls.append(("delete_job", job_name))
+
+    def read_progress(self, *_args: object, **_kwargs: object) -> tuple[str, int]:
+        return "success", 1
+
+    def download_artifact(self, *_args: object, **_kwargs: object) -> bytes:
+        return self.payload
+
+    def read_log(self, *_args: object, **_kwargs: object) -> tuple[str, bool]:
+        return "log", False
+
+
+class _NexusSpy:
+    def __getattr__(self, name: str) -> object:
+        raise AssertionError(f"nexus {name} was called")
+
+
+def _ready_executor(tmp_path: Path):
+    app = create_app(
+        app_settings(
+            git_base_url="http://127.0.0.1:9",
+            git_clone_base_url="http://127.0.0.1:9",
+            git_token="test-token",
+            kiln_artifact_root=str(tmp_path / "artifacts"),
+        )
+    )
+    git = _RecordingGit()
+    jenkins = _RecordingJenkins()
+    app.state.git_source = git
+    app.state.jenkins = jenkins
+    app.state.nexus = _NexusSpy()
+    return app, git, jenkins
+
+
+def _body(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "repository": "ada/demo",
+        "ref": "main",
+        "artifact_name": "demo-pkg",
+        "version": "1.0.0",
+        "package_type": "generic",
+    }
+    payload.update(overrides)
+    return payload
 
 
 def _jenkins_names(targets: ExternalTargets) -> set[str]:

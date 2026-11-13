@@ -347,6 +347,8 @@ class ProductBuildRow(Base):
     """A Jenkins product build. Bytes live in artifact storage, not in this row.
 
     The row does not store a git token and does not deploy to a runtime.
+    ``skill_id`` is null only for rows created before a published skill was
+    required. New rows set it. Deleting a skill is out of scope.
     """
 
     __tablename__ = "product_builds"
@@ -382,6 +384,11 @@ class ProductBuildRow(Base):
     build_number: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     content_stored: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    skill_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("skills.id", name="fk_product_builds_skill_id_skills"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

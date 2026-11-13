@@ -12,7 +12,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from kiln import clock
-from kiln.db.models import ArtifactVersionRow, ProductBuildRow
+from kiln.db.models import ArtifactVersionRow, ProductBuildRow, SkillRow
 from kiln.domain.artifacts import PackageType
 from kiln.domain.builds import ProductBuild
 from kiln.domain.jobs import JobStatus
@@ -36,6 +36,8 @@ class StoredBuild:
         build_number: int | None,
         status: JobStatus,
         content_stored: bool,
+        skill_id: UUID | None,
+        skill_name: str | None,
         created_at: datetime,
         updated_at: datetime,
     ) -> None:
@@ -52,6 +54,8 @@ class StoredBuild:
         self.build_number = build_number
         self.status = status
         self.content_stored = content_stored
+        self.skill_id = skill_id
+        self.skill_name = skill_name
         self.created_at = created_at
         self.updated_at = updated_at
 
@@ -59,6 +63,8 @@ class StoredBuild:
         return ProductBuild(
             id=self.id,
             name=self.name,
+            skill_id=self.skill_id,
+            skill_name=self.skill_name,
             jenkins_job_name=self.jenkins_job_name,
             repository=self.repository,
             ref=self.ref,
@@ -86,14 +92,14 @@ class BuildStore:
             rows = session.scalars(
                 select(ProductBuildRow).order_by(ProductBuildRow.created_at, ProductBuildRow.id)
             ).all()
-            return [_stored(row) for row in rows]
+            return [_stored(session, row) for row in rows]
 
     def get_build(self, build_id: UUID) -> StoredBuild:
         with self._session() as session:
             row = session.get(ProductBuildRow, build_id)
             if row is None:
                 raise NotFound("构建不存在")
-            return _stored(row)
+            return _stored(session, row)
 
     def create_build(
         self,
@@ -108,6 +114,7 @@ class BuildStore:
         version: str,
         package_type: str,
         queue_url: str | None,
+        skill_id: UUID | None = None,
     ) -> StoredBuild:
         now = clock.utcnow()
         row = ProductBuildRow(
@@ -124,13 +131,14 @@ class BuildStore:
             build_number=None,
             status=JobStatus.queued.value,
             content_stored=False,
+            skill_id=skill_id,
             created_at=now,
             updated_at=now,
         )
         with self._session() as session:
             session.add(row)
             session.commit()
-            return _stored(row)
+            return _stored(session, row)
 
     def save_run(
         self,
@@ -147,7 +155,7 @@ class BuildStore:
             row.build_number = build_number
             row.updated_at = clock.utcnow()
             session.commit()
-            return _stored(row)
+            return _stored(session, row)
 
     def mark_content_stored(self, build_id: UUID) -> StoredBuild:
         with self._session() as session:
@@ -157,7 +165,7 @@ class BuildStore:
             row.content_stored = True
             row.updated_at = clock.utcnow()
             session.commit()
-            return _stored(row)
+            return _stored(session, row)
 
     def version_has_bytes(self, artifact_id: UUID, version: str) -> bool:
         with self._session() as session:
@@ -165,7 +173,13 @@ class BuildStore:
             return bool(row is not None and row.content_available and row.blob_key)
 
 
-def _stored(row: ProductBuildRow) -> StoredBuild:
+def _skill_name(session: Session, skill_id: UUID | None) -> str | None:
+    if skill_id is None:
+        return None
+    return session.scalar(select(SkillRow.name).where(SkillRow.id == skill_id))
+
+
+def _stored(session: Session, row: ProductBuildRow) -> StoredBuild:
     return StoredBuild(
         id=row.id,
         name=row.name,
@@ -180,6 +194,8 @@ def _stored(row: ProductBuildRow) -> StoredBuild:
         build_number=row.build_number,
         status=JobStatus(row.status),
         content_stored=row.content_stored,
+        skill_id=row.skill_id,
+        skill_name=_skill_name(session, row.skill_id),
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

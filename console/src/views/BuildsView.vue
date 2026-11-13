@@ -1,8 +1,8 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { RouterLink, useRouter } from "vue-router";
+import { RouterLink, useRoute, useRouter } from "vue-router";
 
-import { accessReady, actionDeniedText, perms } from "../access";
+import { accessReady, actionDeniedText, permissionDescription, perms } from "../access";
 import { errorText, getJson, isForbidden, isNotConfigured, postJson } from "../api";
 import FormDialog from "../components/FormDialog.vue";
 import PageIntro from "../components/PageIntro.vue";
@@ -18,7 +18,7 @@ import {
   versionError,
 } from "../forms";
 import { formatTime, shortSha } from "../format";
-import { apiPath } from "../paths";
+import { apiPath, isUuid } from "../paths";
 import { canDo, canSee } from "../permissions";
 
 const note =
@@ -33,6 +33,7 @@ const roleText = {
 const TERMINAL = ["success", "failure", "unstable", "aborted", "not_built"];
 
 const router = useRouter();
+const route = useRoute();
 const tab = ref("product");
 const executor = ref(null);
 const source = ref(null);
@@ -58,6 +59,11 @@ const buildBusy = ref(false);
 const buildError = ref("");
 const buildErrors = ref({});
 const repository = ref("");
+const publishedSkills = ref([]);
+const skillsReady = ref(false);
+const skillLoadError = ref("");
+const skillId = ref("");
+const openedQuery = ref("");
 const refName = ref("");
 const artifactName = ref("");
 const buildVersion = ref("");
@@ -66,8 +72,11 @@ const taskName = ref("");
 let timer = 0;
 
 const showSource = computed(() => perms.value == null || canDo("git.read", perms.value));
+const canStartBuild = computed(
+  () => canDo("executor.run", perms.value) && canDo("skill.create", perms.value),
+);
 const canCreateBuild = computed(
-  () => Boolean(executor.value?.configured) && canDo("build.create", perms.value),
+  () => Boolean(executor.value?.configured) && canStartBuild.value,
 );
 const PACKAGE_OPTIONS = [
   ["maven", "Maven"],
@@ -88,7 +97,15 @@ const filteredBuilds = computed(() => {
     if (!needle) {
       return true;
     }
-    return [item.repository, item.ref, item.commit_sha, item.version, item.build_number, item.name]
+    return [
+      item.repository,
+      item.ref,
+      item.commit_sha,
+      item.version,
+      item.build_number,
+      item.name,
+      item.skill_name,
+    ]
       .join(" ")
       .toLowerCase()
       .includes(needle);
@@ -144,7 +161,31 @@ async function load() {
     pageError.value = errorText(caught, "无法读取执行器");
     return;
   }
-  await Promise.all([loadBuilds(), loadJobs(), loadSource()]);
+  await Promise.all([loadBuilds(), loadJobs(), loadSource(), loadPublishedSkills()]);
+}
+
+function querySkill() {
+  const value = route.query.skill;
+  return typeof value === "string" ? value.trim() : "";
+}
+
+async function loadPublishedSkills() {
+  publishedSkills.value = [];
+  skillLoadError.value = "";
+  if (!canStartBuild.value && perms.value != null) {
+    skillsReady.value = true;
+    return;
+  }
+  try {
+    const body = await getJson("/api/v1/skills?status=published");
+    publishedSkills.value = body.items || [];
+  } catch (caught) {
+    if (!isForbidden(caught)) {
+      skillLoadError.value = errorText(caught, "无法读取已发布的 Skill");
+    }
+  } finally {
+    skillsReady.value = true;
+  }
 }
 
 async function loadBuilds() {
@@ -273,16 +314,37 @@ function openBuild(id) {
 }
 
 function openBuildForm() {
+  const requested = querySkill();
   repository.value = "";
   refName.value = "";
   artifactName.value = "";
   buildVersion.value = "";
   packageType.value = "generic";
   taskName.value = "";
+  skillId.value = isUuid(requested) ? requested : "";
   buildError.value = "";
   buildErrors.value = {};
+  if (
+    skillId.value &&
+    skillsReady.value &&
+    !publishedSkills.value.some((item) => item.id === skillId.value)
+  ) {
+    buildErrors.value = { skill_id: "请选择已发布的 Skill" };
+  }
   buildOpen.value = true;
 }
+
+watch([canCreateBuild, skillsReady, () => route.query.skill], () => {
+  const requested = querySkill();
+  if (!canCreateBuild.value || !skillsReady.value || !isUuid(requested)) {
+    return;
+  }
+  if (openedQuery.value === requested) {
+    return;
+  }
+  openedQuery.value = requested;
+  openBuildForm();
+});
 
 function closeBuildForm() {
   buildOpen.value = false;
@@ -293,6 +355,12 @@ async function submitBuild() {
     return;
   }
   const local = {};
+  if (
+    !isUuid(skillId.value) ||
+    !publishedSkills.value.some((item) => item.id === skillId.value)
+  ) {
+    local.skill_id = "请选择已发布的 Skill";
+  }
   const repositoryMessage = repositoryError(repository.value);
   if (repositoryMessage) {
     local.repository = repositoryMessage;
@@ -323,6 +391,7 @@ async function submitBuild() {
     return;
   }
   const payload = {
+    skill_id: skillId.value,
     repository: repository.value.trim(),
     ref: refName.value.trim(),
     artifact_name: artifactName.value.trim(),
@@ -340,12 +409,24 @@ async function submitBuild() {
     await router.push({ name: "build", params: { id: created.id } });
   } catch (caught) {
     if (isForbidden(caught)) {
-      buildError.value = actionDeniedText("executor.run");
+      buildError.value =
+        `没有权限（需要：${permissionDescription("executor.run")}、` +
+        `${permissionDescription("skill.use")}）`;
       return;
     }
     const mapped = fieldErrors(caught?.detail);
+    if (caught?.status === 404) {
+      mapped.skill_id = caught.message;
+    }
     if (caught?.status === 409) {
-      mapped.artifact_name = mapped.artifact_name || caught.message;
+      if (String(caught.message).includes("Skill")) {
+        mapped.skill_id = caught.message;
+      } else {
+        mapped.artifact_name = mapped.artifact_name || caught.message;
+      }
+    }
+    if (caught?.status === 422 && typeof caught.detail === "string") {
+      mapped.repository = caught.message;
     }
     if (Object.keys(mapped).length) {
       buildErrors.value = mapped;
@@ -426,6 +507,7 @@ async function submitBuild() {
               <thead>
                 <tr>
                   <th class="nowrap">编号</th>
+                  <th>Skill</th>
                   <th>仓库</th>
                   <th>引用</th>
                   <th class="nowrap">状态</th>
@@ -445,6 +527,17 @@ async function submitBuild() {
                     <RouterLink class="linkish" :to="{ name: 'build', params: { id: item.id } }" @click.stop>
                       {{ item.build_number ?? "—" }}
                     </RouterLink>
+                  </td>
+                  <td>
+                    <RouterLink
+                      v-if="item.skill_id"
+                      class="linkish"
+                      :to="{ name: 'skill', params: { id: item.skill_id } }"
+                      @click.stop
+                    >
+                      {{ item.skill_name || "Skill" }}
+                    </RouterLink>
+                    <template v-else>无 Skill</template>
                   </td>
                   <td>{{ item.repository }}</td>
                   <td>
@@ -550,7 +643,21 @@ async function submitBuild() {
       @close="closeBuildForm"
       @submit="submitBuild"
     >
-      <p class="hint dialog-hint">每次构建会登记一个新制品，名称不能与已有的无组制品重复。</p>
+      <p class="hint dialog-hint">
+        选择已发布的 Skill。步骤不会被执行，Jenkins 仍运行仓库里的 kiln-build.sh。每次构建会登记一个新制品。
+      </p>
+      <p v-if="skillLoadError" class="message error">{{ skillLoadError }}</p>
+      <p v-else-if="skillsReady && publishedSkills.length === 0" class="hint">还没有已发布的 Skill。</p>
+      <div class="field">
+        <label for="build-skill">Skill</label>
+        <select id="build-skill" v-model="skillId">
+          <option value="">选择已发布的 Skill</option>
+          <option v-for="item in publishedSkills" :key="item.id" :value="item.id">
+            {{ item.name }} · {{ item.version }}
+          </option>
+        </select>
+        <p v-if="buildErrors.skill_id" class="field-error">{{ buildErrors.skill_id }}</p>
+      </div>
       <div class="field">
         <label for="build-repository">仓库</label>
         <input

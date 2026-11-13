@@ -24,7 +24,7 @@ from kiln.executor.product import build_log, nexus_build_parameters
 from kiln.executor.script import product_build_command, product_job_config
 from kiln.main import create_app
 from kiln.nexus.client import NexusClient
-from tests.support import app_settings, auth_headers, truncate_domain
+from tests.support import app_settings, auth_headers, publish_skill, truncate_domain
 from tests.test_nexus_docking import _REQUIRED, _build_script, load_docking_targets
 
 _PASSWORD = "nexus-secret-value"
@@ -586,9 +586,11 @@ def test_product_build_does_not_preflight_the_proxy(tmp_path: Path) -> None:
     app.state.jenkins = _Jenkins(recorded)
     with TestClient(app, headers=auth_headers()) as client:
         truncate_domain(app.state.engine)
+        skill = publish_skill(client, "proxy-flow", ["ada/demo"])
         created = client.post(
             "/api/v1/builds",
             json={
+                "skill_id": skill["id"],
                 "repository": "ada/demo",
                 "ref": "main",
                 "artifact_name": "proxy-pkg",
