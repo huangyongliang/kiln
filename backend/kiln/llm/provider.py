@@ -193,16 +193,29 @@ class OpenAICompatibleProvider:
             raise ModelRequestError(MODEL_UNSPECIFIED)
         return model
 
-    def complete(self, request: ChatRequest) -> ChatCompletion:
-        """Protocol method. The chat route does not use this for openai.
+    def complete(
+        self,
+        request: ChatRequest,
+        *,
+        allowed: Sequence[str],
+        default: str,
+        managed: bool,
+    ) -> ChatCompletion:
+        """Require this caller's allowance. There is no unrestricted fallback.
 
-        OpenAI chat goes through the tool loop, which passes the caller
-        allowance into ``resolve_model``. Calling ``complete`` directly does
-        not apply a saved catalog.
+        ``allowed``, ``default``, and ``managed`` are required keyword
+        arguments. Omitting any of them raises ``TypeError`` and does not
+        choose a model. The chat route does not use this method for openai;
+        it passes the same allowance into the tool loop.
         """
 
         messages = [{"role": item.role, "content": item.content} for item in request.messages]
-        model = self.resolve_model(request.model, allowed=(), default="", managed=False)
+        model = self.resolve_model(
+            request.model,
+            allowed=allowed,
+            default=default,
+            managed=managed,
+        )
         turn = self.complete_turn(model=model, messages=messages, tools=None)
         if turn.tool_calls or not turn.content:
             raise ModelUpstreamError("模型端点返回了无法识别的响应")

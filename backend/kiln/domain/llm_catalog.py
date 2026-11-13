@@ -5,6 +5,8 @@ replace of the catalog. It does not store an endpoint or a secret, and it
 does not truncate an illegal list.
 """
 
+import logging
+import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
@@ -14,14 +16,22 @@ from kiln.config import LLM_MODEL_ID_MAX_LENGTH, LLM_MODELS_MAX_ITEMS, Settings
 from kiln.domain.rbac import ROLES
 from kiln.errors import Unprocessable
 
+_ILLEGAL_CATALOG_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cs"})
+_HANGUL_FILLER = "\u3164"
+
+logger = logging.getLogger(__name__)
+
 ROLE_ORDER: tuple[str, ...] = tuple(role.id for role in ROLES)
 FIXED_ROLE_IDS = frozenset(ROLE_ORDER)
 
 ID_EMPTY = "模型 id 不能为空。"
 ID_TOO_LONG = "模型 id 不能超过 128 个字符，不会截断。"
+ID_ILLEGAL = "模型 id 含有非法字符。"
 TOO_MANY = "模型目录不能超过 32 项，不会只保留前 32 项。"
 ID_DUPLICATE = "模型 id 重复。"
 NAME_TOO_LONG = "显示名不能超过 128 个字符。"
+NAME_ILLEGAL = "显示名含有非法字符。"
+SEED_OVER_LIMIT_MESSAGE = "环境变量中的模型超过 32 个，保存前请删减"
 DEFAULT_NOT_IN_CATALOG = "全局默认必须在模型目录中。"
 DEFAULT_WHEN_EMPTY = "模型目录为空时不能指定全局默认。"
 ROLE_ID_INVALID = "角色 id 必须是 reader、builder、publisher、admin 之一。"
@@ -80,6 +90,9 @@ class CatalogDocument(BaseModel):
     """Managed state, read-only connection flags, the catalog, and role assignments.
 
     ``base_url`` is not included. The existing echo stays on ``GET /llm/provider``.
+    ``seed_over_limit`` is true only while the unsaved environment seed has more
+    than 32 ids. ``seed_notice`` is then the sentence the models page shows.
+    The seed is not truncated.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -91,6 +104,8 @@ class CatalogDocument(BaseModel):
     models: list[CatalogModelOut]
     default_model: str | None
     assignments: list[RoleAssignmentOut]
+    seed_over_limit: bool = False
+    seed_notice: str | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +191,7 @@ def env_snapshot(settings: Settings) -> CatalogSnapshot:
 
 
 def document_from(snapshot: CatalogSnapshot, settings: Settings) -> CatalogDocument:
+    over_limit = snapshot.source == "env" and len(snapshot.models) > LLM_MODELS_MAX_ITEMS
     return CatalogDocument(
         source=snapshot.source,
         provider=settings.llm_provider,
@@ -193,6 +209,27 @@ def document_from(snapshot: CatalogSnapshot, settings: Settings) -> CatalogDocum
             )
             for item in snapshot.assignments
         ],
+        seed_over_limit=over_limit,
+        seed_notice=SEED_OVER_LIMIT_MESSAGE if over_limit else None,
+    )
+
+
+def warn_if_env_seed_exceeds_limit(settings: Settings) -> None:
+    """Log when the environment seed is larger than a save will accept.
+
+    ``LLM_MODELS`` itself still refuses more than 32 items at configuration
+    load. Prepending a missing ``LLM_MODEL`` can make the seed 33 ids. That
+    is not a startup failure and the seed is not truncated. The models page
+    reads the same limit from ``GET /llm/catalog``.
+    """
+
+    count = len(settings.llm_seed_ids())
+    if count <= LLM_MODELS_MAX_ITEMS:
+        return
+    logger.warning(
+        "LLM_MODEL 与 LLM_MODELS 组成的种子有 %s 个不重复 id，超过 32 个上限，不会截断。%s",
+        count,
+        SEED_OVER_LIMIT_MESSAGE,
     )
 
 
@@ -227,31 +264,68 @@ def _assignments(
 
 
 def _model_id(value: str, *, empty: str) -> str:
-    text = value.strip()
+    text = _trim_catalog_text(value)
     if not text:
         raise Unprocessable(empty)
     if len(text) > LLM_MODEL_ID_MAX_LENGTH:
         raise Unprocessable(ID_TOO_LONG)
+    if _illegal_catalog_text(text):
+        raise Unprocessable(ID_ILLEGAL)
     return text
 
 
 def _optional_model_id(value: str | None) -> str | None:
     if value is None:
         return None
-    text = value.strip()
+    text = _trim_catalog_text(value)
     if not text:
         return None
     if len(text) > LLM_MODEL_ID_MAX_LENGTH:
         raise Unprocessable(ID_TOO_LONG)
+    if _illegal_catalog_text(text):
+        raise Unprocessable(ID_ILLEGAL)
     return text
 
 
 def _display_name(value: str | None) -> str | None:
     if value is None:
         return None
-    text = value.strip()
+    text = _trim_catalog_text(value)
     if not text:
         return None
+    if _illegal_catalog_text(text):
+        raise Unprocessable(NAME_ILLEGAL)
     if len(text) > LLM_MODEL_ID_MAX_LENGTH:
         raise Unprocessable(NAME_TOO_LONG)
     return text
+
+
+def _trim_catalog_text(value: str) -> str:
+    """Trim only Unicode Zs separators. U+0020 is Zs, so an ASCII space is included.
+
+    This is not ``str.strip()``. Tabs, newlines, vertical tabs, form feeds,
+    U+001C–U+001F, and U+FEFF stay in place. The console trims the same set
+    before the same reject check.
+    """
+
+    start = 0
+    end = len(value)
+    while start < end and unicodedata.category(value[start]) == "Zs":
+        start += 1
+    while end > start and unicodedata.category(value[end - 1]) == "Zs":
+        end -= 1
+    return value[start:end]
+
+
+def _illegal_catalog_text(text: str) -> bool:
+    """Reject controls, format marks, separators, private use, and surrogates.
+
+    Categories Cc, Cf, Zl, Zp, Co, and Cs cover NUL, DEL, C1, bidi overrides,
+    zero-width marks, line and paragraph separators, and tag characters.
+    U+3164 is rejected as well: its category is Lo. Normal CJK stays allowed.
+    """
+
+    for char in text:
+        if char == _HANGUL_FILLER or unicodedata.category(char) in _ILLEGAL_CATALOG_CATEGORIES:
+            return True
+    return False

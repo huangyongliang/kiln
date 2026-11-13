@@ -13,7 +13,10 @@ import {
   NAME_TOO_LONG,
   ROLE_ORDER,
   SAVED_TEXT,
+  SEED_OVER_LIMIT,
   TOO_MANY,
+  addModelIdError,
+  trimCatalogText,
   catalogStatusTag,
   mapSaveFailure,
   prepareCatalogSave,
@@ -27,6 +30,7 @@ const note =
   "提供方、端点、密钥和超时仍由环境变量配置，此页不能修改，也不会显示密钥。尚未保存时，目录从 LLM_MODEL / LLM_MODELS 种子。保存后以本页为准，再改这两项环境变量不会覆盖。保存是整体替换，后一次写入生效，不使用 ETag。不从上游拉取模型目录。";
 
 const source = ref("env");
+const seedOverLimit = ref(false);
 const providerName = ref("");
 const baseUrlConfigured = ref(false);
 const apiKeyConfigured = ref(false);
@@ -95,6 +99,7 @@ async function load() {
 
 function applyDocument(body) {
   source.value = body?.source === "db" ? "db" : "env";
+  seedOverLimit.value = Boolean(body?.seed_over_limit);
   providerName.value = typeof body?.provider === "string" ? body.provider : "";
   baseUrlConfigured.value = Boolean(body?.base_url_configured);
   apiKeyConfigured.value = Boolean(body?.api_key_configured);
@@ -127,10 +132,15 @@ function applyDocument(body) {
 
 function addModel() {
   formError.value = "";
-  const id = draftId.value.trim();
-  const displayName = draftName.value.trim();
+  const id = trimCatalogText(draftId.value);
+  const displayName = trimCatalogText(draftName.value);
   if (!id) {
     formError.value = ID_EMPTY;
+    return;
+  }
+  const illegalId = addModelIdError(id);
+  if (illegalId) {
+    formError.value = illegalId;
     return;
   }
   if (id.length > DISPLAY_NAME_MAX) {
@@ -309,6 +319,7 @@ async function save() {
           </div>
         </dl>
         <p class="hint">提供方、端点、密钥和超时仍由环境变量配置，此页不能修改，也不会显示密钥。</p>
+        <p v-if="seedOverLimit" class="banner" role="status">{{ SEED_OVER_LIMIT }}</p>
         <p v-if="source === 'env'" class="hint">
           尚未保存。下面是环境变量 LLM_MODEL / LLM_MODELS 的种子，已有对话权限的角色可使用全部种子模型。
         </p>

@@ -7,6 +7,7 @@ replace overwrites the earlier one.
 """
 
 from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -73,6 +74,22 @@ class LlmCatalogStore:
             raise RuntimeError("a catalog replace must be stored as source=db")
         with Session(self.engine) as session:
             with session.begin():
+                # Serialize the whole replace on the singleton row. Two first
+                # saves otherwise both observe a missing row and one INSERT
+                # fails with a duplicate key. The later transaction waits,
+                # then replaces the catalog. Last writer wins.
+                session.execute(
+                    pg_insert(LlmCatalogStateRow)
+                    .values(id=1, source="env")
+                    .on_conflict_do_nothing(index_elements=["id"])
+                )
+                state = session.scalar(
+                    select(LlmCatalogStateRow)
+                    .where(LlmCatalogStateRow.id == 1)
+                    .with_for_update()
+                )
+                if state is None:
+                    raise RuntimeError("llm_catalog_state row is missing")
                 session.execute(delete(LlmRoleModelRow))
                 session.execute(delete(LlmCatalogModelRow))
                 for position, model in enumerate(snapshot.models):
@@ -95,8 +112,4 @@ class LlmCatalogStore:
                                 is_default=model_id == assignment.default_model,
                             )
                         )
-                state = session.get(LlmCatalogStateRow, 1)
-                if state is None:
-                    session.add(LlmCatalogStateRow(id=1, source="db"))
-                else:
-                    state.source = "db"
+                state.source = "db"

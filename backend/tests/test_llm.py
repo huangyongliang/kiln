@@ -1,9 +1,16 @@
 import json
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
-from kiln.llm.provider import chat_completions_url
+from kiln.errors import ModelRequestError
+from kiln.llm.provider import (
+    ChatMessage,
+    ChatRequest,
+    OpenAICompatibleProvider,
+    chat_completions_url,
+)
 from kiln.llm.tools import OPENAI_TOOLS, PLATFORM_SYSTEM_PROMPT
 from kiln.main import create_app
 from tests.support import app_settings, auth_headers
@@ -15,6 +22,31 @@ _TOOL_NAMES = [
     "update_skill",
     "build_artifact",
 ]
+
+
+def test_openai_complete_without_allowance_raises_and_does_not_call_upstream() -> None:
+    def explode(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"complete called upstream: {request.url}")
+
+    with httpx.Client(transport=httpx.MockTransport(explode)) as http_client:
+        provider = OpenAICompatibleProvider(
+            base_url="http://llm.example/v1",
+            api_key="",
+            client=http_client,
+        )
+        request = ChatRequest(
+            messages=[ChatMessage(role="user", content="ping")],
+            model="other-model",
+        )
+        with pytest.raises(TypeError, match="allowed"):
+            provider.complete(request)
+        with pytest.raises(ModelRequestError, match="不在允许的模型列表中"):
+            provider.complete(
+                request,
+                allowed=("demo-model",),
+                default="demo-model",
+                managed=False,
+            )
 
 
 def test_chat_completions_url() -> None:

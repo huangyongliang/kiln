@@ -34,6 +34,7 @@ from kiln.db.llm_catalog import LlmCatalogStore
 from kiln.db.migrate import upgrade_database
 from kiln.db.seed import seed_rbac
 from kiln.db.store import PostgresStore
+from kiln.domain.llm_catalog import warn_if_env_seed_exceeds_limit
 from kiln.errors import AppError
 from kiln.executor.jenkins import JenkinsClient
 from kiln.git.source import build_git_source
@@ -97,6 +98,7 @@ def create_app(
     nexus_http_client: httpx.Client | None = None,
 ) -> FastAPI:
     resolved = settings if settings is not None else get_settings()
+    warn_if_env_seed_exceeds_limit(resolved)
     owns_client = http_client is None
     if http_client is None:
         client = httpx.Client(timeout=resolved.llm_timeout_seconds)
