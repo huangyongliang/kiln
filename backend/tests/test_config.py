@@ -249,3 +249,4 @@ def test_mock_and_off_do_not_apply_the_model_catalog() -> None:
         )
         assert settings.llm_model_ids() == ["model-a", "model-b"]
         assert settings.llm_catalog() == []
+        assert settings.llm_seed_ids() == ["default-model", "model-a", "model-b"]

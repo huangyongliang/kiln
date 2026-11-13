@@ -16,6 +16,7 @@ const ROUTES = [
   "skill-detail",
   "skill-new",
   "access",
+  "models",
   "chat",
 ];
 
@@ -44,6 +45,7 @@ const ACTIONS = [
   "artifact.upload",
   "artifact.reserve",
   "retrieve.download",
+  "llm.catalog.update",
 ];
 
 test("unknown permissions show every route and action", () => {
@@ -132,6 +134,16 @@ test("creating a compat job needs executor.run", () => {
 test("code source and repository list need git.read", () => {
   assert.equal(canDo("git.read", new Set(["git.read"])), true);
   assert.equal(canDo("git.read", new Set(["executor.read", "executor.run"])), false);
+});
+
+test("model config needs llm.manage and is not opened by account.manage", () => {
+  assert.equal(requiredCode("models"), "llm.manage");
+  assert.equal(canSee("models", new Set(["llm.manage"])), true);
+  assert.equal(canSee("models", new Set(["account.manage", "account.read"])), false);
+  assert.equal(canSee("models", new Set(["agent.qa"])), false);
+  assert.equal(canDo("llm.catalog.update", new Set(["llm.manage"])), true);
+  assert.equal(canDo("llm.catalog.update", new Set(["account.manage"])), false);
+  assert.equal(canDo("llm.catalog.update", new Set(["agent.qa"])), false);
 });
 
 test("chat nav, route, and send need agent.qa", () => {

@@ -321,6 +321,22 @@ class Settings(BaseSettings):
 
         return parse_llm_model_ids(self.llm_models)
 
+    def llm_seed_ids(self) -> list[str]:
+        """Environment seed for the admin catalog preview.
+
+        Same construction as the openai catalog, and independent of
+        ``LLM_PROVIDER``: parsed ``LLM_MODELS``, or ``[LLM_MODEL]`` when that
+        list is empty, with a missing ``LLM_MODEL`` prepended. ``mock`` and
+        ``off`` still publish an empty list from ``GET /llm/provider``.
+        """
+
+        listed = self.llm_model_ids()
+        if not listed:
+            return [self.llm_model] if self.llm_model else []
+        if self.llm_model and self.llm_model not in listed:
+            return [self.llm_model, *listed]
+        return list(listed)
+
     def llm_catalog(self) -> list[str]:
         """Model ids the console may pick. Empty unless the provider is openai.
 
@@ -333,12 +349,7 @@ class Settings(BaseSettings):
 
         if self.llm_provider != "openai":
             return []
-        listed = self.llm_model_ids()
-        if not listed:
-            return [self.llm_model] if self.llm_model else []
-        if self.llm_model and self.llm_model not in listed:
-            return [self.llm_model, *listed]
-        return list(listed)
+        return self.llm_seed_ids()
 
     def llm_request_default(self) -> str:
         """Model id used when a chat request omits ``model``.

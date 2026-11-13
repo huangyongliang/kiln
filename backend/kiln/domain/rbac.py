@@ -76,6 +76,7 @@ PERMISSIONS: tuple[Permission, ...] = (
     ),
     Permission(code="executor.run", description="在兼容执行器上发起任务或产品构建"),
     Permission(code="git.read", description="查看代码源适配器、仓库列表并解析引用"),
+    Permission(code="llm.manage", description="管理模型目录及角色可用模型"),
 )
 
 _PERMISSION_CODES = {item.code for item in PERMISSIONS}

@@ -6,6 +6,7 @@ from fastapi import Request
 from kiln.config import Settings
 from kiln.db.builds import BuildStore
 from kiln.db.jobs import JobStore
+from kiln.db.llm_catalog import LlmCatalogStore
 from kiln.db.store import PostgresStore
 from kiln.errors import GIT_SOURCE_UNCONFIGURED_DETAIL, JENKINS_UNCONFIGURED_DETAIL, NotConfigured
 from kiln.executor.jenkins import JenkinsClient
@@ -28,6 +29,10 @@ def get_oidc_http(request: Request) -> httpx.Client:
 
 def get_llm(request: Request) -> LLMProvider:
     return request.app.state.llm
+
+
+def get_llm_catalog(request: Request) -> LlmCatalogStore:
+    return request.app.state.llm_catalog
 
 
 def get_job_store(request: Request) -> JobStore:

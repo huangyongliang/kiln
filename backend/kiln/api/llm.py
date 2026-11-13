@@ -1,19 +1,31 @@
 """Chat outline routed through the configured model provider.
 
 POST /llm/chat is the only chat entry and still requires agent.qa. The
-OpenAI provider runs a server-owned tool loop. When its catalog is non-empty,
-the request model must be in that catalog, and every round of the request
-uses the same resolved id. mock and off keep complete() and do not validate
-the model against the catalog. They do not attach or execute tools.
+OpenAI provider runs a server-owned tool loop. resolve_model receives the
+allow-list and default for this caller. The provider is the process singleton.
+mock and off keep complete() and do not validate the model against a catalog.
+They do not attach or execute tools.
+
+GET / PUT /llm/catalog requires llm.manage. PUT replaces the catalog, the four
+role assignments, and the managed flag in one transaction. The last writer
+wins. This route does not use an ETag.
 """
 
 from fastapi import APIRouter, Depends, Request
 
-from kiln.api.deps import get_build_store, get_llm, get_settings, get_store
+from kiln.api.deps import get_build_store, get_llm, get_llm_catalog, get_settings, get_store
 from kiln.auth import Principal, require_auth, require_permission
 from kiln.config import Settings
 from kiln.db.builds import BuildStore
+from kiln.db.llm_catalog import LlmCatalogStore
 from kiln.db.store import PostgresStore
+from kiln.domain.llm_catalog import (
+    CatalogDocument,
+    CatalogReplace,
+    document_from,
+    validate_catalog_replace,
+)
+from kiln.llm.access import chat_allowance, effective_snapshot, provider_models
 from kiln.llm.provider import (
     ChatCompletion,
     ChatRequest,
@@ -32,8 +44,60 @@ router = APIRouter(
 
 
 @router.get("/provider", response_model=ProviderStatus, summary="查看模型提供方")
-def read_provider(settings: Settings = Depends(get_settings)) -> ProviderStatus:
-    return provider_status(settings)
+def read_provider(
+    principal: Principal = Depends(require_auth),
+    settings: Settings = Depends(get_settings),
+    catalog: LlmCatalogStore = Depends(get_llm_catalog),
+) -> ProviderStatus:
+    models, default_model = provider_models(
+        settings,
+        principal,
+        effective_snapshot(settings, catalog),
+    )
+    return provider_status(settings, models=models, default_model=default_model)
+
+
+@router.get(
+    "/catalog",
+    response_model=CatalogDocument,
+    summary="查看模型目录与角色分配",
+    dependencies=[Depends(require_permission("llm.manage"))],
+)
+def read_catalog(
+    settings: Settings = Depends(get_settings),
+    catalog: LlmCatalogStore = Depends(get_llm_catalog),
+) -> CatalogDocument:
+    """Return the saved catalog, or the environment seed when nothing is saved.
+
+    The seed uses LLM_MODEL and LLM_MODELS even when the provider is mock or
+    off. GET /llm/provider still returns an empty models list in those modes.
+    The response has no endpoint and no secret.
+    """
+
+    return document_from(effective_snapshot(settings, catalog), settings)
+
+
+@router.put(
+    "/catalog",
+    response_model=CatalogDocument,
+    summary="替换模型目录与角色分配",
+    description=(
+        "在一个事务里整体替换模型目录、四个固定角色的分配和托管状态。"
+        "后写入的请求生效。这一接口不使用 ETag。"
+        "保存成功后 source 为 db，包括保存空目录。"
+        "之后修改 LLM_MODEL 或 LLM_MODELS 不会覆盖已保存的内容。"
+        "不写入端点或密钥。"
+    ),
+    dependencies=[Depends(require_permission("llm.manage"))],
+)
+def replace_catalog(
+    payload: CatalogReplace,
+    settings: Settings = Depends(get_settings),
+    catalog: LlmCatalogStore = Depends(get_llm_catalog),
+) -> CatalogDocument:
+    snapshot = validate_catalog_replace(payload)
+    catalog.replace(snapshot)
+    return document_from(snapshot, settings)
 
 
 @router.post(
@@ -50,8 +114,14 @@ def chat(
     store: PostgresStore = Depends(get_store),
     builds: BuildStore = Depends(get_build_store),
     settings: Settings = Depends(get_settings),
+    catalog: LlmCatalogStore = Depends(get_llm_catalog),
 ) -> ChatCompletion:
     if isinstance(provider, OpenAICompatibleProvider):
+        allowance = chat_allowance(
+            settings,
+            principal,
+            effective_snapshot(settings, catalog),
+        )
         return run_tool_loop(
             payload,
             provider,
@@ -63,5 +133,8 @@ def chat(
                 git_source=request.app.state.git_source,
                 settings=settings,
             ),
+            allowed=allowance.allowed,
+            default=allowance.default,
+            managed=allowance.managed,
         )
     return provider.complete(payload)

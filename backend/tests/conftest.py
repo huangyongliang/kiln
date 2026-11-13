@@ -16,6 +16,7 @@ from tests.support import (  # noqa: E402
     app_settings,
     auth_headers,
     require_database,
+    reset_managed_model_catalog,
     truncate_domain,
 )
 
@@ -78,6 +79,11 @@ def isolated_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(scope="session")
 def external_targets() -> ExternalTargets:
     return load_external_targets()
+
+
+@pytest.fixture(autouse=True)
+def unmanaged_model_catalog() -> None:
+    reset_managed_model_catalog()
 
 
 @pytest.fixture

@@ -6,11 +6,16 @@ import {
   CHAT_MODEL_KEY,
   CHAT_THREAD_KEY,
   EMPTY_CATALOG_TIP,
+  MODEL_NOT_ALLOWED,
+  NO_MODELS_FOR_ACCOUNT,
   STALE_MODEL_TIP,
   chatModelState,
   chatRequestBody,
   chatRequestMessages,
   failOutgoingMessage,
+  isDisallowedModelError,
+  isNoModelsError,
+  shouldRefetchProvider,
   readChatModel,
   readChatThread,
   showModelPicker,
@@ -217,6 +222,59 @@ test("a stale selection falls back to the default and stays sendable", () => {
   assert.equal(fresh.model, "model-b");
   assert.equal(fresh.fellBack, false);
   assert.equal(fresh.notice, "");
+});
+
+test("the empty catalog tip points at assignment and the environment", () => {
+  assert.equal(EMPTY_CATALOG_TIP.includes("模型配置"), true);
+  assert.equal(EMPTY_CATALOG_TIP.includes("LLM_MODEL"), true);
+  assert.equal(EMPTY_CATALOG_TIP.includes("LLM_MODELS"), true);
+});
+
+test("a 400 for a disallowed model refetches into the stale tip and keeps the bubble", () => {
+  assert.equal(isDisallowedModelError({ status: 400, message: MODEL_NOT_ALLOWED }), true);
+  assert.equal(isDisallowedModelError({ status: 400, detail: MODEL_NOT_ALLOWED }), true);
+  assert.equal(isDisallowedModelError({ status: 400, message: "未指定模型" }), false);
+  assert.equal(isDisallowedModelError({ status: 403, message: MODEL_NOT_ALLOWED }), false);
+  const started = takeUserMessage("用旧模型", []);
+  const failed = failOutgoingMessage(started.messages, "等待时新打的字");
+  assert.equal(failed.prompt, "等待时新打的字");
+  assert.equal(failed.messages.at(-1).failed, true);
+  assert.equal(failed.messages.at(-1).content, "用旧模型");
+  const fresh = {
+    provider: "openai",
+    models: ["model-b"],
+    default_model: "model-b",
+  };
+  const state = chatModelState(fresh, "model-a");
+  assert.equal(state.showPicker, true);
+  assert.equal(state.fellBack, true);
+  assert.equal(state.model, "model-b");
+  assert.equal(state.notice, STALE_MODEL_TIP);
+  const body = chatRequestBody(failed.messages, "下一问", state.model);
+  assert.equal(body.model, "model-b");
+  assert.equal(body.messages.some((item) => item.content === "用旧模型"), false);
+});
+
+test("a 400 for an empty caller catalog refetches and hides the picker", () => {
+  const caught = { status: 400, message: NO_MODELS_FOR_ACCOUNT };
+  assert.equal(isNoModelsError(caught), true);
+  assert.equal(isNoModelsError({ status: 400, detail: NO_MODELS_FOR_ACCOUNT }), true);
+  assert.equal(shouldRefetchProvider(caught), true);
+  assert.equal(shouldRefetchProvider({ status: 400, message: MODEL_NOT_ALLOWED }), true);
+  assert.equal(shouldRefetchProvider({ status: 400, message: "未指定模型" }), false);
+  assert.equal(isDisallowedModelError(caught), false);
+  const started = takeUserMessage("还能发吗", []);
+  const failed = failOutgoingMessage(started.messages, "");
+  assert.equal(failed.messages.at(-1).failed, true);
+  assert.equal(failed.messages.at(-1).content, "还能发吗");
+  assert.equal(failed.prompt, "");
+  const state = chatModelState(
+    { provider: "openai", models: [], default_model: null },
+    "model-a",
+  );
+  assert.equal(state.showPicker, false);
+  assert.equal(state.model, "");
+  assert.equal(state.notice, EMPTY_CATALOG_TIP);
 });
 
 test("the composer is empty once the user text is taken", () => {

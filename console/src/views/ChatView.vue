@@ -10,6 +10,7 @@ import {
   chatModelState,
   chatRequestBody,
   failOutgoingMessage,
+  shouldRefetchProvider,
   readChatModel,
   readChatThread,
   showModelPicker,
@@ -157,6 +158,21 @@ function syncModelSelection() {
   }
 }
 
+async function refetchDisallowedModel(rejected) {
+  try {
+    const fresh = await getJson("/api/v1/llm/provider");
+    const state = chatModelState(fresh, rejected);
+    if (state.model) {
+      writeChatModel(window.sessionStorage, state.model);
+    }
+    provider.value = fresh;
+    selectedModel.value = state.model;
+    modelNotice.value = state.showPicker && state.fellBack ? STALE_MODEL_TIP : state.notice;
+  } catch {
+    // The failed bubble and the 400 text stay either way.
+  }
+}
+
 function onModelChange() {
   writeChatModel(window.sessionStorage, selectedModel.value);
   modelNotice.value = "";
@@ -249,6 +265,9 @@ async function send() {
     const failed = failOutgoingMessage(messages.value, prompt.value);
     messages.value = failed.messages;
     prompt.value = failed.prompt;
+    if (shouldRefetchProvider(caught)) {
+      await refetchDisallowedModel(outboundModel);
+    }
     error.value = isForbidden(caught) ? actionDeniedText("agent.qa") : errorText(caught, "发送失败");
   } finally {
     sending.value = false;

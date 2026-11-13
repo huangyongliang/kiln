@@ -6,12 +6,13 @@ server-owned `tools` array into `complete_turn`. `mock` and `off` only implement
 empty. They exist so local work can continue before an endpoint is ready; they
 are not the only path.
 
-The optional model catalog is the ``LLM_MODELS`` allow-list (plus ``LLM_MODEL``
-when that default is missing from the list). It is not fetched from the
-endpoint. ``mock`` and ``off`` publish an empty catalog and do not check it.
+The optional model catalog is not fetched from the endpoint. ``resolve_model``
+receives the allow-list and default for this request. The provider object is
+not rebuilt per request. ``mock`` and ``off`` do not check a catalog.
 """
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
@@ -20,6 +21,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from kiln.config import Settings
+from kiln.domain.llm_catalog import MODEL_NOT_ALLOWED, MODEL_UNSPECIFIED, NO_MODELS_FOR_ACCOUNT
 from kiln.errors import ModelDisabled, ModelRequestError, ModelTimeout, ModelUpstreamError
 
 
@@ -38,8 +40,9 @@ class ChatRequest(BaseModel):
         default=None,
         max_length=128,
         description=(
-            "可选。openai 且目录非空时必须是目录中的 id；省略则用默认。"
-            "目录为空时仍按原样转发。"
+            "可选。openai 且该调用者的允许列表非空时必须是其中的 id；省略则用该调用者的默认。"
+            "尚未托管且允许列表为空时仍按原样转发。"
+            "已托管且允许列表为空时不再转发。"
         ),
     )
 
@@ -75,7 +78,11 @@ class ProviderStatus(BaseModel):
     default_model: str | None
     models: list[str] = Field(
         default_factory=list,
-        description="可选模型 id。openai 且已配置时为有效目录；mock 与 off 为空。不从上游拉取。",
+        description=(
+            "可选模型 id。尚未托管时，openai 为环境变量目录，各登录主体一致；"
+            "已托管且提供方为 openai 时，为当前调用者可用的 id。"
+            "mock 与 off 始终为空。不从上游拉取。"
+        ),
     )
 
 
@@ -139,46 +146,63 @@ class OpenAICompatibleProvider:
         *,
         base_url: str,
         api_key: str,
-        default_model: str,
-        catalog: list[str],
         client: httpx.Client,
     ) -> None:
         self._base_url = base_url
         self._api_key = api_key
-        self._default_model = default_model
-        self._catalog = tuple(catalog)
         self._client = client
 
-    def resolve_model(self, requested: str | None) -> str:
+    def resolve_model(
+        self,
+        requested: str | None,
+        *,
+        allowed: Sequence[str],
+        default: str,
+        managed: bool,
+    ) -> str:
         """Return the model id for this request.
 
-        A non-empty catalog requires the id to be in that catalog. A blank or
-        omitted id uses the request default (``LLM_MODEL``, or the first
-        catalog item). An id outside the catalog raises ``ModelRequestError``
-        and must not be sent upstream.
+        ``allowed`` and ``default`` belong to this caller. They are computed
+        from the caller's roles and the managed flag, then passed in. This
+        method does not read a catalog captured at startup.
 
-        An empty catalog keeps the previous compatibility for existing
-        scripts: a request that carries a model is forwarded as-is. If both
-        the request and ``LLM_MODEL`` are missing, raise ``ModelRequestError``.
-        The console does not offer a free-text model id on that path.
+        A non-empty list requires the id to be in that list. A blank or
+        omitted id uses ``default``. An id outside the list raises
+        ``ModelRequestError`` and must not be sent upstream.
+
+        An empty list on an unmanaged deployment keeps the previous
+        compatibility for existing scripts: a request that carries a model is
+        forwarded as-is. A managed deployment with an empty list does not
+        forward any id.
         """
 
         chosen = (requested or "").strip()
-        if self._catalog:
-            model = chosen or self._default_model
+        catalog = tuple(allowed)
+        fallback = default.strip()
+        if managed and not catalog:
+            raise ModelRequestError(NO_MODELS_FOR_ACCOUNT)
+        if catalog:
+            model = chosen or fallback
             if not model:
-                raise ModelRequestError("未指定模型。请在请求中传入 model，或设置 LLM_MODEL。")
-            if model not in self._catalog:
-                raise ModelRequestError("模型不在允许的模型列表中。")
+                raise ModelRequestError(MODEL_UNSPECIFIED)
+            if model not in catalog:
+                raise ModelRequestError(MODEL_NOT_ALLOWED)
             return model
-        model = chosen or self._default_model
+        model = chosen or fallback
         if not model:
-            raise ModelRequestError("未指定模型。请在请求中传入 model，或设置 LLM_MODEL。")
+            raise ModelRequestError(MODEL_UNSPECIFIED)
         return model
 
     def complete(self, request: ChatRequest) -> ChatCompletion:
+        """Protocol method. The chat route does not use this for openai.
+
+        OpenAI chat goes through the tool loop, which passes the caller
+        allowance into ``resolve_model``. Calling ``complete`` directly does
+        not apply a saved catalog.
+        """
+
         messages = [{"role": item.role, "content": item.content} for item in request.messages]
-        model = self.resolve_model(request.model)
+        model = self.resolve_model(request.model, allowed=(), default="", managed=False)
         turn = self.complete_turn(model=model, messages=messages, tools=None)
         if turn.tool_calls or not turn.content:
             raise ModelUpstreamError("模型端点返回了无法识别的响应")
@@ -237,31 +261,32 @@ def build_provider(settings: Settings, client: httpx.Client) -> LLMProvider:
     return OpenAICompatibleProvider(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key_value(),
-        default_model=settings.llm_request_default(),
-        catalog=settings.llm_catalog(),
         client=client,
     )
 
 
-def provider_status(settings: Settings) -> ProviderStatus:
-    """Publish the configured provider. ``models`` is the openai catalog only.
+def provider_status(
+    settings: Settings,
+    *,
+    models: list[str],
+    default_model: str | None,
+) -> ProviderStatus:
+    """Publish the configured provider.
 
-    ``default_model`` stays ``LLM_MODEL`` when that value is set, and is null
-    when it is empty. A request that omits ``model``, and the console's
-    preselection, then use the first catalog item. ``mock`` and ``off`` always
-    publish ``models: []`` even if ``LLM_MODELS`` is set. ``base_url`` is still
-    echoed; that is existing behavior.
+    ``models`` and ``default_model`` are already chosen for this caller.
+    ``mock`` and ``off`` pass an empty ``models`` list even if ``LLM_MODELS``
+    is set. ``base_url`` is still echoed; that is existing behavior. The key
+    itself is not returned.
     """
 
     base_url = settings.llm_base_url or None
-    default_model = settings.llm_model or None
     return ProviderStatus(
         provider=settings.llm_provider,
         base_url=base_url,
         base_url_configured=base_url is not None,
         api_key_configured=bool(settings.llm_api_key_value()),
         default_model=default_model,
-        models=settings.llm_catalog(),
+        models=models,
     )
 
 

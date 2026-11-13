@@ -8,6 +8,7 @@ import BuildDetailView from "../views/BuildDetailView.vue";
 import BuildsView from "../views/BuildsView.vue";
 import ChatView from "../views/ChatView.vue";
 import LoginView from "../views/LoginView.vue";
+import ModelsView from "../views/ModelsView.vue";
 import OverviewView from "../views/OverviewView.vue";
 import SkillDetailView from "../views/SkillDetailView.vue";
 import SkillNewView from "../views/SkillNewView.vue";
@@ -25,6 +26,7 @@ const router = createRouter({
     { path: "/skills/new", name: "skill-new", component: SkillNewView },
     { path: "/skills/:id", name: "skill", component: SkillDetailView },
     { path: "/access", name: "access", component: AccessView },
+    { path: "/models", name: "models", component: ModelsView },
     { path: "/chat", name: "chat", component: ChatView },
     { path: "/login", name: "login", component: LoginView },
     { path: "/:pathMatch(.*)*", redirect: "/" },

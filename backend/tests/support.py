@@ -18,6 +18,9 @@ _IDENT = re.compile(r"^[a-z_]+$")
 _TEST_ARTIFACT_ROOT = Path(tempfile.mkdtemp(prefix="kiln-test-artifacts-"))
 
 DOMAIN_TABLES = (
+    "llm_role_models",
+    "llm_catalog_models",
+    "llm_catalog_state",
     "download_reservations",
     "product_builds",
     "artifact_versions",
@@ -109,6 +112,28 @@ def publish_skill(
     assert published.status_code == 200, published.text
     assert published.json()["status"] == "published"
     return published.json()
+
+
+def reset_managed_model_catalog() -> None:
+    """Drop a saved catalog left by another test so chat stays on env behavior.
+
+    Missing tables are ignored. The first test on an empty database has not
+    migrated yet.
+    """
+
+    engine = create_db_engine(postgres_url())
+    try:
+        with engine.begin() as connection:
+            present = connection.execute(
+                text("SELECT to_regclass('public.llm_catalog_models')")
+            ).scalar_one()
+            if present is None:
+                return
+            connection.execute(
+                text("TRUNCATE TABLE llm_role_models, llm_catalog_models, llm_catalog_state")
+            )
+    finally:
+        engine.dispose()
 
 
 def truncate_domain(engine: Engine) -> None:
