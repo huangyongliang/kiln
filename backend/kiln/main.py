@@ -84,7 +84,7 @@ DESCRIPTION = (
     "模型调用走 OpenAI 兼容协议。提供方、端点、密钥和超时由环境变量配置；"
     "未就绪时可使用 mock 或 off。"
     "模型目录和角色分配可在管理页保存，首次从 LLM_MODEL / LLM_MODELS 种子。"
-    "GET /llm/provider 仍只需登录。没有 agent.qa 的调用者，models 为空。"
+    "GET /llm/provider 仍只需登录。没有 agent.qa 的调用者，models 为空，default_model 为空。"
     "其余调用者在尚未托管时看到环境变量目录；"
     "已托管且提供方为 openai 时看到自己可用的模型 id。"
     "mock 与 off 的 models 为空。对话只更换 model id，不切换提供方。"

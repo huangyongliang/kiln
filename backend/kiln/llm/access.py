@@ -40,10 +40,11 @@ def provider_models(
 ) -> tuple[list[str], str | None]:
     """``models`` and ``default_model`` for ``GET /llm/provider``.
 
-    A caller without ``agent.qa`` gets an empty ``models`` list. ``base_url``
-    is unchanged and the route stays login-only. ``mock`` and ``off`` always
-    publish an empty ``models`` list. A managed ``default_model`` is the
-    caller default, or null.
+    A caller without ``agent.qa`` gets an empty ``models`` list and a null
+    ``default_model``, so the default id is not visible. ``base_url`` is
+    unchanged and the route stays login-only. ``mock`` and ``off`` always
+    publish an empty ``models`` list. A managed ``default_model`` for a
+    caller with ``agent.qa`` is the caller default, or null.
     """
 
     if snapshot.source != "db":
@@ -54,7 +55,7 @@ def provider_models(
         default_model = caller.default_model
         models = list(caller.allowed) if settings.llm_provider == "openai" else []
     if "agent.qa" not in principal.permissions:
-        return [], default_model
+        return [], None
     return models, default_model
 
 

@@ -482,7 +482,7 @@ def test_caller_union_and_default_follow_role_order() -> None:
     assert admin_status["models"] == ["m1"]
     assert admin_status["default_model"] == "m1"
     assert reader_status["models"] == []
-    assert reader_status["default_model"] == "m2"
+    assert reader_status["default_model"] is None
     assert mixed_status["models"] == ["m2", "m3"]
     assert mixed_status["default_model"] == "m2"
     assert sent.status_code == 200
@@ -869,13 +869,13 @@ def test_reader_without_chat_permission_gets_an_empty_model_list() -> None:
     assert anon.status_code == 401
     assert unmanaged.status_code == 200
     assert unmanaged.json()["models"] == []
-    assert unmanaged.json()["default_model"] == "model-a"
+    assert unmanaged.json()["default_model"] is None
     assert unmanaged.json()["base_url"] == "http://llm.example/v1"
     assert unmanaged.json()["provider"] == "openai"
     assert SECRET not in unmanaged.text
     assert managed.status_code == 200
     assert managed.json()["models"] == []
-    assert managed.json()["default_model"] == "model-b"
+    assert managed.json()["default_model"] is None
     assert managed.json()["base_url"] == "http://llm.example/v1"
     assert builder_status.json()["models"] == ["model-a"]
     assert builder_status.json()["default_model"] == "model-a"
