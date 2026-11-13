@@ -120,12 +120,12 @@ def chat(
     settings: Settings = Depends(get_settings),
     catalog: LlmCatalogStore = Depends(get_llm_catalog),
 ) -> ChatCompletion:
+    allowance = chat_allowance(
+        settings,
+        principal,
+        effective_snapshot(settings, catalog),
+    )
     if isinstance(provider, OpenAICompatibleProvider):
-        allowance = chat_allowance(
-            settings,
-            principal,
-            effective_snapshot(settings, catalog),
-        )
         return run_tool_loop(
             payload,
             provider,
@@ -141,4 +141,9 @@ def chat(
             default=allowance.default,
             managed=allowance.managed,
         )
-    return provider.complete(payload, allowed=(), default="", managed=False)
+    return provider.complete(
+        payload,
+        allowed=allowance.allowed,
+        default=allowance.default,
+        managed=allowance.managed,
+    )

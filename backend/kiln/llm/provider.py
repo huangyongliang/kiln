@@ -192,29 +192,22 @@ class OpenAICompatibleProvider:
         omitted id uses ``default``. An id outside the list raises
         ``ModelRequestError`` and must not be sent upstream.
 
-        An empty list with ``managed`` true raises ``NO_MODELS_FOR_ACCOUNT``
-        and does not forward an id. Chat uses that when the catalog is saved
-        and empty, and when an unmanaged openai deployment has neither
-        ``LLM_MODELS`` nor ``LLM_MODEL``. ``managed`` false with an empty list
-        still forwards a request model; the chat route does not use that
-        combination.
+        An empty allow-list raises ``NO_MODELS_FOR_ACCOUNT`` whether or not
+        ``managed`` is true. The argument stays so the call signature matches
+        the allowance. It does not reopen forwarding.
         """
 
+        del managed
         chosen = (requested or "").strip()
         catalog = tuple(allowed)
         fallback = default.strip()
-        if managed and not catalog:
+        if not catalog:
             raise ModelRequestError(NO_MODELS_FOR_ACCOUNT)
-        if catalog:
-            model = chosen or fallback
-            if not model:
-                raise ModelRequestError(MODEL_UNSPECIFIED)
-            if model not in catalog:
-                raise ModelRequestError(MODEL_NOT_ALLOWED)
-            return model
         model = chosen or fallback
         if not model:
             raise ModelRequestError(MODEL_UNSPECIFIED)
+        if model not in catalog:
+            raise ModelRequestError(MODEL_NOT_ALLOWED)
         return model
 
     def complete(

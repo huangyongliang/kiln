@@ -35,10 +35,11 @@
     {"cp": "E0001", "start": "reject", "interior": "reject", "end": "reject"},
     {"cp": "E000", "start": "reject", "interior": "reject", "end": "reject"},
     {"cp": "D800", "start": "reject", "interior": "reject", "end": "reject"},
-    {"cp": "0378", "start": "reject", "interior": "reject", "end": "reject"},
     {"cp": "115F", "start": "reject", "interior": "reject", "end": "reject"},
     {"cp": "1160", "start": "reject", "interior": "reject", "end": "reject"},
     {"cp": "FFA0", "start": "reject", "interior": "reject", "end": "reject"},
-    {"cp": "2800", "start": "reject", "interior": "reject", "end": "reject"}
+    {"cp": "2800", "start": "reject", "interior": "reject", "end": "reject"},
+    {"cp": "1FAE8", "start": "keep", "interior": "keep", "end": "keep"},
+    {"cp": "1FAE9", "start": "keep", "interior": "keep", "end": "keep"}
   ]
 }

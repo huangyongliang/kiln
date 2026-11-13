@@ -819,11 +819,35 @@ def test_illegal_env_ids_are_listed_at_startup(caplog: pytest.LogCaptureFixture)
         record.getMessage() for record in caplog.records if record.levelno == logging.WARNING
     ]
     listed = next(message for message in warnings if "非法字符" in message)
-    assert hidden in listed
-    assert private in listed
+    assert hidden.encode("unicode_escape").decode("ascii") in listed
+    assert private.encode("unicode_escape").decode("ascii") in listed
     with TestClient(app, headers=auth_headers()) as client:
         status = client.get("/api/v1/llm/provider")
     assert status.status_code == 200
+
+
+def test_illegal_env_ids_are_escaped_in_the_startup_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    raw = "ab\r\n\u202ecd"
+    caplog.set_level(logging.WARNING)
+    create_app(
+        app_settings(
+            llm_provider="openai",
+            llm_base_url="http://llm.example/v1",
+            llm_model="plain-model",
+            llm_models=f"plain-model,{raw}",
+        )
+    )
+    listed = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING and "非法字符" in record.getMessage()
+    )
+    assert raw.encode("unicode_escape").decode("ascii") in listed
+    assert "\r" not in listed
+    assert "\n" not in listed
+    assert "\u202e" not in listed
 
 
 def test_reader_without_chat_permission_gets_an_empty_model_list() -> None:
@@ -883,7 +907,7 @@ def test_reader_without_chat_permission_gets_an_empty_model_list() -> None:
 
 
 def test_default_and_role_fields_reject_illegal_characters() -> None:
-    samples = ("\ue000", "\ud800", "\u0378", "\u115f", "\u1160", "\uffa0", "\u2800", "\u3164")
+    samples = ("\ue000", "\ud800", "\u115f", "\u1160", "\uffa0", "\u2800", "\u3164")
     for sample in samples:
         dirty = f"model-{sample}a"
         for payload in (

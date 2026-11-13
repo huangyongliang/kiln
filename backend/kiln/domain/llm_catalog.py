@@ -16,7 +16,7 @@ from kiln.config import LLM_MODEL_ID_MAX_LENGTH, LLM_MODELS_MAX_ITEMS, Settings
 from kiln.domain.rbac import ROLES
 from kiln.errors import Unprocessable
 
-_ILLEGAL_CATALOG_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cs", "Cn"})
+_ILLEGAL_CATALOG_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cs"})
 # Lo/So fillers that are blank in a catalog id. U+3164 stays rejected with them.
 _CATALOG_FILLERS = frozenset({"\u115f", "\u1160", "\u3164", "\uffa0", "\u2800"})
 
@@ -226,7 +226,9 @@ def warn_env_seed(settings: Settings, *, source_is_env: bool) -> None:
     seed 33 ids. That is not a startup failure.
 
     Ids the catalog page would reject are listed in a separate warning. That
-    list does not refuse startup and does not drop the ids.
+    list does not refuse startup and does not drop the ids. Each id is
+    escaped so a carriage return, line feed, or bidi mark cannot break the
+    log line.
     """
 
     ids = settings.llm_seed_ids()
@@ -238,7 +240,10 @@ def warn_env_seed(settings: Settings, *, source_is_env: bool) -> None:
         )
     illegal = [item for item in ids if _illegal_catalog_text(item)]
     if illegal:
-        logger.warning("环境变量中的模型 id 含有非法字符：%s", "、".join(illegal))
+        logger.warning(
+            "环境变量中的模型 id 含有非法字符：%s",
+            "、".join(item.encode("unicode_escape").decode("ascii") for item in illegal),
+        )
 
 
 def _assignments(
@@ -328,11 +333,12 @@ def _trim_catalog_text(value: str) -> str:
 def _illegal_catalog_text(text: str) -> bool:
     """Reject controls, format marks, separators, private use, and surrogates.
 
-    Categories Cc, Cf, Zl, Zp, Co, Cs, and Cn cover NUL, DEL, C1, bidi
-    overrides, zero-width marks, line and paragraph separators, tag
-    characters, private use, surrogates, and unassigned code points.
-    U+115F, U+1160, U+3164, U+FFA0, and U+2800 are rejected as well: their
-    categories are Lo or So. Normal CJK stays allowed.
+    Categories Cc, Cf, Zl, Zp, Co, and Cs cover NUL, DEL, C1, bidi overrides,
+    zero-width marks, line and paragraph separators, tag characters, private
+    use, and surrogates. Unassigned code points (Cn) stay allowed: a newer
+    emoji can be unassigned in this Python's Unicode data and assigned in the
+    console. U+115F, U+1160, U+3164, U+FFA0, and U+2800 are rejected as well:
+    their categories are Lo or So. Normal CJK stays allowed.
     """
 
     for char in text:

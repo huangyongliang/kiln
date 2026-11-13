@@ -15,6 +15,16 @@ from kiln.domain.llm_catalog import ROLE_ORDER, CatalogSnapshot, env_snapshot
 
 @dataclass(frozen=True)
 class ChatAllowance:
+    """Allow-list passed into every provider ``complete`` call.
+
+    ``managed`` is true when this list is the caller's whole set and an empty
+    list is final: a saved catalog, or an unmanaged deployment with neither
+    ``LLM_MODELS`` nor ``LLM_MODEL``. It is false when the environment seed
+    supplies the ids. ``resolve_model`` rejects an empty list either way, so
+    the flag no longer decides whether an empty list is forwarded. ``mock``
+    and ``off`` receive the same value and ignore it.
+    """
+
     allowed: tuple[str, ...]
     default: str
     managed: bool
@@ -64,12 +74,15 @@ def chat_allowance(
     principal: Principal,
     snapshot: CatalogSnapshot,
 ) -> ChatAllowance:
-    """Allowance for one openai chat request. Not used for mock or off.
+    """Allowance for one chat request.
 
-    An unmanaged deployment with environment models keeps that allow-list.
-    With no environment models, only ``LLM_MODEL`` is allowed when it is set.
-    When neither is set, the empty list is managed and chat raises
-    ``NO_MODELS_FOR_ACCOUNT`` instead of forwarding an arbitrary id.
+    The openai path enforces it. ``mock`` and ``off`` receive the same object
+    and ignore it, so their replies do not depend on the list.
+
+    An unmanaged deployment with environment models keeps that allow-list and
+    ``managed`` false. With no environment models, only ``LLM_MODEL`` is
+    allowed when it is set. When neither is set, ``managed`` is true and the
+    list is empty. See ``ChatAllowance`` for what ``managed`` means.
     """
 
     if snapshot.source != "db":

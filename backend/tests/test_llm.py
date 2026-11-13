@@ -72,6 +72,51 @@ def test_mock_and_off_complete_accept_allowance_and_ignore_it() -> None:
         )
 
 
+def test_openai_empty_allowance_is_rejected_even_when_unmanaged() -> None:
+    def explode(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"empty allowance called upstream: {request.url}")
+
+    with httpx.Client(transport=httpx.MockTransport(explode)) as http_client:
+        provider = OpenAICompatibleProvider(
+            base_url="http://llm.example/v1",
+            api_key="",
+            client=http_client,
+        )
+        request = ChatRequest(
+            messages=[ChatMessage(role="user", content="ping")],
+            model="script-model",
+        )
+        with pytest.raises(ModelRequestError, match=NO_MODELS_FOR_ACCOUNT):
+            provider.complete(request, allowed=(), default="", managed=False)
+
+
+def test_mock_chat_still_answers_when_nothing_is_configured() -> None:
+    def explode(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"mock mode called the network: {request.url}")
+
+    with httpx.Client(transport=httpx.MockTransport(explode)) as http_client:
+        app = create_app(
+            app_settings(llm_provider="mock", llm_model="", llm_models=""),
+            http_client=http_client,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
+            named = client.post(
+                "/api/v1/llm/chat",
+                json={"messages": [{"role": "user", "content": "ping"}], "model": "script-model"},
+            )
+            omitted = client.post(
+                "/api/v1/llm/chat",
+                json={"messages": [{"role": "user", "content": "ping"}]},
+            )
+    assert named.status_code == 200
+    assert named.json()["provider"] == "mock"
+    assert named.json()["model"] == "script-model"
+    assert NO_MODELS_FOR_ACCOUNT not in named.text
+    assert omitted.status_code == 200
+    assert omitted.json()["model"] == "mock"
+    assert NO_MODELS_FOR_ACCOUNT not in omitted.text
+
+
 def test_openai_complete_without_allowance_raises_and_does_not_call_upstream() -> None:
     def explode(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"complete called upstream: {request.url}")
