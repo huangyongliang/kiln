@@ -10,9 +10,11 @@ import {
   chatModelState,
   chatRequestBody,
   chatRequestMessages,
+  failOutgoingMessage,
   readChatModel,
   readChatThread,
   showModelPicker,
+  takeUserMessage,
   trimChatMessages,
   writeChatModel,
   writeChatThread,
@@ -215,6 +217,44 @@ test("a stale selection falls back to the default and stays sendable", () => {
   assert.equal(fresh.model, "model-b");
   assert.equal(fresh.fellBack, false);
   assert.equal(fresh.notice, "");
+});
+
+test("the composer is empty once the user text is taken", () => {
+  const prior = [{ role: "assistant", content: "早" }];
+  const started = takeUserMessage("  你好  ", prior);
+  assert.equal(started.content, "你好");
+  assert.equal(started.prompt, "");
+  assert.equal(prior.length, 1);
+  assert.deepEqual(started.messages, [
+    { role: "assistant", content: "早" },
+    { role: "user", content: "你好", failed: false },
+  ]);
+  assert.equal(takeUserMessage("   ", prior), null);
+  assert.equal(takeUserMessage("", []), null);
+});
+
+test("a failed send keeps the bubble and does not write the text back", () => {
+  const started = takeUserMessage("原文", []);
+  const typedWhileWaiting = "等待时新打的字";
+  const failed = failOutgoingMessage(started.messages, typedWhileWaiting);
+  assert.equal(failed.prompt, typedWhileWaiting);
+  assert.equal(failed.prompt.includes("原文"), false);
+  assert.equal(failed.messages.at(-1).failed, true);
+  assert.equal(failed.messages.at(-1).content, "原文");
+  const emptyComposer = failOutgoingMessage(started.messages, "");
+  assert.equal(emptyComposer.prompt, "");
+  assert.equal(emptyComposer.messages.at(-1).content, "原文");
+  assert.equal(emptyComposer.messages.at(-1).failed, true);
+});
+
+test("the thread stores the raw message text, not rendered html", () => {
+  const storage = memoryStorage();
+  const started = takeUserMessage("**加粗** 与 `代码`", []);
+  writeChatThread(storage, started.messages);
+  assert.equal(readChatThread(storage)[0].content, "**加粗** 与 `代码`");
+  const saved = storage.getItem(CHAT_THREAD_KEY);
+  assert.equal(saved.includes("<strong>"), false);
+  assert.equal(saved.includes("<code>"), false);
 });
 
 function memoryStorage() {

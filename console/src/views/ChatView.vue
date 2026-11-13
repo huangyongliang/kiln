@@ -9,12 +9,15 @@ import {
   STALE_MODEL_TIP,
   chatModelState,
   chatRequestBody,
+  failOutgoingMessage,
   readChatModel,
   readChatThread,
   showModelPicker,
+  takeUserMessage,
   writeChatModel,
   writeChatThread,
 } from "../chat";
+import MarkdownBody from "../components/MarkdownBody.vue";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
 import StatusTag from "../components/StatusTag.vue";
@@ -212,17 +215,21 @@ function canBuildItem(item) {
 }
 
 async function send() {
-  const content = prompt.value.trim();
-  if (!content || sending.value || composerDisabled.value) {
+  if (sending.value || composerDisabled.value) {
+    return;
+  }
+  const started = takeUserMessage(prompt.value, messages.value);
+  if (!started) {
     return;
   }
   // Capture the id now. Changing the select while this request is in flight
   // applies only to the next send, and does not rewrite bubbles already shown.
   const outboundModel = showPicker.value ? selectedModel.value : "";
-  const payload = chatRequestBody(messages.value, content, outboundModel);
+  const payload = chatRequestBody(messages.value, started.content, outboundModel);
   sending.value = true;
   error.value = "";
-  messages.value = [...messages.value, { role: "user", content, failed: false }];
+  messages.value = started.messages;
+  prompt.value = started.prompt;
   await scrollMessages();
   try {
     const body = await postJson("/api/v1/llm/chat", payload);
@@ -234,18 +241,14 @@ async function send() {
       reply.model = body.model;
     }
     messages.value = [...messages.value, reply];
-    prompt.value = "";
     if (actions.some((item) => item.type === "skill_drafted" || item.type === "skill_updated")) {
       loadSidebar();
     }
     await scrollMessages();
   } catch (caught) {
-    const copy = messages.value.slice();
-    const last = copy[copy.length - 1];
-    if (last && last.role === "user") {
-      copy[copy.length - 1] = { ...last, failed: true };
-      messages.value = copy;
-    }
+    const failed = failOutgoingMessage(messages.value, prompt.value);
+    messages.value = failed.messages;
+    prompt.value = failed.prompt;
     error.value = isForbidden(caught) ? actionDeniedText("agent.qa") : errorText(caught, "发送失败");
   } finally {
     sending.value = false;
@@ -343,7 +346,7 @@ async function send() {
                 class="bubble"
                 :class="{ user: item.role === 'user', failed: item.failed }"
               >
-                <p class="bubble-text">{{ item.content }}</p>
+                <MarkdownBody :text="item.content" />
                 <span v-if="item.role === 'assistant' && item.model" class="bubble-model">{{ item.model }}</span>
                 <span v-if="item.failed" class="fail-mark">发送失败</span>
                 <p v-if="item.actions?.length" class="bubble-actions">

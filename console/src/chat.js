@@ -26,6 +26,38 @@ export function chatRequestBody(history, content, model) {
   return body;
 }
 
+/**
+ * Move a non-empty composer into the thread and clear it.
+ * The caller does this before POST /llm/chat. The returned prompt is empty,
+ * so a later failure cannot put this text back by reusing the result.
+ */
+export function takeUserMessage(prompt, messages) {
+  const content = String(prompt ?? "").trim();
+  if (!content) {
+    return null;
+  }
+  const thread = Array.isArray(messages) ? messages : [];
+  return {
+    content,
+    prompt: "",
+    messages: [...thread, { role: "user", content, failed: false }],
+  };
+}
+
+/**
+ * Mark the latest user bubble as failed.
+ * `prompt` is the composer as it stands now: still empty, or text typed
+ * while the request was in flight. It is returned unchanged.
+ */
+export function failOutgoingMessage(messages, prompt) {
+  const thread = Array.isArray(messages) ? messages.slice() : [];
+  const last = thread[thread.length - 1];
+  if (last && last.role === "user") {
+    thread[thread.length - 1] = { ...last, failed: true };
+  }
+  return { messages: thread, prompt };
+}
+
 export function showModelPicker(provider) {
   return provider?.provider === "openai" && catalogIds(provider).length > 0;
 }
