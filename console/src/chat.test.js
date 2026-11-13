@@ -3,10 +3,18 @@ import { test } from "node:test";
 
 import {
   CHAT_MESSAGE_LIMIT,
+  CHAT_MODEL_KEY,
   CHAT_THREAD_KEY,
+  EMPTY_CATALOG_TIP,
+  STALE_MODEL_TIP,
+  chatModelState,
+  chatRequestBody,
   chatRequestMessages,
+  readChatModel,
   readChatThread,
+  showModelPicker,
   trimChatMessages,
+  writeChatModel,
   writeChatThread,
 } from "./chat.js";
 
@@ -109,6 +117,106 @@ test("the page thread round-trips in session storage without action noise", () =
   assert.deepEqual(readChatThread(storage), []);
 });
 
+test("off and mock do not show the picker", () => {
+  assert.equal(showModelPicker({ provider: "off", models: ["model-a"] }), false);
+  assert.equal(showModelPicker({ provider: "mock", models: ["model-a"] }), false);
+  assert.equal(showModelPicker({ provider: "openai", models: [] }), false);
+  assert.equal(showModelPicker({ provider: "openai", models: ["model-a"] }), true);
+  assert.equal(showModelPicker(null), false);
+  const mock = chatModelState(
+    { provider: "mock", models: ["model-a"], default_model: "model-a" },
+    "model-a",
+  );
+  assert.equal(mock.showPicker, false);
+  assert.equal(mock.model, "");
+  assert.equal(mock.notice, "");
+  const off = chatModelState({ provider: "off", models: [], default_model: null }, "model-a");
+  assert.equal(off.showPicker, false);
+  assert.equal(off.notice, "");
+});
+
+test("an empty openai catalog asks for configuration and does not invent a model", () => {
+  const state = chatModelState(
+    { provider: "openai", models: [], default_model: null },
+    "typed-by-hand",
+  );
+  assert.equal(state.showPicker, false);
+  assert.equal(state.model, "");
+  assert.equal(state.fellBack, false);
+  assert.equal(state.notice, EMPTY_CATALOG_TIP);
+  const body = chatRequestBody([{ role: "user", content: "问" }], "下一问", state.model);
+  assert.equal(Object.hasOwn(body, "model"), false);
+});
+
+test("the selected model is stored, sent, and a later change leaves history alone", () => {
+  const storage = memoryStorage();
+  const provider = {
+    provider: "openai",
+    models: ["model-a", "model-b"],
+    default_model: "model-a",
+  };
+  writeChatThread(storage, [
+    { role: "user", content: "问", model: "should-drop" },
+    { role: "assistant", content: "答", model: "model-a" },
+  ]);
+  const threadBefore = storage.getItem(CHAT_THREAD_KEY);
+  writeChatModel(storage, "model-b");
+  assert.equal(readChatModel(storage), "model-b");
+  assert.equal(storage.getItem(CHAT_MODEL_KEY), "model-b");
+  const picked = chatModelState(provider, readChatModel(storage));
+  assert.equal(picked.showPicker, true);
+  assert.equal(picked.model, "model-b");
+  assert.equal(picked.fellBack, false);
+  const first = chatRequestBody(readChatThread(storage), "下一问", picked.model);
+  writeChatModel(storage, "model-a");
+  const second = chatRequestBody(readChatThread(storage), "再问", readChatModel(storage));
+  assert.equal(first.model, "model-b");
+  assert.equal(second.model, "model-a");
+  assert.deepEqual(first.messages, [
+    { role: "user", content: "问" },
+    { role: "assistant", content: "答" },
+    { role: "user", content: "下一问" },
+  ]);
+  assert.equal(first.messages.some((item) => Object.hasOwn(item, "model")), false);
+  assert.equal(second.messages.some((item) => Object.hasOwn(item, "model")), false);
+  assert.equal(storage.getItem(CHAT_THREAD_KEY), threadBefore);
+  assert.deepEqual(readChatThread(storage)[1], {
+    role: "assistant",
+    content: "答",
+    model: "model-a",
+  });
+});
+
+test("a stale selection falls back to the default and stays sendable", () => {
+  const storage = memoryStorage();
+  const provider = {
+    provider: "openai",
+    models: ["model-a", "model-b"],
+    default_model: "model-b",
+  };
+  writeChatModel(storage, "retired-model");
+  const state = chatModelState(provider, readChatModel(storage));
+  assert.equal(state.showPicker, true);
+  assert.equal(state.fellBack, true);
+  assert.equal(state.model, "model-b");
+  assert.equal(state.notice, STALE_MODEL_TIP);
+  writeChatModel(storage, state.model);
+  assert.equal(readChatModel(storage), "model-b");
+  const body = chatRequestBody([], "还能发", state.model);
+  assert.equal(body.model, "model-b");
+  assert.deepEqual(body.messages, [{ role: "user", content: "还能发" }]);
+  const first = chatModelState(
+    { provider: "openai", models: ["first-model", "second-model"], default_model: null },
+    "retired-model",
+  );
+  assert.equal(first.model, "first-model");
+  assert.equal(first.fellBack, true);
+  const fresh = chatModelState(provider, "");
+  assert.equal(fresh.model, "model-b");
+  assert.equal(fresh.fellBack, false);
+  assert.equal(fresh.notice, "");
+});
+
 function memoryStorage() {
   const data = new Map();
   return {
@@ -117,6 +225,9 @@ function memoryStorage() {
     },
     setItem(key, value) {
       data.set(key, String(value));
+    },
+    removeItem(key) {
+      data.delete(key);
     },
   };
 }

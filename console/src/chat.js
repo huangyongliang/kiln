@@ -1,15 +1,95 @@
 /**
  * Assemble one chat request from the page thread.
- * Failed bubbles and action links stay on the page. They are not sent.
+ * Failed bubbles, action links, and the assistant model stay on the page.
+ * They are not sent. The selected model id lives in its own sessionStorage
+ * key and is not mixed into the message array.
  */
 
 import { isUuid } from "./paths.js";
 
 export const CHAT_MESSAGE_LIMIT = 32;
 export const CHAT_THREAD_KEY = "kiln.chat.thread";
+export const CHAT_MODEL_KEY = "kiln.chat.model";
+export const STALE_MODEL_TIP = "上次选择的模型已不在允许列表中，已改用默认模型。";
+export const EMPTY_CATALOG_TIP = "请运营配置 LLM_MODEL 或 LLM_MODELS。";
+
+const MODEL_ID_MAX = 128;
 
 const ROLES = new Set(["system", "user", "assistant"]);
 const ACTION_TYPES = new Set(["skill_drafted", "skill_updated", "build_started"]);
+
+export function chatRequestBody(history, content, model) {
+  const body = { messages: chatRequestMessages(history, content) };
+  if (typeof model === "string" && model.length > 0) {
+    body.model = model;
+  }
+  return body;
+}
+
+export function showModelPicker(provider) {
+  return provider?.provider === "openai" && catalogIds(provider).length > 0;
+}
+
+/**
+ * Decide the picker for this tab.
+ * `saved` is the sessionStorage id, kept separate from the message array.
+ * A saved id that is no longer in the catalog falls back to default_model,
+ * or to the first catalog item, and stays sendable. off and mock never
+ * show a picker, even if a models list is present. An empty openai catalog
+ * does not offer a free-text model id.
+ */
+export function chatModelState(provider, saved) {
+  const models = catalogIds(provider);
+  const showPicker = provider?.provider === "openai" && models.length > 0;
+  if (!showPicker) {
+    return {
+      showPicker: false,
+      model: "",
+      fellBack: false,
+      notice: provider?.provider === "openai" ? EMPTY_CATALOG_TIP : "",
+    };
+  }
+  const savedId = typeof saved === "string" ? saved : "";
+  if (savedId && models.includes(savedId)) {
+    return { showPicker: true, model: savedId, fellBack: false, notice: "" };
+  }
+  const preferred = typeof provider.default_model === "string" ? provider.default_model : "";
+  const model = preferred && models.includes(preferred) ? preferred : models[0];
+  const fellBack = savedId.length > 0;
+  return {
+    showPicker: true,
+    model,
+    fellBack,
+    notice: fellBack ? STALE_MODEL_TIP : "",
+  };
+}
+
+export function readChatModel(storage) {
+  if (!storage) {
+    return "";
+  }
+  try {
+    const raw = storage.getItem(CHAT_MODEL_KEY);
+    return typeof raw === "string" ? raw : "";
+  } catch {
+    return "";
+  }
+}
+
+export function writeChatModel(storage, model) {
+  if (!storage) {
+    return;
+  }
+  try {
+    if (typeof model === "string" && model.length > 0) {
+      storage.setItem(CHAT_MODEL_KEY, model);
+    } else {
+      storage.removeItem(CHAT_MODEL_KEY);
+    }
+  } catch {
+    // The page still sends when the browser refuses to store the selection.
+  }
+}
 
 export function chatRequestMessages(history, content) {
   const prior = [];
@@ -80,6 +160,14 @@ function storedMessage(item) {
     return null;
   }
   const stored = { role: item.role, content: item.content };
+  if (
+    item.role === "assistant" &&
+    typeof item.model === "string" &&
+    item.model.length > 0 &&
+    item.model.length <= MODEL_ID_MAX
+  ) {
+    stored.model = item.model;
+  }
   if (item.failed === true) {
     stored.failed = true;
   }
@@ -90,6 +178,13 @@ function storedMessage(item) {
     }
   }
   return stored;
+}
+
+function catalogIds(provider) {
+  if (!provider || !Array.isArray(provider.models)) {
+    return [];
+  }
+  return provider.models.filter((id) => typeof id === "string" && id.length > 0);
 }
 
 function storedAction(item) {

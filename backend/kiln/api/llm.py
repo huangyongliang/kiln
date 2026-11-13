@@ -1,8 +1,10 @@
 """Chat outline routed through the configured model provider.
 
 POST /llm/chat is the only chat entry and still requires agent.qa. The
-OpenAI provider runs a server-owned tool loop. mock and off keep complete()
-and do not attach or execute tools.
+OpenAI provider runs a server-owned tool loop. When its catalog is non-empty,
+the request model must be in that catalog, and every round of the request
+uses the same resolved id. mock and off keep complete() and do not validate
+the model against the catalog. They do not attach or execute tools.
 """
 
 from fastapi import APIRouter, Depends, Request

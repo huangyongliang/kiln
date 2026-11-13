@@ -4,7 +4,17 @@ import { RouterLink } from "vue-router";
 
 import { accessReady, account, actionDeniedText, perms } from "../access";
 import { errorText, getJson, isForbidden, postJson } from "../api";
-import { chatRequestMessages, readChatThread, writeChatThread } from "../chat";
+import {
+  EMPTY_CATALOG_TIP,
+  STALE_MODEL_TIP,
+  chatModelState,
+  chatRequestBody,
+  readChatModel,
+  readChatThread,
+  showModelPicker,
+  writeChatModel,
+  writeChatThread,
+} from "../chat";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
 import StatusTag from "../components/StatusTag.vue";
@@ -17,6 +27,8 @@ const note =
 
 const provider = ref(null);
 const messages = ref(readChatThread(window.sessionStorage));
+const selectedModel = ref("");
+const modelNotice = ref("");
 const prompt = ref("");
 const error = ref("");
 const pageError = ref("");
@@ -35,6 +47,10 @@ const off = computed(() => provider.value?.provider === "off");
 const mock = computed(() => provider.value?.provider === "mock");
 const canSend = computed(() => canDo("chat.send", perms.value));
 const composerDisabled = computed(() => off.value || !canSend.value || mode.value !== "ready");
+const showPicker = computed(() => showModelPicker(provider.value));
+const emptyCatalog = computed(
+  () => mode.value === "ready" && provider.value?.provider === "openai" && !showPicker.value,
+);
 const canUseSkills = computed(() => canDo("skill.create", perms.value));
 const accountId = computed(() => account.value?.id || "");
 
@@ -43,9 +59,7 @@ const pill = computed(() => {
     return "";
   }
   if (provider.value.provider === "openai") {
-    return provider.value.default_model
-      ? `模型已连接 · ${provider.value.default_model}`
-      : "模型已连接";
+    return "模型已连接";
   }
   if (provider.value.provider === "mock") {
     return "模拟模式";
@@ -54,6 +68,7 @@ const pill = computed(() => {
 });
 
 watch(messages, (value) => writeChatThread(window.sessionStorage, value), { deep: true });
+watch(provider, syncModelSelection);
 
 onMounted(load);
 watch(accessReady, (ready) => {
@@ -126,6 +141,24 @@ async function loadUsable() {
   }
 }
 
+function syncModelSelection() {
+  const state = chatModelState(provider.value, readChatModel(window.sessionStorage));
+  selectedModel.value = state.model;
+  if (!state.showPicker) {
+    modelNotice.value = "";
+  } else if (state.fellBack) {
+    modelNotice.value = STALE_MODEL_TIP;
+  }
+  if (state.model) {
+    writeChatModel(window.sessionStorage, state.model);
+  }
+}
+
+function onModelChange() {
+  writeChatModel(window.sessionStorage, selectedModel.value);
+  modelNotice.value = "";
+}
+
 function suggest(text) {
   if (composerDisabled.value) {
     return;
@@ -183,20 +216,24 @@ async function send() {
   if (!content || sending.value || composerDisabled.value) {
     return;
   }
-  const requestMessages = chatRequestMessages(messages.value, content);
+  // Capture the id now. Changing the select while this request is in flight
+  // applies only to the next send, and does not rewrite bubbles already shown.
+  const outboundModel = showPicker.value ? selectedModel.value : "";
+  const payload = chatRequestBody(messages.value, content, outboundModel);
   sending.value = true;
   error.value = "";
   messages.value = [...messages.value, { role: "user", content, failed: false }];
   await scrollMessages();
   try {
-    const body = await postJson("/api/v1/llm/chat", { messages: requestMessages });
+    const body = await postJson("/api/v1/llm/chat", payload);
     const actions = Array.isArray(body?.actions)
       ? body.actions.filter((item) => actionTarget(item))
       : [];
-    messages.value = [
-      ...messages.value,
-      { role: "assistant", content: body?.content || "", actions },
-    ];
+    const reply = { role: "assistant", content: body?.content || "", actions };
+    if (typeof body?.model === "string" && body.model.length > 0) {
+      reply.model = body.model;
+    }
+    messages.value = [...messages.value, reply];
     prompt.value = "";
     if (actions.some((item) => item.type === "skill_drafted" || item.type === "skill_updated")) {
       loadSidebar();
@@ -307,6 +344,7 @@ async function send() {
                 :class="{ user: item.role === 'user', failed: item.failed }"
               >
                 <p class="bubble-text">{{ item.content }}</p>
+                <span v-if="item.role === 'assistant' && item.model" class="bubble-model">{{ item.model }}</span>
                 <span v-if="item.failed" class="fail-mark">发送失败</span>
                 <p v-if="item.actions?.length" class="bubble-actions">
                   <RouterLink
@@ -345,16 +383,30 @@ async function send() {
                 placeholder="向已配置的模型发送一条消息"
                 @keydown="onKeydown"
               />
-              <button
-                v-if="canSend"
-                type="submit"
-                class="btn"
-                :disabled="composerDisabled || sending || !prompt.trim()"
-              >
-                <span v-if="sending" class="spinner" aria-hidden="true"></span>
-                发送
-              </button>
+              <div class="composer-actions">
+                <select
+                  v-if="showPicker"
+                  v-model="selectedModel"
+                  class="model-select"
+                  aria-label="模型"
+                  :disabled="!canSend"
+                  @change="onModelChange"
+                >
+                  <option v-for="id in provider.models" :key="id" :value="id">{{ id }}</option>
+                </select>
+                <button
+                  v-if="canSend"
+                  type="submit"
+                  class="btn"
+                  :disabled="composerDisabled || sending || !prompt.trim()"
+                >
+                  <span v-if="sending" class="spinner" aria-hidden="true"></span>
+                  发送
+                </button>
+              </div>
             </form>
+            <p v-if="modelNotice" class="hint">{{ modelNotice }}</p>
+            <p v-else-if="emptyCatalog" class="hint">{{ EMPTY_CATALOG_TIP }}</p>
             <p v-if="off" class="hint">
               模型未开启（当前为关闭）。配置 OpenAI 兼容端点后，可以问答、起草 Skill，并在 Skill 发布后发起构建。
               <template v-if="canDo('skill.create', perms)">

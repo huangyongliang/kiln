@@ -331,9 +331,13 @@ def run_tool_loop(
     messages = _model_messages(request)
     actions: list[ChatAction] = []
     turn: ModelTurn | None = None
+    # Resolve once. Later rounds of this request reuse the same id, including
+    # when the catalog default fills in an omitted model. An id outside a
+    # non-empty catalog fails here and does not call the endpoint.
+    model = provider.resolve_model(request.model)
     for _ in range(MAX_MODEL_ROUNDS):
         turn = provider.complete_turn(
-            requested_model=request.model,
+            model=model,
             messages=messages,
             tools=OPENAI_TOOLS,
         )

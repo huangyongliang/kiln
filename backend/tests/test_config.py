@@ -141,3 +141,111 @@ def test_openai_accepts_a_configured_endpoint() -> None:
     assert settings.llm_provider == "openai"
     assert settings.llm_base_url == "http://llm.example/v1"
     assert settings.llm_api_key_value() == "local-only"
+    assert settings.llm_catalog() == ["demo"]
+    assert settings.llm_request_default() == "demo"
+
+
+def test_llm_models_strips_drops_empty_and_dedupes_in_order() -> None:
+    settings = Settings(
+        llm_provider="openai",
+        llm_base_url="http://127.0.0.1:9/v1",
+        llm_models="  beta , alpha, , beta ,alpha, gamma ",
+        llm_model="",
+        _env_file=None,
+    )
+    assert settings.llm_model_ids() == ["beta", "alpha", "gamma"]
+    assert settings.llm_catalog() == ["beta", "alpha", "gamma"]
+    assert settings.llm_request_default() == "beta"
+    repeated = Settings(
+        llm_provider="off",
+        llm_models=",".join(["same-model"] * 40),
+        _env_file=None,
+    )
+    assert repeated.llm_model_ids() == ["same-model"]
+
+
+def test_empty_llm_models_catalog_equals_llm_model() -> None:
+    one = Settings(
+        llm_provider="openai",
+        llm_base_url="http://127.0.0.1:9/v1",
+        llm_models=" , ",
+        llm_model="only-model",
+        _env_file=None,
+    )
+    assert one.llm_model_ids() == []
+    assert one.llm_catalog() == ["only-model"]
+    assert one.llm_request_default() == "only-model"
+    empty = Settings(
+        llm_provider="openai",
+        llm_base_url="http://127.0.0.1:9/v1",
+        llm_models="",
+        llm_model="",
+        _env_file=None,
+    )
+    assert empty.llm_catalog() == []
+    assert empty.llm_request_default() == ""
+
+
+def test_missing_llm_model_is_prepended_and_is_not_a_parse_error() -> None:
+    listed = ",".join(f"model-{index}" for index in range(32))
+    settings = Settings(
+        llm_provider="openai",
+        llm_base_url="http://127.0.0.1:9/v1",
+        llm_models=listed,
+        llm_model="default-model",
+        _env_file=None,
+    )
+    assert settings.llm_model_ids() == [f"model-{index}" for index in range(32)]
+    catalog = settings.llm_catalog()
+    assert catalog[0] == "default-model"
+    assert len(catalog) == 33
+    assert settings.llm_request_default() == "default-model"
+    already = Settings(
+        llm_provider="openai",
+        llm_base_url="http://127.0.0.1:9/v1",
+        llm_models="model-b, model-a",
+        llm_model="model-a",
+        _env_file=None,
+    )
+    assert already.llm_catalog() == ["model-b", "model-a"]
+    assert already.llm_request_default() == "model-a"
+
+
+def test_llm_models_item_longer_than_128_refuses_startup() -> None:
+    # The whole process configuration is rejected. The long id is not truncated
+    # and the earlier items are not kept.
+    with pytest.raises(ValidationError, match="不会截断"):
+        Settings(
+            llm_provider="off",
+            llm_models="ok," + ("m" * 129),
+            _env_file=None,
+        )
+    exact = Settings(
+        llm_provider="off",
+        llm_models=" " + ("m" * 128) + " ",
+        _env_file=None,
+    )
+    assert exact.llm_model_ids() == ["m" * 128]
+
+
+def test_llm_models_over_32_items_refuses_startup() -> None:
+    # More than 32 ids after trim, drop, and dedupe refuses startup. The first
+    # 32 are not silently kept. Duplicates do not count as extra items.
+    too_many = ",".join(f"model-{index}" for index in range(33))
+    with pytest.raises(ValidationError, match="不会只保留前 32"):
+        Settings(llm_provider="off", llm_models=too_many, _env_file=None)
+    padded = ",".join(["model-0"] * 10 + [f"model-{index}" for index in range(32)])
+    settings = Settings(llm_provider="off", llm_models=padded, _env_file=None)
+    assert settings.llm_model_ids() == [f"model-{index}" for index in range(32)]
+
+
+def test_mock_and_off_do_not_apply_the_model_catalog() -> None:
+    for provider in ("mock", "off"):
+        settings = Settings(
+            llm_provider=provider,
+            llm_model="default-model",
+            llm_models="model-a, model-b",
+            _env_file=None,
+        )
+        assert settings.llm_model_ids() == ["model-a", "model-b"]
+        assert settings.llm_catalog() == []

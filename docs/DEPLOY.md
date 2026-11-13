@@ -16,7 +16,7 @@
 | Git 远端 | 可替换适配器 | `GIT_PROVIDER=gitlab` 是生产代码源，`GIT_PROVIDER=gitea` 是实验室实现。地址只来自 `GIT_BASE_URL`，令牌只来自 `GIT_TOKEN`。仓库不写生产 GitLab 地址。profile `lab` 的 `gitea/gitea:1.22`（容器 `kiln-gitea`）仍是占位，不是生产代码源 |
 | 制品存储 | 目录在 PostgreSQL，字节在平台本地目录 | 制品、版本和下载预约写在 Postgres。字节写在 `KILN_ARTIFACT_ROOT`。compose 把它挂到命名卷 `kiln-artifact-data`，容器内路径是 `/var/lib/kiln/artifacts`。版本保存字节后 `content_available` 为 true，`GET /api/v1/retrieve/{reservation_id}/content` 返回这些字节。包类型字段有 `maven`、`python`、`generic`、`frontend`。制品不发布到 Nexus |
 | 可选依赖代理对接，默认关闭；制品不发布到 Nexus | 现在可以接线 | 默认关闭。设置 `KILN_NEXUS_URL` 与 `KILN_NEXUS_REPOSITORY` 后，产品构建可通过该代理解析依赖。`GET /api/v1/dependency-proxy` 需要 `executor.read`。未配置时不向外连接。制品不发布到 Nexus，字节仍在 `KILN_ARTIFACT_ROOT`。compose 只透传环境变量，不增加 Nexus 服务 |
-| OpenAI 兼容模型端点 | 可选 | `LLM_PROVIDER` 默认 `off`。`openai` 会 `POST {LLM_BASE_URL}/chat/completions`。`mock` 不访问网络 |
+| OpenAI 兼容模型端点 | 可选 | `LLM_PROVIDER` 默认 `off`。`openai` 会 `POST {LLM_BASE_URL}/chat/completions`。可选模型 id 来自 `LLM_MODELS`，不从端点拉取目录。`mock` 不访问网络 |
 | 本地登录与用户信息同步 | 这一版已接上起步 | 平台自身具备完整的账号与权限能力。本地账号、口令哈希、会话和 RBAC 目录在 Postgres 中。控制台有登录页。未配置公司用户系统时使用本地口令登录。`KILN_API_TOKEN` 仍是必填的机器和开发访问令牌，拥有目录中的全部权限。公司用户系统的对接是可选的。可选对接之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上 |
 | Harbor、Kubernetes、专用镜像仓库 | 不属于一期 | 没有清单、没有镜像推送。架构方案把镜像构建放在一期之后 |
 
@@ -95,6 +95,7 @@ cp .env.example .env
 | `LLM_BASE_URL` | 空 | `openai` 时必填。compose 原样传入 |
 | `LLM_API_KEY` | 空 | compose 原样传入。只从环境读取 |
 | `LLM_MODEL` | 空 | 默认模型。请求体里也可以传 `model` |
+| `LLM_MODELS` | 空 | 逗号分隔的模型 id。留空时可选列表等于 `LLM_MODEL`。单项超过 128 个字符，或去掉空白、空项并去重后超过 32 项，进程拒绝启动，不会截断，也不会只保留前 32 项。`LLM_MODEL` 不在列表中时插到开头，这一项不算解析错误。`mock` 与 `off` 不使用这份列表。compose 原样传入 |
 | `LLM_TIMEOUT_SECONDS` | `30` | 允许范围大于 0 且不超过 300 |
 | `JENKINS_URL` | 空 | compose 原样传入 API。空则不连接 Jenkins。须是 http 或 https，不能带用户名、口令、查询串 |
 | `JENKINS_USER` | 空 | 与 URL、令牌一起设置。compose 原样传入 |
@@ -181,7 +182,7 @@ curl -fsS http://127.0.0.1:8000/api/v1/llm/provider \
 {"status":"ok","service":"kiln","version":"0.1.0"}
 ```
 
-`/` 返回 `service`、`health`（`/health`）和 `docs`（`/docs`）。默认模型状态是 `provider` 为 `off`，`base_url` 和 `default_model` 为 null，两个 `*_configured` 字段为 false。
+`/` 返回 `service`、`health`（`/health`）和 `docs`（`/docs`）。默认模型状态是 `provider` 为 `off`，`base_url` 和 `default_model` 为 null，`models` 为空列表，两个 `*_configured` 字段为 false。
 
 `/health` 不查询 Postgres，也不访问模型端点。返回 `ok` 只说明 API 进程在应答。进程能启动，表示启动当时的迁移已经完成；之后数据库断开时，`/health` 仍可能返回 `ok`。
 
@@ -275,6 +276,7 @@ docker compose up --build -d api
 LLM_PROVIDER=openai
 LLM_BASE_URL=http://127.0.0.1:11434/v1
 LLM_MODEL=替换为端点上的模型名
+LLM_MODELS=替换为端点上的模型名,另一个模型 id
 LLM_API_KEY=
 ```
 
@@ -290,7 +292,7 @@ curl -fsS http://127.0.0.1:8000/api/v1/llm/provider \
 
 Compose 把 `LLM_BASE_URL` 原样写进 `kiln-api`。容器里的 `127.0.0.1` 是容器自己，不是宿主机。仓库没有 `extra_hosts`，也没有规定从容器访问宿主机的主机名。模型若跑在别的机器或容器网络能路由到的地址上，把那个地址填进 `LLM_BASE_URL`。进程直接跑在宿主机上时，`127.0.0.1` 才指向宿主机。
 
-对话请求是 `POST /api/v1/llm/chat`，需要 `agent.qa`，正文为 `{"messages":[{"role":"user","content":"…"}]}`。未设置 `LLM_MODEL` 且请求里也没有 `model` 时，返回 400。超时使用 `LLM_TIMEOUT_SECONDS`。对话可协助起草并改稿，但不能审核或发布。列出「我产出的」用 `GET /skills?scope=mine`，列出「我能用的已发布 Skill」用 `GET /skills?scope=usable`。模型为 `off` 时对话输入关闭，改用表单新建草稿，并在 Skill 详情里编辑仍处于草稿的记录。发布后的构建与 POST /builds 相同。
+对话请求是 `POST /api/v1/llm/chat`，需要 `agent.qa`，正文为 `{"messages":[{"role":"user","content":"…"}]}`，也可以带 `model`。未设置 `LLM_MODEL` 且请求里也没有 `model` 时，返回 400。`openai` 且有效目录非空时，`model` 必须在目录中；省略则使用 `LLM_MODEL`，若 `LLM_MODEL` 为空则使用目录第一项。不在目录中返回 400，正文说明不在允许的模型列表中，并且不会调用上游。目录为空时，请求自带的 `model` 仍会转发，这是给已有脚本留的兼容，控制台不提供自由输入。超时使用 `LLM_TIMEOUT_SECONDS`。同一请求里的每一轮工具调用使用同一个已解析的模型。控制台在输入区旁用原生选择器更换模型 id，不切换 `openai` / `mock` / `off`。选择保存在当前标签页，页头只显示连接状态。`mock` 与 `off` 不展示选择器。对话可协助起草并改稿，但不能审核或发布。列出「我产出的」用 `GET /skills?scope=mine`，列出「我能用的已发布 Skill」用 `GET /skills?scope=usable`。模型为 `off` 时对话输入关闭，改用表单新建草稿，并在 Skill 详情里编辑仍处于草稿的记录。发布后的构建与 POST /builds 相同。
 
 ## Jenkins 与代码源
 
