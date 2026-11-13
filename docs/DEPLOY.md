@@ -317,15 +317,17 @@ kiln 不写 `pip.conf`、`.npmrc` 或 `settings.xml`，也不设置 `PIP_INDEX_U
 set +x
 set -eu
 # 示例由构建脚本配置工具。口令只从环境读取，不要写进仓库，也不要执行 set -x。
-# pip.conf 与 .npmrc 写在工作区，用 PIP_CONFIG_FILE 和 NPM_CONFIG_USERCONFIG 指向它们。
+# pip.conf 与 .npmrc 写在临时目录，用 PIP_CONFIG_FILE 和 NPM_CONFIG_USERCONFIG 指向它们。
 if [ -n "${KILN_NEXUS_URL:-}" ]; then
   nexus_url="${KILN_NEXUS_URL:-}"
   base="${nexus_url%/}/repository/${KILN_NEXUS_REPOSITORY:-}"
+  dir="$(mktemp -d)"
+  trap 'rm -rf "$dir"' EXIT
   umask 077
-  printf '[global]\nindex-url = %s/simple\n' "$base" > "${PWD}/pip.conf"
-  printf 'registry=%s/\n' "$base" > "${PWD}/.npmrc"
-  export PIP_CONFIG_FILE="${PWD}/pip.conf"
-  export NPM_CONFIG_USERCONFIG="${PWD}/.npmrc"
+  printf '[global]\nindex-url = %s/simple\n' "$base" > "$dir/pip.conf"
+  printf 'registry=%s/\n' "$base" > "$dir/.npmrc"
+  export PIP_CONFIG_FILE="$dir/pip.conf"
+  export NPM_CONFIG_USERCONFIG="$dir/.npmrc"
 fi
 ```
 

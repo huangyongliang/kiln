@@ -1,6 +1,11 @@
 """Dependency proxy unit tests. No network: Nexus is an httpx.MockTransport."""
 
 import base64
+import subprocess
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs
 from uuid import uuid4
@@ -20,7 +25,7 @@ from kiln.executor.script import product_build_command, product_job_config
 from kiln.main import create_app
 from kiln.nexus.client import NexusClient
 from tests.support import app_settings, auth_headers, truncate_domain
-from tests.test_nexus_docking import _REQUIRED, load_docking_targets
+from tests.test_nexus_docking import _REQUIRED, _build_script, load_docking_targets
 
 _PASSWORD = "nexus-secret-value"
 _URL = "http://127.0.0.1:9"
@@ -612,6 +617,201 @@ def test_docking_skips_when_the_nexus_url_is_unset(monkeypatch: pytest.MonkeyPat
         load_docking_targets()
     assert "KILN_TEST_NEXUS_URL" in str(caught.value)
     assert _PASSWORD not in str(caught.value)
+
+
+_CI_NEXUS = Path(__file__).resolve().parents[2] / "scripts" / "ci-nexus.sh"
+_CURL_USER_ESCAPE = r'u=${u//\\/\\\\}; u=${u//\"/\\\"}'
+_CURL_PASS_ESCAPE = r'p=${p//\\/\\\\}; p=${p//\"/\\\"}'
+# Quote, backslash, colon, and a space. The backslash is followed by n, not a newline.
+_SPECIAL_USER = 'a"b\\c'
+_SPECIAL_PASSWORD = 'p"a\\n :word'
+
+
+class _AuthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        server = self.server
+        assert isinstance(server, _AuthServer)
+        server.authorization = self.headers.get("Authorization")
+        body = server.body
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        return
+
+
+class _AuthServer(ThreadingHTTPServer):
+    authorization: str | None
+    body: bytes
+
+    def __init__(self, body: bytes) -> None:
+        super().__init__(("127.0.0.1", 0), _AuthHandler)
+        self.body = body
+        self.authorization = None
+
+
+@contextmanager
+def _auth_stub(body: bytes) -> Iterator[_AuthServer]:
+    server = _AuthServer(body)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _escape_curl_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _expected_config(user: str, password: str) -> bytes:
+    return (
+        'user = "' + _escape_curl_value(user) + ":" + _escape_curl_value(password) + '"\n'
+    ).encode()
+
+
+def _basic(user: str, password: str) -> str:
+    token = base64.b64encode(f"{user}:{password}".encode()).decode()
+    return f"Basic {token}"
+
+
+def _run_curl_user_config(user: str, password: str) -> subprocess.CompletedProcess[bytes]:
+    program = r"""
+set -euo pipefail
+source "$1"
+IFS= read -r -d '' cred_user || true
+IFS= read -r -d '' cred_password || true
+curl_user_config "$cred_user" "$cred_password"
+"""
+    payload = user.encode() + b"\0" + password.encode() + b"\0"
+    return subprocess.run(
+        ["bash", "-c", program, "bash", str(_CI_NEXUS)],
+        input=payload,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _authorization_for_config(config: bytes) -> str | None:
+    with _auth_stub(b"ok") as server:
+        port = server.server_address[1]
+        proc = subprocess.run(
+            [
+                "curl",
+                "--noproxy",
+                "*",
+                "--config",
+                "-",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "5",
+                "--output",
+                "/dev/null",
+                "--write-out",
+                "%{http_code}",
+                f"http://127.0.0.1:{port}/probe",
+            ],
+            input=config,
+            capture_output=True,
+            check=False,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout == b"200"
+        return server.authorization
+
+
+def test_curl_user_config_round_trips_special_characters() -> None:
+    user = _SPECIAL_USER
+    password = _SPECIAL_PASSWORD
+    assert '"' in password and "\\" in password and ":" in password and " " in password
+    assert "\n" not in password and "\r" not in password
+    script = _CI_NEXUS.read_text(encoding="utf-8")
+    assert script.index(_CURL_USER_ESCAPE) < script.index(_CURL_PASS_ESCAPE)
+    assert script.count("curl -K -") == 5
+    assert script.count('auth_config="$(curl_user_config ') == 5
+    assert "--user" not in script
+    produced = _run_curl_user_config(user, password)
+    assert produced.returncode == 0, produced.stderr
+    assert produced.stdout == _expected_config(user, password)
+    assert password.encode() not in produced.stderr
+    assert _authorization_for_config(produced.stdout) == _basic(user, password)
+
+
+def test_curl_user_config_rejects_a_newline_without_printing_it() -> None:
+    token = "kiln-cred-newline-token"
+    cases = (
+        ("reader", f"{token}\nmore"),
+        ("reader", f"{token}\rmore"),
+        (f"{token}\nreader", "ordinary"),
+    )
+    for user, password in cases:
+        result = _run_curl_user_config(user, password)
+        assert result.returncode == 1
+        assert token.encode() not in result.stdout
+        assert token.encode() not in result.stderr
+        assert b"newline" in result.stderr
+        assert result.stdout == b""
+
+
+def test_build_script_round_trips_special_characters(tmp_path: Path) -> None:
+    user = _SPECIAL_USER
+    password = _SPECIAL_PASSWORD
+    script_text = _build_script("fixture.bin")
+    assert password not in script_text
+    assert script_text.index(_CURL_USER_ESCAPE) < script_text.index(_CURL_PASS_ESCAPE)
+    path = tmp_path / "kiln-build.sh"
+    path.write_text(script_text, encoding="utf-8")
+    body = b"fixture-bytes"
+    with _auth_stub(body) as server:
+        port = server.server_address[1]
+        proc = subprocess.run(
+            ["sh", str(path)],
+            cwd=tmp_path,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "KILN_NEXUS_URL": f"http://127.0.0.1:{port}",
+                "KILN_NEXUS_REPOSITORY": "group",
+                "KILN_NEXUS_USERNAME": user,
+                "KILN_NEXUS_PASSWORD": password,
+            },
+            capture_output=True,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert password.encode() not in proc.stdout
+        assert password.encode() not in proc.stderr
+        assert (tmp_path / "kiln-dist" / "artifact.bin").read_bytes() == body
+        assert server.authorization == _basic(user, password)
+
+
+def test_build_script_rejects_a_newline_without_printing_it(tmp_path: Path) -> None:
+    token = "kiln-cred-newline-token"
+    path = tmp_path / "kiln-build.sh"
+    path.write_text(_build_script("fixture.bin"), encoding="utf-8")
+    proc = subprocess.run(
+        ["sh", str(path)],
+        cwd=tmp_path,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "KILN_NEXUS_URL": "http://127.0.0.1:9",
+            "KILN_NEXUS_REPOSITORY": "group",
+            "KILN_NEXUS_USERNAME": "reader",
+            "KILN_NEXUS_PASSWORD": f"{token}\nmore",
+        },
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 1
+    assert token.encode() not in proc.stdout
+    assert token.encode() not in proc.stderr
+    assert b"newline" in proc.stderr
 
 
 def test_required_nexus_tests_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:

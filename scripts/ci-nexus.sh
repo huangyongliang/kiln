@@ -107,6 +107,29 @@ wait_for_ready() {
   return 1
 }
 
+# curl --config line. Reject CR/LF, then escape \ before " so the value
+# cannot break the quotes or inject another option. The secret stays in
+# the shell; it is not placed on argv.
+curl_user_config() {
+  local u="$1"
+  local p="$2"
+  case "$u" in
+    *$'\n'*|*$'\r'*)
+      echo "refusing a credential that contains a newline" >&2
+      exit 1
+      ;;
+  esac
+  case "$p" in
+    *$'\n'*|*$'\r'*)
+      echo "refusing a credential that contains a newline" >&2
+      exit 1
+      ;;
+  esac
+  u=${u//\\/\\\\}; u=${u//\"/\\\"}
+  p=${p//\\/\\\\}; p=${p//\"/\\\"}
+  printf 'user = "%s:%s"\n' "$u" "$p"
+}
+
 api() {
   local method="$1"
   local path="$2"
@@ -128,7 +151,9 @@ api() {
   if [[ -n "$body_file" ]]; then
     args+=(--data-binary "@${body_file}")
   fi
-  printf 'user = "%s:%s"\n' "$user" "$password" | curl -K - "${args[@]}"
+  local auth_config
+  auth_config="$(curl_user_config "$user" "$password")" || exit 1
+  printf '%s\n' "$auth_config" | curl -K - "${args[@]}"
 }
 
 expect() {
@@ -264,8 +289,10 @@ EOF
     "$ADMIN_USER" "$ADMIN_PASSWORD" "application/json" /tmp/kiln-nexus-body.json 201 200
 
   printf 'kiln-depproxy-fixture\n' >/tmp/kiln-nexus-fixture
+  local auth_config
+  auth_config="$(curl_user_config "$ADMIN_USER" "$ADMIN_PASSWORD")" || exit 1
   upload_code="$(
-    printf 'user = "%s:%s"\n' "$ADMIN_USER" "$ADMIN_PASSWORD" |
+    printf '%s\n' "$auth_config" |
       curl -K - --silent --output /tmp/kiln-nexus-body --write-out '%{http_code}' \
       -F "raw.directory=ci" \
       -F "raw.asset1=@/tmp/kiln-nexus-fixture;filename=fixture.bin" \
@@ -323,8 +350,9 @@ EOF
     "$ADMIN_USER" "$ADMIN_PASSWORD" "application/json" /tmp/kiln-nexus-user.json 200 201
   rm -f /tmp/kiln-nexus-user.json /tmp/kiln-nexus-body.json
 
+  auth_config="$(curl_user_config "$READER_USER" "$READER_PASSWORD")" || exit 1
   reader_code="$(
-    printf 'user = "%s:%s"\n' "$READER_USER" "$READER_PASSWORD" |
+    printf '%s\n' "$auth_config" |
       curl -K - --silent --output /tmp/kiln-nexus-fixture-got --write-out '%{http_code}' \
       "${API_BASE}/repository/${GROUP_NAME}/${FIXTURE_PATH}"
   )"
@@ -346,13 +374,15 @@ EOF
     exit 1
   fi
 
+  auth_config="$(curl_user_config "$READER_USER" "$READER_PASSWORD")" || exit 1
   list_code="$(
-    printf 'user = "%s:%s"\n' "$READER_USER" "$READER_PASSWORD" |
+    printf '%s\n' "$auth_config" |
       curl -K - --silent --output /tmp/kiln-nexus-repos.json --write-out '%{http_code}' \
       "${API_BASE}/service/rest/v1/repositories" || true
   )"
+  auth_config="$(curl_user_config "$READER_USER" "$READER_PASSWORD")" || exit 1
   root_code="$(
-    printf 'user = "%s:%s"\n' "$READER_USER" "$READER_PASSWORD" |
+    printf '%s\n' "$auth_config" |
       curl -K - --silent --output /dev/null --write-out '%{http_code}' \
       "${API_BASE}/repository/${GROUP_NAME}/" || true
   )"
@@ -400,16 +430,18 @@ EOF
   echo "Credentials were written to ${env_file} and were not printed."
 }
 
-if [[ -z "${GITHUB_ACTIONS:-}" && -z "${CI:-}" ]]; then
-  echo "只在 CI 中运行" >&2
-  exit 1
-fi
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  if [[ -z "${GITHUB_ACTIONS:-}" && -z "${CI:-}" ]]; then
+    echo "只在 CI 中运行" >&2
+    exit 1
+  fi
 
-case "${1:-}" in
-  start) start_proxy ;;
-  stop) stop_proxy ;;
-  *)
-    echo "usage: $0 start|stop" >&2
-    exit 2
-    ;;
-esac
+  case "${1:-}" in
+    start) start_proxy ;;
+    stop) stop_proxy ;;
+    *)
+      echo "usage: $0 start|stop" >&2
+      exit 2
+      ;;
+  esac
+fi
