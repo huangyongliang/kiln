@@ -906,6 +906,27 @@ def test_reader_without_chat_permission_gets_an_empty_model_list() -> None:
     assert builder_status.json()["base_url"] == "http://llm.example/v1"
 
 
+def test_invisible_lookalike_ids_are_rejected_and_visible_names_stay() -> None:
+    kept = validate_catalog_replace(
+        CatalogReplace.model_validate(
+            _replace([{"id": "gpt-4o", "display_name": "眼袋 🫩"}], "gpt-4o", {})
+        )
+    )
+    assert kept.model_ids() == ("gpt-4o",)
+    assert kept.models[0].display_name == "眼袋 🫩"
+    smile = validate_catalog_replace(
+        CatalogReplace.model_validate(
+            _replace([{"id": "gpt-4o", "display_name": "☺️"}], "gpt-4o", {})
+        )
+    )
+    assert smile.models[0].display_name == "☺️"
+    for codepoint in (0xE0080, 0xE0000, 0xE01F0, 0x2065, 0xFFF0):
+        dirty = f"gpt-4o{chr(codepoint)}"
+        with pytest.raises(Unprocessable) as caught:
+            validate_catalog_replace(CatalogReplace.model_validate(_replace([dirty], dirty, {})))
+        assert caught.value.detail == ID_ILLEGAL
+
+
 def test_default_and_role_fields_reject_illegal_characters() -> None:
     samples = ("\ue000", "\ud800", "\u115f", "\u1160", "\uffa0", "\u2800", "\u3164")
     for sample in samples:

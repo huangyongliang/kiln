@@ -212,6 +212,25 @@ test("an illegal model id is rejected at add time and names the row on save", ()
   assert.equal(mapped.message, `hidden\u200bmodel：${ID_ILLEGAL}`);
 });
 
+test("gpt-4o lookalikes are illegal and a visible emoji name is kept", () => {
+  assert.equal(addModelIdError("gpt-4o"), "");
+  assert.equal(displayNameError("眼袋 🫩"), "");
+  assert.equal(displayNameError("☺️"), "");
+  const saved = prepareCatalogSave({
+    rows: [{ id: "gpt-4o", displayName: "眼袋 🫩" }],
+    globalDefault: "gpt-4o",
+    assignments: { reader: [], builder: ["gpt-4o"], publisher: [], admin: [] },
+    roleDefaults: { reader: "", builder: "gpt-4o", publisher: "", admin: "" },
+  });
+  assert.equal(saved.ok, true);
+  assert.equal(saved.body.models[0].id, "gpt-4o");
+  assert.equal(saved.body.models[0].display_name, "眼袋 🫩");
+  for (const codePoint of [0xe0080, 0xe0000, 0xe01f0, 0x2065, 0xfff0]) {
+    const id = `gpt-4o${String.fromCodePoint(codePoint)}`;
+    assert.equal(addModelIdError(id), ID_ILLEGAL, codePoint.toString(16));
+  }
+});
+
 test("catalog trim matches the shared parity fixture", () => {
   const fixture = JSON.parse(
     readFileSync(

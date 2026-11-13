@@ -19,8 +19,10 @@ export const SAVED_TEXT = "已保存";
 export const SAVE_FAILED_TAG = "保存失败";
 export const UNSAVED_TAG = "尚未保存";
 
+// No \p{Cn}. The extra ranges are version-stable invisible code points and
+// noncharacters, including U+E0000–U+E0FFF and every plane's U+FFFE/U+FFFF.
 const ILLEGAL_CATALOG_CHAR =
-  /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cs}\u115F\u1160\u3164\uFFA0\u2800]/u;
+  /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cs}\u115F\u1160\u2065\u3164\uFFA0\u2800\uFDD0-\uFDEF\uFFF0-\uFFF8\uFFFE\uFFFF\u{1FFFE}-\u{1FFFF}\u{2FFFE}-\u{2FFFF}\u{3FFFE}-\u{3FFFF}\u{4FFFE}-\u{4FFFF}\u{5FFFE}-\u{5FFFF}\u{6FFFE}-\u{6FFFF}\u{7FFFE}-\u{7FFFF}\u{8FFFE}-\u{8FFFF}\u{9FFFE}-\u{9FFFF}\u{AFFFE}-\u{AFFFF}\u{BFFFE}-\u{BFFFF}\u{CFFFE}-\u{CFFFF}\u{DFFFE}-\u{DFFFF}\u{EFFFE}-\u{EFFFF}\u{FFFFE}-\u{FFFFF}\u{10FFFE}-\u{10FFFF}\u{E0000}-\u{E0FFF}]/u;
 
 // Trim only Unicode Zs separators, including ASCII space U+0020.
 // Do not use String.prototype.trim(): it also strips U+FEFF and does not

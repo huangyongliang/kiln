@@ -330,18 +330,40 @@ def _trim_catalog_text(value: str) -> str:
     return value[start:end]
 
 
+def _illegal_catalog_code(code: int) -> bool:
+    """Fixed ranges. Not category Cn and not a live Default_Ignorable property.
+
+    U+2065, U+FFF0–U+FFF8, and U+E0000–U+E0FFF stay invisible across Unicode
+    versions, including reserved tag and variation-selector code points.
+    U+FDD0–U+FDEF and any code point whose low 16 bits are U+FFFE or U+FFFF
+    are noncharacters.
+    """
+
+    if code == 0x2065 or 0xFFF0 <= code <= 0xFFF8 or 0xE0000 <= code <= 0xE0FFF:
+        return True
+    if 0xFDD0 <= code <= 0xFDEF:
+        return True
+    low = code & 0xFFFF
+    return low == 0xFFFE or low == 0xFFFF
+
+
 def _illegal_catalog_text(text: str) -> bool:
     """Reject controls, format marks, separators, private use, and surrogates.
 
     Categories Cc, Cf, Zl, Zp, Co, and Cs cover NUL, DEL, C1, bidi overrides,
     zero-width marks, line and paragraph separators, tag characters, private
-    use, and surrogates. Unassigned code points (Cn) stay allowed: a newer
-    emoji can be unassigned in this Python's Unicode data and assigned in the
-    console. U+115F, U+1160, U+3164, U+FFA0, and U+2800 are rejected as well:
-    their categories are Lo or So. Normal CJK stays allowed.
+    use, and surrogates. Unassigned code points (Cn) stay allowed, including
+    a newer emoji and a visible gap such as U+0378. U+115F, U+1160, U+3164,
+    U+FFA0, and U+2800 are rejected as well. So are the fixed invisible
+    ranges and noncharacters in ``_illegal_catalog_code``. Emoji variation
+    selectors U+FE00–U+FE0F stay allowed.
     """
 
     for char in text:
-        if char in _CATALOG_FILLERS or unicodedata.category(char) in _ILLEGAL_CATALOG_CATEGORIES:
+        if (
+            char in _CATALOG_FILLERS
+            or _illegal_catalog_code(ord(char))
+            or unicodedata.category(char) in _ILLEGAL_CATALOG_CATEGORIES
+        ):
             return True
     return False
