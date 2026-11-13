@@ -1,17 +1,20 @@
 <script setup>
 import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { RouterLink } from "vue-router";
 
 import { accessReady, actionDeniedText, perms } from "../access";
 import { errorText, getJson, isForbidden, postJson } from "../api";
+import { chatRequestMessages, readChatThread, writeChatThread } from "../chat";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
+import { isUuid } from "../paths";
 import { canDo, canSee } from "../permissions";
 
 const note =
   "模型接口固定为 OpenAI 兼容协议，端点由环境变量配置。端点未就绪时使用模拟或关闭模式。对话不能下发任意 shell。";
 
 const provider = ref(null);
-const messages = ref([]);
+const messages = ref(readChatThread(window.sessionStorage));
 const prompt = ref("");
 const error = ref("");
 const pageError = ref("");
@@ -21,6 +24,7 @@ const mode = ref("loading");
 const listEl = ref(null);
 
 const off = computed(() => provider.value?.provider === "off");
+const mock = computed(() => provider.value?.provider === "mock");
 const canSend = computed(() => canDo("chat.send", perms.value));
 const composerDisabled = computed(() => off.value || !canSend.value || mode.value !== "ready");
 
@@ -38,6 +42,8 @@ const pill = computed(() => {
   }
   return "对话未开启";
 });
+
+watch(messages, (value) => writeChatThread(window.sessionStorage, value), { deep: true });
 
 onMounted(load);
 watch(accessReady, (ready) => {
@@ -88,20 +94,48 @@ async function scrollMessages() {
   }
 }
 
+function actionTarget(action) {
+  if (!action || !isUuid(action.id)) {
+    return null;
+  }
+  if (action.type === "skill_drafted") {
+    return { name: "skill", params: { id: action.id } };
+  }
+  if (action.type === "build_started") {
+    return { name: "build", params: { id: action.id } };
+  }
+  return null;
+}
+
+function actionLabel(action) {
+  if (action.type === "skill_drafted") {
+    return `Skill：${action.name}`;
+  }
+  if (action.type === "build_started") {
+    return `构建：${action.name}`;
+  }
+  return action.name;
+}
+
 async function send() {
   const content = prompt.value.trim();
   if (!content || sending.value || composerDisabled.value) {
     return;
   }
+  const requestMessages = chatRequestMessages(messages.value, content);
   sending.value = true;
   error.value = "";
   messages.value = [...messages.value, { role: "user", content, failed: false }];
   await scrollMessages();
   try {
-    const body = await postJson("/api/v1/llm/chat", {
-      messages: [{ role: "user", content }],
-    });
-    messages.value = [...messages.value, { role: "assistant", content: body?.content || "" }];
+    const body = await postJson("/api/v1/llm/chat", { messages: requestMessages });
+    const actions = Array.isArray(body?.actions)
+      ? body.actions.filter((item) => actionTarget(item))
+      : [];
+    messages.value = [
+      ...messages.value,
+      { role: "assistant", content: body?.content || "", actions },
+    ];
     prompt.value = "";
     await scrollMessages();
   } catch (caught) {
@@ -136,8 +170,18 @@ async function send() {
             class="bubble"
             :class="{ user: item.role === 'user', failed: item.failed }"
           >
-            {{ item.content }}
+            <p class="bubble-text">{{ item.content }}</p>
             <span v-if="item.failed" class="fail-mark">发送失败</span>
+            <p v-if="item.actions?.length" class="bubble-actions">
+              <RouterLink
+                v-for="action in item.actions"
+                :key="`${action.type}:${action.id}`"
+                class="linkish"
+                :to="actionTarget(action)"
+              >
+                {{ actionLabel(action) }}
+              </RouterLink>
+            </p>
           </div>
         </div>
         <div v-if="mode === 'ready' && !off" class="suggest">
@@ -151,9 +195,9 @@ async function send() {
           <button
             v-if="canDo('agent.build_artifact', perms)"
             type="button"
-            @click="suggest('从仓库构建制品')"
+            @click="suggest('用已发布的 Skill 构建制品')"
           >
-            从仓库构建制品
+            用已发布的 Skill 构建制品
           </button>
         </div>
         <form class="composer" @submit.prevent="send">
@@ -174,7 +218,10 @@ async function send() {
             发送
           </button>
         </form>
-        <p v-if="off" class="hint">管理员开启模型后可用</p>
+        <p v-if="off" class="hint">
+          模型未开启（当前为关闭）。配置 OpenAI 兼容端点后，可以问答、起草 Skill，并在 Skill 发布后发起构建。
+        </p>
+        <p v-else-if="mock" class="hint">模拟模式不调用工具，不能起草 Skill 或发起构建。</p>
         <p class="hint">对话只在平台内操作，不会执行任意 shell。</p>
         <p v-if="error" class="message error" role="alert">{{ error }}</p>
       </div>

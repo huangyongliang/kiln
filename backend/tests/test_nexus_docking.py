@@ -19,7 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kiln.main import create_app
-from tests.support import app_settings, auth_headers, truncate_domain
+from tests.support import app_settings, auth_headers, publish_skill, truncate_domain
 
 _REQUIRED = (
     "KILN_TEST_NEXUS_URL",
@@ -172,9 +172,11 @@ def test_build_reads_the_group_and_publishes_nothing(
         sha = _commit_sha(docking, full_name, "main")
         with TestClient(app, headers=auth_headers()) as client:
             truncate_domain(app.state.engine)
+            skill = publish_skill(client, f"dock-{uuid4().hex[:8]}", [full_name])
             created = client.post(
                 "/api/v1/builds",
                 json={
+                    "skill_id": skill["id"],
                     "repository": full_name,
                     "ref": "main",
                     "name": "proxy",

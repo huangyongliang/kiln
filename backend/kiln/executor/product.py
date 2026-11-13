@@ -15,9 +15,15 @@ from kiln.config import Settings
 from kiln.db.builds import BuildStore, StoredBuild
 from kiln.db.store import PostgresStore
 from kiln.domain.artifacts import ArtifactCreate, ArtifactSource, Checksum
-from kiln.domain.builds import BuildLog, ProductBuild, ProductBuildCreate
+from kiln.domain.builds import (
+    BuildLog,
+    ProductBuild,
+    ProductBuildCreate,
+    repository_in_skill_scope,
+)
 from kiln.domain.jobs import TERMINAL_STATUSES, JobStatus
-from kiln.errors import Conflict, UpstreamFailure
+from kiln.domain.skills import SkillStatus
+from kiln.errors import Conflict, Unprocessable, UpstreamFailure
 from kiln.executor.jenkins import JenkinsClient
 from kiln.executor.script import (
     NEXUS_PARAMETER_NAMES,
@@ -41,6 +47,11 @@ def create_product_build(
 ) -> StoredBuild:
     owner, name = parse_repository(payload.repository)
     ref = parse_ref(payload.ref)
+    skill = catalog.get_skill(payload.skill_id)
+    if skill.status != SkillStatus.published:
+        raise Conflict("只有已发布的 Skill 可以发起构建")
+    if not repository_in_skill_scope(payload.repository, skill.allowed_repositories):
+        raise Unprocessable("仓库不在该 Skill 的允许范围内")
     resolved = source.resolve_ref(owner, name, ref)
     if _SHA.fullmatch(resolved.sha) is None:
         raise UpstreamFailure("代码源返回的提交号无效")
@@ -89,6 +100,7 @@ def create_product_build(
             version=payload.version,
             package_type=payload.package_type.value,
             queue_url=queue_url,
+            skill_id=skill.id,
         )
     except Exception:
         try:

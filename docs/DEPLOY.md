@@ -296,13 +296,15 @@ Compose 把 `LLM_BASE_URL` 原样写进 `kiln-api`。容器里的 `127.0.0.1` �
 
 执行器只在 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN` 都非空时工作。代码源只在 `GIT_PROVIDER` 为 `gitea` 或 `gitlab` 且 `GIT_BASE_URL`、`GIT_TOKEN` 都有值时工作。缺任何一项时，API 仍然启动。已具备 `executor.run` 时，`POST /api/v1/jobs` 返回 503；已具备 `git.read` 且代码源未配置时，`GET /api/v1/git/repositories` 返回 503。只读角色调用 `POST /api/v1/jobs` 或 `POST /api/v1/builds` 返回 403，即使 Jenkins 或代码源未配置，也不会写入任务或构建记录。读取执行器状态、任务、产品构建及其日志需要 `executor.read`，读取代码源需要 `git.read`。只读角色没有这两项，这些 GET 返回 403，正文是「没有权限」，不含 `JENKINS_URL` 或「代码源未配置」。构建者、发布者、管理员和机器令牌在未配置时，任务、构建、仓库列表和解析引用返回 503。`GET /api/v1/executor` 和 `GET /api/v1/git/source` 对具备对应读取权限的调用返回未配置（`configured` 为 false），并且代码源响应里的 `production_provider` 固定为 `gitlab`。
 
-这些调用接受会话 cookie、登录返回的 Bearer 令牌，或 `Authorization: Bearer <KILN_API_TOKEN>`。`POST /api/v1/jobs` 与 `POST /api/v1/builds` 还需要 `executor.run`。读取任务、构建和执行器状态还需要 `executor.read`，读取代码源还需要 `git.read`。没有凭证时返回 401，不会到 Jenkins 或代码源上去创建任务。机器令牌拥有目录中的全部权限。
+这些调用接受会话 cookie、登录返回的 Bearer 令牌，或 `Authorization: Bearer <KILN_API_TOKEN>`。`POST /api/v1/jobs` 需要 `executor.run`。`POST /api/v1/builds` 需要 `executor.run` 与 `skill.use`。读取任务、构建和执行器状态还需要 `executor.read`，读取代码源还需要 `git.read`。没有凭证时返回 401，不会到 Jenkins 或代码源上去创建任务。机器令牌拥有目录中的全部权限。
 
 进程直接跑在宿主机上时，`JENKINS_URL=http://127.0.0.1:8080` 指向这台机器的 8080。API 若跑在 compose 的 `kiln-api` 里，容器内的 `127.0.0.1` 是容器自己，不是宿主机。把 Jenkins 或 Gitea 填成从该容器能路由到的地址。
 
 创建兼容任务的请求体是 `{"name":"compat","marker":"kiln-ok"}`。`marker` 只能是字母、数字和 `._:-`。kiln 在 Jenkins 上建一个自由风格任务，让它打印这个标记，然后 `GET /api/v1/jobs/{id}` 看状态，`GET /api/v1/jobs/{id}/log` 读日志。这只用来核对日志，不产出制品字节，也不部署到运行环境。
 
-产品构建的请求体是 `{"repository":"owner/name","ref":"main","artifact_name":"sample-pkg","version":"1.0.0","package_type":"generic"}`。仓库根目录要有 `kiln-build.sh`，成功时写出 `kiln-dist/artifact.bin`。kiln 先用当前适配器把 `ref` 解析成提交，再让 Jenkins 克隆该提交并运行脚本。`GIT_CLONE_BASE_URL` 留空时，克隆根地址就是 `GIT_BASE_URL`。构建成功后，`GET /api/v1/builds/{id}` 里 `content_available` 为 true，字节在 `KILN_ARTIFACT_ROOT`。预约之后，`GET /api/v1/retrieve/{reservation_id}/content` 返回同一组字节。响应里 `deploys_to_runtime` 为 false。令牌只放在环境里，不写入数据库，也不出现在返回的日志里。
+产品构建的请求体是 `{"skill_id":"<已发布 skill 的 uuid>","repository":"owner/name","ref":"main","artifact_name":"sample-pkg","version":"1.0.0","package_type":"generic"}`。`skill_id` 必填，且该 Skill 必须已发布。仓库根目录要有 `kiln-build.sh`，成功时写出 `kiln-dist/artifact.bin`。kiln 先用当前适配器把 `ref` 解析成提交，再让 Jenkins 克隆该提交并运行脚本。Skill 步骤不会被执行，也不会变成 Jenkins 参数。`GIT_CLONE_BASE_URL` 留空时，克隆根地址就是 `GIT_BASE_URL`。构建成功后，`GET /api/v1/builds/{id}` 里 `content_available` 为 true，字节在 `KILN_ARTIFACT_ROOT`。预约之后，`GET /api/v1/retrieve/{reservation_id}/content` 返回同一组字节。响应里 `deploys_to_runtime` 为 false。令牌只放在环境里，不写入数据库，也不出现在返回的日志里。
+
+产品构建必须带已发布的 Skill。实验室接线只改本机 `.env`：填写 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN`，以及 `GIT_PROVIDER`、`GIT_BASE_URL`、`GIT_TOKEN`，需要时再填 `GIT_CLONE_BASE_URL`，让 kiln-app 进程访问已经在跑的 Jenkins 与 Gitea。进程在容器内时，`127.0.0.1` 是容器自己，不是宿主机；克隆根地址用 Jenkins 看得到的网络视角。不要把地址或令牌写进仓库。对话工具仅在 `LLM_PROVIDER=openai` 且端点可达时运行，`mock` 与 `off` 不调用工具。`examples/kiln-build.sh` 由运维复制到实验室仓库，不在日常 CI 里对真实 Jenkins 执行。制品留在 `KILN_ARTIFACT_ROOT`。日常构建保持 `KILN_NEXUS_*` 为空，不把制品发布到 Nexus，也不使用公司 Nexus。
 
 ### 可选依赖代理
 

@@ -1,8 +1,9 @@
 """Product build HTTP API.
 
-Reading a build and its log requires `executor.read`. Creating a build also
-requires `executor.run`. The build stores artifact bytes on the platform.
-It does not deploy them.
+Reading a build and its log requires `executor.read`. Creating a build
+requires both `executor.run` and `skill.use`, and a published skill.
+The build stores artifact bytes on the platform. It does not deploy them
+and does not execute skill steps.
 """
 
 from uuid import UUID
@@ -48,8 +49,11 @@ def get_builds(
     "/builds",
     response_model=ProductBuild,
     status_code=201,
-    summary="从代码仓库构建制品",
-    dependencies=[Depends(require_permission("executor.run"))],
+    summary="用已发布的 Skill 构建制品",
+    dependencies=[
+        Depends(require_permission("executor.run")),
+        Depends(require_permission("skill.use")),
+    ],
 )
 def post_build(
     payload: ProductBuildCreate,

@@ -33,6 +33,11 @@ class Conflict(AppError):
         super().__init__(409, detail)
 
 
+class Unprocessable(AppError):
+    def __init__(self, detail: str) -> None:
+        super().__init__(422, detail)
+
+
 class Gone(AppError):
     def __init__(self, detail: str) -> None:
         super().__init__(410, detail)

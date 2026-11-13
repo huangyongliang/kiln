@@ -20,10 +20,10 @@ from kiln.executor.product import publish
 from kiln.llm.provider import ChatMessage, ChatRequest
 from kiln.llm.tools import MAX_MODEL_ROUNDS, OPENAI_TOOLS, ToolContext, run_tool_loop
 from kiln.main import create_app
-from tests.support import app_settings, auth_headers, blob_files, truncate_domain
+from tests.support import app_settings, auth_headers, blob_files, publish_skill, truncate_domain
 
 LOCAL_PASSWORD = "correct-horse-1"
-_COMPLETION_KEYS = {"id", "provider", "model", "content", "finish_reason"}
+_COMPLETION_KEYS = {"id", "provider", "model", "content", "finish_reason", "actions"}
 _DRAFT = {
     "name": "chat-draft",
     "version": "0.1.0",
@@ -42,7 +42,9 @@ _DRAFT = {
     "output_spec": "jar",
 }
 _SHA = "a" * 40
+_SKILL = "00000000-0000-4000-8000-0000000000aa"
 _BUILD = {
+    "skill_id": _SKILL,
     "repository": "group/demo",
     "ref": "main",
     "artifact_name": "demo-pkg",
@@ -95,6 +97,13 @@ def test_publisher_admin_and_machine_can_draft_a_skill(tmp_path) -> None:
             assert body["content"] == "已保存草稿。"
             assert body["finish_reason"] == "stop"
             assert "tool_calls" not in body
+            assert body["actions"] == [
+                {
+                    "type": "skill_drafted",
+                    "id": json.loads(seen[before + 1]["messages"][-1]["content"])["id"],
+                    "name": f"{role}-draft",
+                }
+            ]
             tool_message = seen[before + 1]["messages"][-1]
             assert tool_message["role"] == "tool"
             drafted = json.loads(tool_message["content"])
@@ -137,6 +146,7 @@ def test_builder_draft_skill_is_denied_without_a_new_row(tmp_path) -> None:
         response = builder.post("/api/v1/llm/chat", json=_chat("起草 builder-draft"))
         assert response.status_code == 200
         assert response.json()["content"] == "没有权限，未创建草稿。"
+        assert response.json()["actions"] == []
         assert _count(engine, "skills") == 0
         tool_messages = [item for item in seen[1]["messages"] if item["role"] == "tool"]
         assert tool_messages == [
@@ -381,6 +391,10 @@ def test_tool_loop_stops_at_four_model_rounds(tmp_path) -> None:
         assert response.json()["content"] == "已达到对话工具轮次上限。"
         assert response.json()["finish_reason"] == "length"
         assert set(response.json()) == _COMPLETION_KEYS
+        assert [item["type"] for item in response.json()["actions"]] == ["skill_drafted"] * 4
+        assert [item["name"] for item in response.json()["actions"]] == [
+            f"cap-draft-{index}" for index in range(4)
+        ]
         assert len(seen) == 4
         assert [item["function"]["name"] for item in seen[0]["tools"]] == [
             "list_skills",
@@ -463,6 +477,7 @@ def test_mock_does_not_invent_or_execute_tools(tmp_path) -> None:
             body = response.json()
             assert set(body) == _COMPLETION_KEYS
             assert body["provider"] == "mock"
+            assert body["actions"] == []
             assert "draft_skill" in body["content"]
             assert "这是模拟回复，未调用外部模型。" in body["content"]
             assert _count(app.state.engine, "skills") == 0
@@ -491,6 +506,7 @@ def test_off_does_not_call_network_or_write(tmp_path) -> None:
 def test_authorized_roles_can_start_a_product_build(tmp_path) -> None:
     roles = ("builder", "publisher", "admin", "machine")
     seen: list[dict] = []
+    bound = {"skill_id": _SKILL}
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(json.loads(request.content.decode()))
@@ -502,12 +518,16 @@ def test_authorized_roles_can_start_a_product_build(tmp_path) -> None:
         return _tool_call(
             "call_build",
             "build_artifact",
-            _named_artifact(_BUILD, f"{role}-pkg"),
+            {
+                **_named_artifact(_BUILD, f"{role}-pkg"),
+                "skill_id": bound["skill_id"],
+            },
             "chatcmpl-tool",
         )
 
     with _openai_client(handler, tmp_path, **_GIT_SETTINGS) as (client, engine):
         git, jenkins = _attach_build_stubs(client.app)
+        bound["skill_id"] = publish_skill(client, "chat-flow", ["group/demo"])["id"]
         sessions = {
             "builder": _login(client, "ada_builder", ["builder"]),
             "publisher": _login(client, "ada_publisher", ["publisher"]),
@@ -545,6 +565,11 @@ def test_authorized_roles_can_start_a_product_build(tmp_path) -> None:
             assert built["status"] == "queued"
             assert built["build_number"] is None
             assert built["name"] == f"{role}-pkg"
+            assert built["skill_id"] == bound["skill_id"]
+            assert built["skill_name"] == "chat-flow"
+            assert body["actions"] == [
+                {"type": "build_started", "id": built["id"], "name": built["name"]}
+            ]
             assert "artifact_name" not in built
             assert built["repository"] == "group/demo"
             assert built["ref"] == "main"
@@ -568,15 +593,25 @@ def test_authorized_roles_can_start_a_product_build(tmp_path) -> None:
         rows = _rows(
             engine,
             "SELECT name, repository, git_ref, commit_sha, status, version, "
-            "package_type, content_stored FROM product_builds ORDER BY name",
+            "package_type, content_stored, skill_id::text FROM product_builds ORDER BY name",
         )
         assert rows == [
-            (f"{role}-pkg", "group/demo", "main", _SHA, "queued", "1.0.0", "generic", False)
+            (
+                f"{role}-pkg",
+                "group/demo",
+                "main",
+                _SHA,
+                "queued",
+                "1.0.0",
+                "generic",
+                False,
+                bound["skill_id"],
+            )
             for role in ("admin", "builder", "machine", "publisher")
         ]
         assert _count(engine, "artifacts") == 4
         assert _count(engine, "artifact_versions") == 0
-        assert _count(engine, "skills") == 0
+        assert _rows(engine, "SELECT name, status FROM skills") == [("chat-flow", "published")]
         assert _count(engine, "skill_steps") == 0
         assert _count(engine, "executor_jobs") == 0
         assert blob_files(client.app.state.blobs.root) == []
@@ -584,15 +619,17 @@ def test_authorized_roles_can_start_a_product_build(tmp_path) -> None:
 
 
 def test_build_artifact_requires_both_permission_codes(tmp_path) -> None:
-    """No catalog role has agent.qa without both codes, so the principal is direct.
+    """No catalog role splits these codes, so the principal is direct.
 
-    The route gate still requires agent.qa. Missing either tool code does not write.
+    The route gate still requires agent.qa. Missing agent.build_artifact,
+    executor.run, or skill.use does not write.
     """
 
     seen: list[dict] = []
     principals = (
-        frozenset({"agent.qa", "executor.run"}),
-        frozenset({"agent.qa", "agent.build_artifact"}),
+        frozenset({"agent.qa", "executor.run", "skill.use"}),
+        frozenset({"agent.qa", "agent.build_artifact", "skill.use"}),
+        frozenset({"agent.qa", "agent.build_artifact", "executor.run"}),
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -612,6 +649,7 @@ def test_build_artifact_requires_both_permission_codes(tmp_path) -> None:
                 _tool_context(client.app),
             )
             assert result.content == "没有权限"
+            assert result.actions == []
             assert result.provider == "openai"
             assert seen[before + 1]["messages"][-1] == {
                 "role": "tool",
@@ -622,7 +660,70 @@ def test_build_artifact_requires_both_permission_codes(tmp_path) -> None:
         assert jenkins.calls == []
         assert _count(engine, "product_builds") == 0
         assert _count(engine, "artifacts") == 0
-        assert len(seen) == 4
+        assert len(seen) == 6
+
+
+def test_build_artifact_skill_gate_stays_in_the_tool_result(tmp_path) -> None:
+    seen: list[dict] = []
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content.decode()))
+        if len(seen) % 2 == 1:
+            return _tool_call("call_build", "build_artifact", calls[(len(seen) - 1) // 2])
+        return _content("没有开始。")
+
+    with _openai_client(handler, tmp_path, **_GIT_SETTINGS) as (client, engine):
+        git, jenkins = _attach_build_stubs(client.app)
+        draft = client.post(
+            "/api/v1/skills",
+            json={
+                "name": "still-draft",
+                "version": "0.1.0",
+                "allowed_repositories": ["group/demo"],
+            },
+        )
+        assert draft.status_code == 201, draft.text
+        draft_id = draft.json()["id"]
+        narrow = publish_skill(client, "narrow-flow", ["other/repo"])
+        cases = (
+            ({**_BUILD, "skill_id": _SKILL}, "skill 不存在"),
+            ({**_BUILD, "skill_id": draft_id}, "只有已发布的 Skill 可以发起构建"),
+            (
+                {key: value for key, value in _BUILD.items() if key != "skill_id"},
+                "参数不符合要求",
+            ),
+        )
+        for payload, detail in cases:
+            calls.append(payload)
+            response = client.post("/api/v1/llm/chat", json=_chat("构建 demo-pkg"))
+            assert response.status_code == 200
+            assert response.json()["actions"] == []
+            content = seen[-1]["messages"][-1]["content"]
+            assert content == detail or content.startswith(detail)
+
+        submitted = client.post(f"/api/v1/skills/{draft_id}/submit-review")
+        assert submitted.status_code == 200, submitted.text
+        calls.append({**_BUILD, "skill_id": draft_id})
+        reviewing = client.post("/api/v1/llm/chat", json=_chat("再构建"))
+        assert reviewing.status_code == 200
+        assert reviewing.json()["actions"] == []
+        assert seen[-1]["messages"][-1]["content"] == "只有已发布的 Skill 可以发起构建"
+
+        calls.append({**_BUILD, "skill_id": narrow["id"]})
+        blocked = client.post("/api/v1/llm/chat", json=_chat("换一个仓库"))
+        assert blocked.status_code == 200
+        assert blocked.json()["actions"] == []
+        assert seen[-1]["messages"][-1]["content"] == "仓库不在该 Skill 的允许范围内"
+        assert [item["function"]["name"] for item in seen[0]["tools"]] == [
+            "list_skills",
+            "draft_skill",
+            "build_artifact",
+        ]
+        assert git.calls == []
+        assert jenkins.calls == []
+        assert _count(engine, "product_builds") == 0
+        assert _count(engine, "artifacts") == 0
 
 
 def test_invalid_product_build_arguments_write_nothing(tmp_path) -> None:
@@ -637,6 +738,7 @@ def test_invalid_product_build_arguments_write_nothing(tmp_path) -> None:
         },
         {"artifact_name": "bad-pkg"},
         {
+            "skill_id": _SKILL,
             "repository": "noslash",
             "ref": "main",
             "artifact_name": "bad-pkg",
@@ -721,7 +823,7 @@ def test_unconfigured_jenkins_or_git_source_is_tool_text(tmp_path) -> None:
 def test_upstream_failure_and_conflict_are_tool_text(tmp_path) -> None:
     seen: list[dict] = []
     payloads = (
-        _BUILD,
+        dict(_BUILD),
         _named_artifact(_BUILD, "dup-pkg"),
     )
 
@@ -734,12 +836,16 @@ def test_upstream_failure_and_conflict_are_tool_text(tmp_path) -> None:
 
     with _openai_client(handler, tmp_path, **_GIT_SETTINGS) as (client, engine):
         git, jenkins = _attach_build_stubs(client.app)
+        skill_id = publish_skill(client, "upstream-flow", ["group/demo"])["id"]
+        for item in payloads:
+            item["skill_id"] = skill_id
         git.resolve_error = UpstreamFailure("代码源无法连接（127.0.0.1:9）")
         response = client.post("/api/v1/llm/chat", json=_chat("构建 demo-pkg"))
         assert response.status_code == 200
         assert response.json()["content"] == "没有开始。"
+        assert response.json()["actions"] == []
         assert seen[1]["messages"][-1]["content"] == "代码源无法连接（127.0.0.1:9）"
-        direct = client.post("/api/v1/builds", json=_BUILD)
+        direct = client.post("/api/v1/builds", json={**_BUILD, "skill_id": skill_id})
         assert direct.status_code == 502
         assert direct.json()["detail"] == "代码源无法连接（127.0.0.1:9）"
         assert jenkins.calls == []
@@ -756,8 +862,12 @@ def test_upstream_failure_and_conflict_are_tool_text(tmp_path) -> None:
         response = client.post("/api/v1/llm/chat", json=_chat("再构建一次"))
         assert response.status_code == 200
         assert response.json()["content"] == "没有开始。"
+        assert response.json()["actions"] == []
         assert seen[3]["messages"][-1]["content"] == "同组内制品名称已存在"
-        direct = client.post("/api/v1/builds", json=_named_artifact(_BUILD, "dup-pkg"))
+        direct = client.post(
+            "/api/v1/builds",
+            json={**_named_artifact(_BUILD, "dup-pkg"), "skill_id": skill_id},
+        )
         assert direct.status_code == 409
         assert direct.json()["detail"] == "同组内制品名称已存在"
         assert jenkins.calls == []
@@ -770,19 +880,26 @@ def test_upstream_failure_and_conflict_are_tool_text(tmp_path) -> None:
 def test_jenkins_failure_after_artifact_create_deletes_the_job(tmp_path) -> None:
     seen: list[dict] = []
     detail = "Jenkins 调用失败（127.0.0.1:9，HTTP 500）"
+    bound = {"skill_id": _SKILL}
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(json.loads(request.content.decode()))
         if len(seen) == 1:
-            return _tool_call("call_build", "build_artifact", _BUILD)
+            return _tool_call(
+                "call_build",
+                "build_artifact",
+                {**_BUILD, "skill_id": bound["skill_id"]},
+            )
         return _content("构建没有开始。")
 
     with _openai_client(handler, tmp_path, **_GIT_SETTINGS) as (client, engine):
         git, jenkins = _attach_build_stubs(client.app)
+        bound["skill_id"] = publish_skill(client, "retry-flow", ["group/demo"])["id"]
         jenkins.trigger_error = UpstreamFailure(detail)
         response = client.post("/api/v1/llm/chat", json=_chat("构建 demo-pkg"))
         assert response.status_code == 200
         assert response.json()["content"] == "构建没有开始。"
+        assert response.json()["actions"] == []
         assert set(response.json()) == _COMPLETION_KEYS
         assert seen[1]["messages"][-1]["content"] == detail
         assert [call[0] for call in git.calls] == ["resolve_ref", "authenticated_username"]
@@ -798,7 +915,7 @@ def test_jenkins_failure_after_artifact_create_deletes_the_job(tmp_path) -> None
         assert _count(engine, "product_builds") == 0
         assert _count(engine, "artifacts") == 1
         assert _count(engine, "artifact_versions") == 0
-        assert _count(engine, "skills") == 0
+        assert _rows(engine, "SELECT name, status FROM skills") == [("retry-flow", "published")]
         assert _count(engine, "executor_jobs") == 0
         assert blob_files(client.app.state.blobs.root) == []
 

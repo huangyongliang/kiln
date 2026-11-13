@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { RouterLink, useRoute } from "vue-router";
 
 import { accessReady, actionDeniedText, perms } from "../access";
 import { errorText, getJson, isForbidden, postEmpty, postJson } from "../api";
@@ -36,6 +36,12 @@ const canPublish = computed(
 );
 const canReject = computed(
   () => skill.value?.status === "in_review" && canDo("skill.reject", perms.value),
+);
+const canStartBuild = computed(
+  () =>
+    skill.value?.status === "published" &&
+    canDo("executor.run", perms.value) &&
+    canDo("skill.create", perms.value),
 );
 const reviewTitle = computed(() => {
   if (!skill.value?.review_note || skill.value.status === "published") {
@@ -197,7 +203,7 @@ async function submitReject() {
           <span class="mono">{{ skill.version }}</span>
         </p>
       </template>
-      <template v-if="canSubmit || canPublish || canReject" #actions>
+      <template v-if="canSubmit || canPublish || canReject || canStartBuild" #actions>
         <button v-if="canSubmit" type="button" class="btn" :disabled="Boolean(busy)" @click="act('submit')">
           <span v-if="busy === 'submit'" class="spinner" aria-hidden="true"></span>
           提交审核
@@ -209,6 +215,13 @@ async function submitReject() {
           <span v-if="busy === 'publish'" class="spinner" aria-hidden="true"></span>
           发布
         </button>
+        <RouterLink
+          v-if="canStartBuild"
+          class="btn"
+          :to="{ name: 'builds', query: { skill: skill.id } }"
+        >
+          用此流程构建
+        </RouterLink>
       </template>
     </PageIntro>
     <p v-if="skill?.description" class="prose">{{ skill.description }}</p>

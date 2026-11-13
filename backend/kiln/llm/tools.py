@@ -9,7 +9,7 @@ A caller missing a tool's permission codes does not write. The tool result is
 round cap is reached. The cap is a code constant, not an environment variable.
 
 ``build_artifact`` starts a product build the same way as POST /builds. It
-needs both ``agent.build_artifact`` and ``executor.run``.
+needs ``agent.build_artifact``, ``executor.run``, and ``skill.use``.
 """
 
 import json
@@ -33,12 +33,15 @@ from kiln.errors import (
     Conflict,
     ModelUpstreamError,
     NotConfigured,
+    NotFound,
+    Unprocessable,
     UpstreamFailure,
 )
 from kiln.executor.jenkins import JenkinsClient
 from kiln.executor.product import create_product_build, publish
 from kiln.git.source import GitSource
 from kiln.llm.provider import (
+    ChatAction,
     ChatCompletion,
     ChatRequest,
     ModelTurn,
@@ -67,7 +70,13 @@ class ToolContext:
     settings: Settings
 
 
-_Handler = Callable[[object, ToolContext], str]
+@dataclass(frozen=True)
+class ToolResult:
+    content: str
+    action: ChatAction | None = None
+
+
+_Handler = Callable[[object, ToolContext], ToolResult]
 
 
 class ListSkillsArguments(BaseModel):
@@ -91,18 +100,21 @@ def _json(model: BaseModel) -> str:
     return json.dumps(jsonable_encoder(model), ensure_ascii=False, separators=(",", ":"))
 
 
-def _list_skills(payload: object, context: ToolContext) -> str:
+def _list_skills(payload: object, context: ToolContext) -> ToolResult:
     parsed = ListSkillsArguments.model_validate(payload)
     listed = SkillList(items=context.catalog.list_skills(parsed.status))
-    return _json(listed)
+    return ToolResult(_json(listed))
 
 
-def _draft_skill(payload: object, context: ToolContext) -> str:
+def _draft_skill(payload: object, context: ToolContext) -> ToolResult:
     created = context.catalog.create_skill(SkillCreate.model_validate(payload))
-    return _json(created)
+    return ToolResult(
+        _json(created),
+        ChatAction(type="skill_drafted", id=created.id, name=created.name),
+    )
 
 
-def _build_artifact(payload: object, context: ToolContext) -> str:
+def _build_artifact(payload: object, context: ToolContext) -> ToolResult:
     created = ProductBuildCreate.model_validate(payload)
     jenkins = context.jenkins
     source = context.git_source
@@ -118,7 +130,11 @@ def _build_artifact(payload: object, context: ToolContext) -> str:
         context.settings,
         created,
     )
-    return _json(publish(context.builds, stored))
+    published = publish(context.builds, stored)
+    return ToolResult(
+        _json(published),
+        ChatAction(type="build_started", id=published.id, name=published.name),
+    )
 
 
 _TOOLS: tuple[_Tool, ...] = (
@@ -146,10 +162,11 @@ _TOOLS: tuple[_Tool, ...] = (
         name="build_artifact",
         description=(
             "发起与 POST /builds 相同的产品构建。"
-            "参数是仓库、引用、制品名、版本、包类型，以及可选名称。"
+            "必须提供已发布 skill 的 skill_id，以及仓库、引用、制品名、版本、包类型和可选名称。"
+            "仓库须落在该 skill 的允许列表内；列表为空时允许代码源能解析的仓库。"
             "只开始构建，不等待结束，不下载或保存制品字节，不执行 skill 步骤。"
         ),
-        permissions=frozenset({"agent.build_artifact", "executor.run"}),
+        permissions=frozenset({"agent.build_artifact", "executor.run", "skill.use"}),
         parameters=ProductBuildCreate,
         handler=_build_artifact,
     ),
@@ -219,6 +236,7 @@ def run_tool_loop(
     messages: list[dict[str, object]] = [
         {"role": item.role, "content": item.content} for item in request.messages
     ]
+    actions: list[ChatAction] = []
     turn: ModelTurn | None = None
     for _ in range(MAX_MODEL_ROUNDS):
         turn = provider.complete_turn(
@@ -235,14 +253,18 @@ def run_tool_loop(
                 model=turn.model,
                 content=turn.content,
                 finish_reason=turn.finish_reason,
+                actions=actions,
             )
         messages.append(_assistant_tool_message(turn))
         for call in turn.tool_calls:
+            outcome = execute_tool(call.name, call.arguments, principal, context)
+            if outcome.action is not None:
+                actions.append(outcome.action)
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": call.id,
-                    "content": execute_tool(call.name, call.arguments, principal, context),
+                    "content": outcome.content,
                 }
             )
     if turn is None:
@@ -253,6 +275,7 @@ def run_tool_loop(
         model=turn.model,
         content=ROUND_CAP_CONTENT,
         finish_reason="length",
+        actions=actions,
     )
 
 
@@ -261,24 +284,24 @@ def execute_tool(
     arguments: str,
     principal: Principal,
     context: ToolContext,
-) -> str:
+) -> ToolResult:
     """Run one closed-registry tool, or refuse without writing."""
 
     tool = _TOOLS_BY_NAME.get(name)
     if tool is None:
-        return "未知工具"
+        return ToolResult("未知工具")
     if not tool.permissions <= principal.permissions:
-        return TOOL_DENIED
+        return ToolResult(TOOL_DENIED)
     try:
         payload = _load_arguments(arguments)
     except ValueError as exc:
-        return f"参数不符合要求。{exc}"
+        return ToolResult(f"参数不符合要求。{exc}")
     try:
         return tool.handler(payload, context)
     except ValidationError as exc:
-        return _format_validation(exc)
-    except (BadRequest, Conflict, NotConfigured, UpstreamFailure) as exc:
-        return exc.detail
+        return ToolResult(_format_validation(exc))
+    except (BadRequest, Conflict, NotConfigured, NotFound, Unprocessable, UpstreamFailure) as exc:
+        return ToolResult(exc.detail)
 
 
 def _assistant_tool_message(turn: ModelTurn) -> dict[str, object]:
