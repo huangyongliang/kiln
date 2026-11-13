@@ -41,8 +41,7 @@ class ChatRequest(BaseModel):
         max_length=128,
         description=(
             "可选。openai 且该调用者的允许列表非空时必须是其中的 id；省略则用该调用者的默认。"
-            "尚未托管且允许列表为空时仍按原样转发。"
-            "已托管且允许列表为空时不再转发。"
+            "允许列表为空时不再转发。"
         ),
     )
 
@@ -79,7 +78,8 @@ class ProviderStatus(BaseModel):
     models: list[str] = Field(
         default_factory=list,
         description=(
-            "可选模型 id。尚未托管时，openai 为环境变量目录，各登录主体一致；"
+            "可选模型 id。没有 agent.qa 的调用者得到空列表。"
+            "尚未托管且调用者具备 agent.qa 时，openai 为环境变量目录；"
             "已托管且提供方为 openai 时，为当前调用者可用的 id。"
             "mock 与 off 始终为空。不从上游拉取。"
         ),
@@ -107,21 +107,43 @@ class ModelTurn:
 class LLMProvider(Protocol):
     name: str
 
-    def complete(self, request: ChatRequest) -> ChatCompletion: ...
+    def complete(
+        self,
+        request: ChatRequest,
+        *,
+        allowed: Sequence[str],
+        default: str,
+        managed: bool,
+    ) -> ChatCompletion: ...
 
 
 class DisabledProvider:
     name = "off"
 
-    def complete(self, request: ChatRequest) -> ChatCompletion:
-        del request
+    def complete(
+        self,
+        request: ChatRequest,
+        *,
+        allowed: Sequence[str],
+        default: str,
+        managed: bool,
+    ) -> ChatCompletion:
+        del request, allowed, default, managed
         raise ModelDisabled()
 
 
 class MockProvider:
     name = "mock"
 
-    def complete(self, request: ChatRequest) -> ChatCompletion:
+    def complete(
+        self,
+        request: ChatRequest,
+        *,
+        allowed: Sequence[str],
+        default: str,
+        managed: bool,
+    ) -> ChatCompletion:
+        del allowed, default, managed
         preview = next(
             (item.content for item in reversed(request.messages) if item.role == "user"),
             "",
@@ -170,10 +192,12 @@ class OpenAICompatibleProvider:
         omitted id uses ``default``. An id outside the list raises
         ``ModelRequestError`` and must not be sent upstream.
 
-        An empty list on an unmanaged deployment keeps the previous
-        compatibility for existing scripts: a request that carries a model is
-        forwarded as-is. A managed deployment with an empty list does not
-        forward any id.
+        An empty list with ``managed`` true raises ``NO_MODELS_FOR_ACCOUNT``
+        and does not forward an id. Chat uses that when the catalog is saved
+        and empty, and when an unmanaged openai deployment has neither
+        ``LLM_MODELS`` nor ``LLM_MODEL``. ``managed`` false with an empty list
+        still forwards a request model; the chat route does not use that
+        combination.
         """
 
         chosen = (requested or "").strip()

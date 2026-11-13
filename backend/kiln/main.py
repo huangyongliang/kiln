@@ -34,7 +34,7 @@ from kiln.db.llm_catalog import LlmCatalogStore
 from kiln.db.migrate import upgrade_database
 from kiln.db.seed import seed_rbac
 from kiln.db.store import PostgresStore
-from kiln.domain.llm_catalog import warn_if_env_seed_exceeds_limit
+from kiln.domain.llm_catalog import warn_env_seed
 from kiln.errors import AppError
 from kiln.executor.jenkins import JenkinsClient
 from kiln.git.source import build_git_source
@@ -70,7 +70,8 @@ DESCRIPTION = (
     "GET /git/source、GET /git/repositories 和 GET /git/commits 需要 git.read。"
     "只读角色可以查看账号、skill 与制品，没有 executor.read 和 git.read。"
     "GET /llm/provider、GET /rbac/roles、GET /rbac/permissions 和取包元数据"
-    "仍只需会话或机器令牌。GET /llm/catalog 与 PUT /llm/catalog 需要 llm.manage。"
+    "仍只需会话或机器令牌。GET /llm/catalog 与 PUT /llm/catalog 需要 llm.manage，"
+    "缺少该权限时 403 的 detail 写明 llm.manage。"
     "GET /retrieve/{id}/content 需要 artifact.download。"
     "权限不足返回 403，正文是「没有权限」，并且先于未配置检查。"
     "/health 与 /docs 不接受写入。"
@@ -83,8 +84,9 @@ DESCRIPTION = (
     "模型调用走 OpenAI 兼容协议。提供方、端点、密钥和超时由环境变量配置；"
     "未就绪时可使用 mock 或 off。"
     "模型目录和角色分配可在管理页保存，首次从 LLM_MODEL / LLM_MODELS 种子。"
-    "尚未托管时，GET /llm/provider 的 models 与环境变量目录相同。"
-    "已托管且提供方为 openai 时，models 是当前调用者可用的模型 id。"
+    "GET /llm/provider 仍只需登录。没有 agent.qa 的调用者，models 为空。"
+    "其余调用者在尚未托管时看到环境变量目录；"
+    "已托管且提供方为 openai 时看到自己可用的模型 id。"
     "mock 与 off 的 models 为空。对话只更换 model id，不切换提供方。"
     "对话可在授权下通过工具起草 skill 草稿，或在 skill 发布后发起构建。"
     "这些工具只在 openai 提供方下运行；mock 与 off 不调用工具。"
@@ -98,7 +100,6 @@ def create_app(
     nexus_http_client: httpx.Client | None = None,
 ) -> FastAPI:
     resolved = settings if settings is not None else get_settings()
-    warn_if_env_seed_exceeds_limit(resolved)
     owns_client = http_client is None
     if http_client is None:
         client = httpx.Client(timeout=resolved.llm_timeout_seconds)
@@ -177,6 +178,10 @@ def create_app(
     app.state.nexus = nexus
     app.state.llm = provider
     app.state.llm_catalog = LlmCatalogStore(engine)
+    warn_env_seed(
+        resolved,
+        source_is_env=app.state.llm_catalog.follows_environment(),
+    )
     app.state.oidc_http = oidc_http
 
     app.add_middleware(

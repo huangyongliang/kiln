@@ -3,12 +3,14 @@
 POST /llm/chat is the only chat entry and still requires agent.qa. The
 OpenAI provider runs a server-owned tool loop. resolve_model receives the
 allow-list and default for this caller. The provider is the process singleton.
-mock and off keep complete() and do not validate the model against a catalog.
-They do not attach or execute tools.
+mock and off accept the same complete() allowance arguments and ignore them.
+They do not validate the model against a catalog, and they do not attach or
+execute tools.
 
-GET / PUT /llm/catalog requires llm.manage. PUT replaces the catalog, the four
-role assignments, and the managed flag in one transaction. The last writer
-wins. This route does not use an ETag.
+GET / PUT /llm/catalog requires llm.manage. A caller missing that permission
+gets 403 with the usual detail string, and the string names llm.manage.
+PUT replaces the catalog, the four role assignments, and the managed flag in
+one transaction. The last writer wins. This route does not use an ETag.
 """
 
 from fastapi import APIRouter, Depends, Request
@@ -42,6 +44,8 @@ router = APIRouter(
     dependencies=[Depends(require_auth)],
 )
 
+_CATALOG_FORBIDDEN = "没有权限（需要：llm.manage）"
+
 
 @router.get("/provider", response_model=ProviderStatus, summary="查看模型提供方")
 def read_provider(
@@ -61,7 +65,7 @@ def read_provider(
     "/catalog",
     response_model=CatalogDocument,
     summary="查看模型目录与角色分配",
-    dependencies=[Depends(require_permission("llm.manage"))],
+    dependencies=[Depends(require_permission("llm.manage", detail=_CATALOG_FORBIDDEN))],
 )
 def read_catalog(
     settings: Settings = Depends(get_settings),
@@ -88,7 +92,7 @@ def read_catalog(
         "之后修改 LLM_MODEL 或 LLM_MODELS 不会覆盖已保存的内容。"
         "不写入端点或密钥。"
     ),
-    dependencies=[Depends(require_permission("llm.manage"))],
+    dependencies=[Depends(require_permission("llm.manage", detail=_CATALOG_FORBIDDEN))],
 )
 def replace_catalog(
     payload: CatalogReplace,
@@ -137,4 +141,4 @@ def chat(
             default=allowance.default,
             managed=allowance.managed,
         )
-    return provider.complete(payload)
+    return provider.complete(payload, allowed=(), default="", managed=False)

@@ -481,7 +481,7 @@ def test_caller_union_and_default_follow_role_order() -> None:
     assert publisher_status["default_model"] == "m2"
     assert admin_status["models"] == ["m1"]
     assert admin_status["default_model"] == "m1"
-    assert reader_status["models"] == ["m2"]
+    assert reader_status["models"] == []
     assert reader_status["default_model"] == "m2"
     assert mixed_status["models"] == ["m2", "m3"]
     assert mixed_status["default_model"] == "m2"
@@ -775,6 +775,174 @@ def test_oversized_env_seed_warns_and_unedited_save_stays_422(
         assert again["seed_over_limit"] is True
 
 
+def test_oversized_env_seed_warning_stops_after_the_catalog_is_saved(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    listed = ",".join(f"model-{index}" for index in range(32))
+    settings = app_settings(
+        llm_provider="openai",
+        llm_base_url="http://llm.example/v1",
+        llm_model="default-model",
+        llm_models=listed,
+    )
+    caplog.set_level(logging.WARNING)
+    create_app(settings)
+    assert any(SEED_OVER_LIMIT_MESSAGE in record.getMessage() for record in caplog.records)
+    app = create_app(settings)
+    with TestClient(app, headers=auth_headers()) as client:
+        saved = client.put(
+            "/api/v1/llm/catalog",
+            json=_replace(["model-0"], "model-0", {}),
+        )
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["source"] == "db"
+        assert saved.json()["seed_over_limit"] is False
+    caplog.clear()
+    create_app(settings)
+    assert not any(SEED_OVER_LIMIT_MESSAGE in record.getMessage() for record in caplog.records)
+    assert not any("超过 32" in record.getMessage() for record in caplog.records)
+
+
+def test_illegal_env_ids_are_listed_at_startup(caplog: pytest.LogCaptureFixture) -> None:
+    hidden = "bad\u200bmodel"
+    private = "co\ue000model"
+    caplog.set_level(logging.WARNING)
+    app = create_app(
+        app_settings(
+            llm_provider="openai",
+            llm_base_url="http://llm.example/v1",
+            llm_model="plain-model",
+            llm_models=f"plain-model,{hidden},{private}",
+        )
+    )
+    warnings = [
+        record.getMessage() for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    listed = next(message for message in warnings if "非法字符" in message)
+    assert hidden in listed
+    assert private in listed
+    with TestClient(app, headers=auth_headers()) as client:
+        status = client.get("/api/v1/llm/provider")
+    assert status.status_code == 200
+
+
+def test_reader_without_chat_permission_gets_an_empty_model_list() -> None:
+    def explode(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"provider status called the network: {request.url}")
+
+    with httpx.Client(transport=httpx.MockTransport(explode)) as http_client:
+        app = create_app(
+            app_settings(
+                llm_provider="openai",
+                llm_base_url="http://llm.example/v1",
+                llm_api_key=SECRET,
+                llm_model="model-a",
+                llm_models="model-b",
+            ),
+            http_client=http_client,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
+            truncate_domain(client.app.state.engine)
+            machine = client.get("/api/v1/llm/provider")
+            anonymous = TestClient(client.app)
+            anon = anonymous.get("/api/v1/llm/provider")
+            reader = _login(client, "ada_reader_models", ["reader"])
+            unmanaged = reader.get("/api/v1/llm/provider")
+            saved = client.put(
+                "/api/v1/llm/catalog",
+                json=_replace(
+                    ["model-a", "model-b"],
+                    "model-a",
+                    {
+                        "reader": (["model-b"], "model-b"),
+                        "builder": (["model-a"], "model-a"),
+                    },
+                ),
+            )
+            assert saved.status_code == 200, saved.text
+            managed = reader.get("/api/v1/llm/provider")
+            builder = _login(client, "ada_builder_models", ["builder"])
+            builder_status = builder.get("/api/v1/llm/provider")
+    assert machine.status_code == 200
+    assert machine.json()["models"] == ["model-a", "model-b"]
+    assert machine.json()["base_url"] == "http://llm.example/v1"
+    assert anon.status_code == 401
+    assert unmanaged.status_code == 200
+    assert unmanaged.json()["models"] == []
+    assert unmanaged.json()["default_model"] == "model-a"
+    assert unmanaged.json()["base_url"] == "http://llm.example/v1"
+    assert unmanaged.json()["provider"] == "openai"
+    assert SECRET not in unmanaged.text
+    assert managed.status_code == 200
+    assert managed.json()["models"] == []
+    assert managed.json()["default_model"] == "model-b"
+    assert managed.json()["base_url"] == "http://llm.example/v1"
+    assert builder_status.json()["models"] == ["model-a"]
+    assert builder_status.json()["default_model"] == "model-a"
+    assert builder_status.json()["base_url"] == "http://llm.example/v1"
+
+
+def test_default_and_role_fields_reject_illegal_characters() -> None:
+    samples = ("\ue000", "\ud800", "\u0378", "\u115f", "\u1160", "\uffa0", "\u2800", "\u3164")
+    for sample in samples:
+        dirty = f"model-{sample}a"
+        for payload in (
+            _replace(["model-a"], dirty, {}),
+            _replace(["model-a"], "model-a", {"builder": ([dirty], None)}),
+            _replace(
+                ["model-a", "model-b"],
+                "model-a",
+                {"builder": (["model-a"], dirty)},
+            ),
+        ):
+            with pytest.raises(Unprocessable) as caught:
+                validate_catalog_replace(CatalogReplace.model_validate(payload))
+            assert caught.value.detail == ID_ILLEGAL
+    kept = validate_catalog_replace(
+        CatalogReplace.model_validate(
+            _replace([{"id": "model-a", "display_name": "通义★"}], "model-a", {})
+        )
+    )
+    assert kept.models[0].display_name == "通义★"
+
+
+def test_overlapping_first_saves_with_a_missing_state_row_never_500() -> None:
+    app = create_app(
+        app_settings(
+            llm_provider="openai",
+            llm_base_url="http://llm.example/v1",
+            llm_model="model-a",
+            llm_models="model-a",
+        )
+    )
+    left = _replace(
+        ["model-shared", "model-left"],
+        "model-shared",
+        {"admin": (["model-shared", "model-left"], "model-left")},
+    )
+    right = _replace(
+        ["model-shared", "model-right"],
+        "model-right",
+        {"builder": (["model-shared"], "model-shared")},
+    )
+    with TestClient(app, headers=auth_headers()) as client:
+        for _ in range(8):
+            truncate_domain(client.app.state.engine)
+            with client.app.state.engine.connect() as connection:
+                present = connection.execute(
+                    text("SELECT count(*) FROM llm_catalog_state")
+                ).scalar_one()
+            assert present == 0
+            first, second = asyncio.run(_put_catalog_pair(app, left, right))
+            assert first.status_code == 200, first.text
+            assert second.status_code == 200, second.text
+            final = client.get("/api/v1/llm/catalog").json()
+            assert final["source"] == "db"
+            assert _catalog_view(final) in (_catalog_view(left), _catalog_view(right))
+            assert "duplicate key" not in first.text
+            assert "duplicate key" not in second.text
+
+
 def test_catalog_is_forbidden_for_publisher_and_reader_and_anonymous() -> None:
     app = create_app(
         app_settings(
@@ -793,9 +961,9 @@ def test_catalog_is_forbidden_for_publisher_and_reader_and_anonymous() -> None:
             denied_get = caller.get("/api/v1/llm/catalog")
             denied_put = caller.put("/api/v1/llm/catalog", json=payload)
             assert denied_get.status_code == 403, denied_get.text
-            assert denied_get.json()["detail"] == "没有权限"
+            assert denied_get.json() == {"detail": "没有权限（需要：llm.manage）"}
             assert denied_put.status_code == 403, denied_put.text
-            assert denied_put.json()["detail"] == "没有权限"
+            assert denied_put.json() == {"detail": "没有权限（需要：llm.manage）"}
         anon_get = anonymous.get("/api/v1/llm/catalog")
         anon_put = anonymous.put("/api/v1/llm/catalog", json=payload)
         assert anon_get.status_code == 401, anon_get.text

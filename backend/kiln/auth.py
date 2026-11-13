@@ -57,13 +57,15 @@ def require_auth(
     return principal
 
 
-def require_permission(code: str):
+def require_permission(code: str, *, detail: str | None = None):
     if code not in ALL_PERMISSIONS:
         raise RuntimeError(f"unknown permission: {code}")
 
     def checker(principal: Principal = Depends(require_auth)) -> Principal:
         if code not in principal.permissions:
-            raise Forbidden()
+            if detail is None:
+                raise Forbidden()
+            raise Forbidden(detail)
         return principal
 
     return checker

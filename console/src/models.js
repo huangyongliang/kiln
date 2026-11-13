@@ -19,7 +19,8 @@ export const SAVED_TEXT = "已保存";
 export const SAVE_FAILED_TAG = "保存失败";
 export const UNSAVED_TAG = "尚未保存";
 
-const ILLEGAL_CATALOG_CHAR = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cs}\u3164]/u;
+const ILLEGAL_CATALOG_CHAR =
+  /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cs}\p{Cn}\u115F\u1160\u3164\uFFA0\u2800]/u;
 
 // Trim only Unicode Zs separators, including ASCII space U+0020.
 // Do not use String.prototype.trim(): it also strips U+FEFF and does not

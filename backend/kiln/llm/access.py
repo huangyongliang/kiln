@@ -40,17 +40,22 @@ def provider_models(
 ) -> tuple[list[str], str | None]:
     """``models`` and ``default_model`` for ``GET /llm/provider``.
 
-    Unmanaged responses keep today's values for every signed-in principal.
-    ``mock`` and ``off`` always publish an empty ``models`` list. A managed
-    ``default_model`` is the caller default, or null.
+    A caller without ``agent.qa`` gets an empty ``models`` list. ``base_url``
+    is unchanged and the route stays login-only. ``mock`` and ``off`` always
+    publish an empty ``models`` list. A managed ``default_model`` is the
+    caller default, or null.
     """
 
     if snapshot.source != "db":
-        return list(settings.llm_catalog()), (settings.llm_model or None)
-    caller = caller_models(principal, snapshot)
-    if settings.llm_provider != "openai":
-        return [], caller.default_model
-    return list(caller.allowed), caller.default_model
+        models = list(settings.llm_catalog())
+        default_model = settings.llm_model or None
+    else:
+        caller = caller_models(principal, snapshot)
+        default_model = caller.default_model
+        models = list(caller.allowed) if settings.llm_provider == "openai" else []
+    if "agent.qa" not in principal.permissions:
+        return [], default_model
+    return models, default_model
 
 
 def chat_allowance(
@@ -58,14 +63,29 @@ def chat_allowance(
     principal: Principal,
     snapshot: CatalogSnapshot,
 ) -> ChatAllowance:
-    """Allowance for one openai chat request. Not used for mock or off."""
+    """Allowance for one openai chat request. Not used for mock or off.
+
+    An unmanaged deployment with environment models keeps that allow-list.
+    With no environment models, only ``LLM_MODEL`` is allowed when it is set.
+    When neither is set, the empty list is managed and chat raises
+    ``NO_MODELS_FOR_ACCOUNT`` instead of forwarding an arbitrary id.
+    """
 
     if snapshot.source != "db":
-        return ChatAllowance(
-            allowed=tuple(settings.llm_catalog()),
-            default=settings.llm_request_default(),
-            managed=False,
-        )
+        catalog = tuple(settings.llm_catalog())
+        if catalog:
+            return ChatAllowance(
+                allowed=catalog,
+                default=settings.llm_request_default(),
+                managed=False,
+            )
+        if settings.llm_model:
+            return ChatAllowance(
+                allowed=(settings.llm_model,),
+                default=settings.llm_model,
+                managed=False,
+            )
+        return ChatAllowance(allowed=(), default="", managed=True)
     caller = caller_models(principal, snapshot)
     return ChatAllowance(
         allowed=caller.allowed,
