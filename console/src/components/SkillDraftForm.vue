@@ -72,12 +72,12 @@ const steps = ref([{ kind: "checkout", description: "" }]);
 const scalars = [
   ["name", "名称", "skill-name"],
   ["version", "版本", "skill-version"],
-  ["description", "说明", "skill-description", 3],
+  ["description", "说明", "skill-description", 8],
   ["toolchain", "工具链", "skill-toolchain"],
   ["environment", "环境", "skill-environment"],
-  ["output_spec", "输出说明", "skill-output", 2],
+  ["output_spec", "输出说明", "skill-output", 6],
   ["allowed_repositories", "允许仓库", "skill-repos"],
-  ["allowed_dependencies", "允许依赖", "skill-deps", 3, "一行一条", DEPENDENCY_NOTE],
+  ["allowed_dependencies", "允许依赖", "skill-deps", 6, "一行一条", DEPENDENCY_NOTE],
 ];
 
 watch(() => props.initial, applyInitial, { immediate: true });
@@ -285,7 +285,7 @@ function submit() {
             v-else-if="repoMode === 'manual'"
             id="skill-repos"
             v-model="form.allowed_repositories"
-            rows="3"
+            rows="8"
             placeholder="一行一条，owner/name"
           />
         </fieldset>

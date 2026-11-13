@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   CHAT_MESSAGE_LIMIT,
@@ -23,6 +26,8 @@ import {
   trimChatMessages,
   writeChatModel,
   writeChatThread,
+  clearChatStorage,
+  composerKeyAction,
 } from "./chat.js";
 
 const SKILL_ID = "11111111-1111-4111-8111-111111111111";
@@ -314,6 +319,61 @@ test("the thread stores the raw message text, not rendered html", () => {
   assert.equal(saved.includes("<strong>"), false);
   assert.equal(saved.includes("<code>"), false);
 });
+
+test("logout clears the chat thread, the selected model, and other kiln.chat keys", () => {
+  const storage = scanningStorage();
+  writeChatThread(storage, [{ role: "user", content: "问" }]);
+  writeChatModel(storage, "model-a");
+  storage.setItem("kiln.chat.extra", "1");
+  storage.setItem("kiln.account", "keep");
+  clearChatStorage(storage);
+  assert.equal(storage.getItem(CHAT_THREAD_KEY), null);
+  assert.equal(storage.getItem(CHAT_MODEL_KEY), null);
+  assert.equal(storage.getItem("kiln.chat.extra"), null);
+  assert.equal(storage.getItem("kiln.account"), "keep");
+  const plain = memoryStorage();
+  writeChatThread(plain, [{ role: "user", content: "问" }]);
+  writeChatModel(plain, "model-b");
+  clearChatStorage(plain);
+  assert.equal(plain.getItem(CHAT_THREAD_KEY), null);
+  assert.equal(plain.getItem(CHAT_MODEL_KEY), null);
+  const app = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "App.vue"), "utf8");
+  assert.match(app, /clearChatStorage\(window\.sessionStorage\)/);
+  assert.match(app, /clearChatStorage\(window\.localStorage\)/);
+});
+
+test("Enter sends, Shift+Enter inserts a newline, and IME composition does not send", () => {
+  assert.equal(composerKeyAction({ key: "Enter", shiftKey: false, isComposing: false }), "send");
+  assert.equal(composerKeyAction({ key: "Enter", shiftKey: true, isComposing: false }), "insert");
+  assert.equal(composerKeyAction({ key: "Enter", shiftKey: false, isComposing: true }), "insert");
+  assert.equal(composerKeyAction({ key: "Enter", shiftKey: false, isComposing: false, keyCode: 229 }), "insert");
+  assert.equal(composerKeyAction({ key: "Process", shiftKey: false, isComposing: false }), "insert");
+  assert.equal(composerKeyAction({ key: "a", shiftKey: false, isComposing: false }), "insert");
+  assert.equal(composerKeyAction(null), "insert");
+  const view = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "views/ChatView.vue"), "utf8");
+  assert.match(view, /composerKeyAction\(event\) !== "send"/);
+});
+
+function scanningStorage() {
+  const data = new Map();
+  return {
+    get length() {
+      return data.size;
+    },
+    key(index) {
+      return [...data.keys()][index] ?? null;
+    },
+    getItem(key) {
+      return data.has(key) ? data.get(key) : null;
+    },
+    setItem(key, value) {
+      data.set(key, String(value));
+    },
+    removeItem(key) {
+      data.delete(key);
+    },
+  };
+}
 
 function memoryStorage() {
   const data = new Map();

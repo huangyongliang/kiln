@@ -17,6 +17,7 @@ import {
   takeUserMessage,
   writeChatModel,
   writeChatThread,
+  composerKeyAction,
 } from "../chat";
 import MarkdownBody from "../components/MarkdownBody.vue";
 import PageIntro from "../components/PageIntro.vue";
@@ -186,10 +187,11 @@ function suggest(text) {
 }
 
 function onKeydown(event) {
-  if (event.key === "Enter" && !event.shiftKey) {
-    event.preventDefault();
-    send();
+  if (composerKeyAction(event) !== "send") {
+    return;
   }
+  event.preventDefault();
+  send();
 }
 
 async function scrollMessages() {
