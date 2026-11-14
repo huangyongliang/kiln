@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   allowedRepositoriesFromChecklist,
@@ -163,10 +166,14 @@ test("checksum and upload size", () => {
   assert.equal(checksumError("ab".repeat(64), "sha512"), "");
   assert.equal(checksumError("ab".repeat(32), "sha512"), "sha512 需要 128 位十六进制字符串");
   assert.equal(uploadSizeError(UPLOAD_LIMIT_BYTES), "");
-  assert.equal(
-    uploadSizeError(UPLOAD_LIMIT_BYTES + 1),
-    "控制台上传上限 1 MB（nginx 限制），更大的字节由产品构建产出",
+  const limit = uploadSizeError(UPLOAD_LIMIT_BYTES + 1);
+  assert.equal(limit, "控制台单次上传上限 1 MB，更大的字节由产品构建产出");
+  assert.equal(limit.includes("nginx"), false);
+  const formsSource = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "forms.js"),
+    "utf8",
   );
+  assert.equal(formsSource.includes("nginx"), false);
 });
 
 test("fieldErrors strips the value-error prefix and maps loc to a field", () => {

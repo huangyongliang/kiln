@@ -18,6 +18,8 @@ from kiln.domain.jobs import JobStatus
 from kiln.errors import BadRequest
 from kiln.git.refs import parse_repository
 
+ContentConflict = Literal["foreign_bytes", "foreign_version"]
+
 
 class ProductBuildCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -48,7 +50,7 @@ class ProductBuild(BaseModel):
     version: str
     package_type: PackageType
     content_available: bool
-    content_conflict: Literal["foreign_bytes"] | None = None
+    content_conflict: ContentConflict | None = None
     created_at: datetime
     updated_at: datetime
     requested_by: UUID | None = None

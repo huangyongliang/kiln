@@ -408,6 +408,7 @@ def test_docs_and_runtime_flag_stay_within_the_slice() -> None:
         ROOT / "backend" / "kiln" / "executor" / "product.py",
         ROOT / "backend" / "kiln" / "llm" / "tools.py",
         ROOT / "backend" / "kiln" / "db" / "migrations" / "versions" / "0010_actor_attribution.py",
+        ROOT / "backend" / "kiln" / "db" / "migrations" / "versions" / "0011_actor_indexes.py",
         ROOT / "console" / "src" / "actors.js",
         ROOT / "console" / "src" / "views" / "ArtifactsView.vue",
         ROOT / "console" / "src" / "views" / "ArtifactDetailView.vue",

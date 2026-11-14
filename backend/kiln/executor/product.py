@@ -9,15 +9,15 @@ proxy does not probe it before the build starts.
 
 import hashlib
 import re
-from typing import Literal
 from uuid import UUID, uuid4
 
 from kiln.config import Settings
 from kiln.db.builds import BuildStore, StoredBuild
 from kiln.db.store import PostgresStore
-from kiln.domain.artifacts import ArtifactCreate, ArtifactSource, Checksum
+from kiln.domain.artifacts import ArtifactSource, Checksum
 from kiln.domain.builds import (
     BuildLog,
+    ContentConflict,
     ProductBuild,
     ProductBuildCreate,
     repository_in_skill_scope,
@@ -69,44 +69,42 @@ def create_product_build(
         git_token=settings.git_token_value(),
     )
     repository = f"{owner}/{name}"
-    artifact = catalog.create_artifact(
-        ArtifactCreate(
-            name=payload.artifact_name,
-            description=f"由 {repository}@{sha[:12]} 构建",
-            package_type=payload.package_type,
-        )
-    )
     build_id = uuid4()
     jenkins_job_name = f"kiln-build-{build_id.hex}"
-    jenkins.create_product_job(
-        jenkins_job_name,
-        clone_url=clone_url,
+    stored = builds.create_pending_build(
+        build_id=build_id,
+        artifact_name=payload.artifact_name,
+        artifact_description=f"由 {repository}@{sha[:12]} 构建",
+        name=payload.name or payload.artifact_name,
+        jenkins_job_name=jenkins_job_name,
+        repository=repository,
         ref=ref,
-        sha=sha,
-        git_user=username,
-        git_token=settings.git_token_value(),
-        declare_nexus_parameters=settings.nexus_configured,
+        commit_sha=sha,
+        version=payload.version,
+        package_type=payload.package_type.value,
+        skill_id=skill.id,
+        requested_by=requested_by,
     )
     try:
+        jenkins.create_product_job(
+            jenkins_job_name,
+            clone_url=clone_url,
+            ref=ref,
+            sha=sha,
+            git_user=username,
+            git_token=settings.git_token_value(),
+            declare_nexus_parameters=settings.nexus_configured,
+        )
         queue_url = jenkins.trigger_build(
             jenkins_job_name,
             parameters=nexus_build_parameters(settings),
         )
-        return builds.create_build(
-            build_id=build_id,
-            name=payload.name or artifact.name,
-            jenkins_job_name=jenkins_job_name,
-            repository=repository,
-            ref=ref,
-            commit_sha=sha,
-            artifact_id=artifact.id,
-            version=payload.version,
-            package_type=payload.package_type.value,
-            queue_url=queue_url,
-            skill_id=skill.id,
-            requested_by=requested_by,
-        )
+        return builds.attach_queue(stored.id, queue_url)
     except Exception:
+        try:
+            builds.mark_not_built(stored.id)
+        except Exception:
+            pass
         try:
             jenkins.delete_job(jenkins_job_name)
         except Exception:
@@ -116,6 +114,8 @@ def create_product_build(
 
 def sync_status(builds: BuildStore, jenkins: JenkinsClient, build_id: UUID) -> StoredBuild:
     current = builds.get_build(build_id)
+    if current.queue_url is None and current.build_number is None:
+        return current
     if current.status in TERMINAL_STATUSES and current.build_number is not None:
         return current
     status_name, number = jenkins.read_progress(
@@ -228,7 +228,7 @@ def publish(builds: BuildStore, stored: StoredBuild) -> ProductBuild:
     build_bytes = (
         record is not None and record.has_bytes and record.source == ArtifactSource.build.value
     )
-    conflict: Literal["foreign_bytes"] | None = None
-    if record is not None and record.has_bytes and record.source != ArtifactSource.build.value:
-        conflict = "foreign_bytes"
+    conflict: ContentConflict | None = None
+    if record is not None and record.source != ArtifactSource.build.value:
+        conflict = "foreign_bytes" if record.has_bytes else "foreign_version"
     return stored.public(content_available=build_bytes, content_conflict=conflict)

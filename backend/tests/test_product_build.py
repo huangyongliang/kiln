@@ -631,9 +631,18 @@ class _RecordingJenkins:
         self.calls: list[tuple[str, ...]] = []
         self.parameters: dict[str, str] | None = None
         self.payload = b"kiln-bytes\n"
+        self.create_error: Exception | None = None
+        self.trigger_error: Exception | None = None
+        self.on_create: object | None = None
+        self.on_trigger: object | None = None
+        self.fail_read_progress = False
 
     def create_product_job(self, job_name: str, **_kwargs: object) -> None:
         self.calls.append(("create_product_job", job_name))
+        if callable(self.on_create):
+            self.on_create(job_name)
+        if self.create_error is not None:
+            raise self.create_error
 
     def trigger_build(
         self,
@@ -643,12 +652,18 @@ class _RecordingJenkins:
     ) -> str:
         self.calls.append(("trigger_build", job_name))
         self.parameters = parameters
+        if callable(self.on_trigger):
+            self.on_trigger(job_name)
+        if self.trigger_error is not None:
+            raise self.trigger_error
         return "http://127.0.0.1:9/queue/item/1/"
 
     def delete_job(self, job_name: str) -> None:
         self.calls.append(("delete_job", job_name))
 
     def read_progress(self, *_args: object, **_kwargs: object) -> tuple[str, int]:
+        if self.fail_read_progress:
+            raise AssertionError("read_progress was called")
         return "success", 1
 
     def download_artifact(self, *_args: object, **_kwargs: object) -> bytes:

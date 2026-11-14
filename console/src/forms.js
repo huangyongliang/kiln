@@ -262,7 +262,7 @@ export function checksumError(value, algorithm = "sha256") {
 
 export function uploadSizeError(size) {
   if (Number(size) > UPLOAD_LIMIT_BYTES) {
-    return "控制台上传上限 1 MB（nginx 限制），更大的字节由产品构建产出";
+    return "控制台单次上传上限 1 MB，更大的字节由产品构建产出";
   }
   return "";
 }

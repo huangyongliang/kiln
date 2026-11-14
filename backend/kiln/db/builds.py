@@ -6,19 +6,19 @@ platform blob store. Git tokens are not written here.
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from kiln import clock
-from kiln.db.models import ArtifactVersionRow, ProductBuildRow, SkillRow
+from kiln.db.models import ArtifactRow, ArtifactVersionRow, ProductBuildRow, SkillRow
+from kiln.db.store import _commit_unique
 from kiln.domain.artifacts import PackageType
-from kiln.domain.builds import ProductBuild
+from kiln.domain.builds import ContentConflict, ProductBuild
 from kiln.domain.jobs import JobStatus
-from kiln.errors import NotFound
+from kiln.errors import Conflict, NotFound
 
 
 class StoredBuild:
@@ -67,7 +67,7 @@ class StoredBuild:
         self,
         *,
         content_available: bool,
-        content_conflict: Literal["foreign_bytes"] | None = None,
+        content_conflict: ContentConflict | None = None,
     ) -> ProductBuild:
         return ProductBuild(
             id=self.id,
@@ -156,6 +156,96 @@ class BuildStore:
         )
         with self._session() as session:
             session.add(row)
+            session.commit()
+            return _stored(session, row)
+
+    def create_pending_build(
+        self,
+        *,
+        build_id: UUID,
+        artifact_name: str,
+        artifact_description: str,
+        name: str,
+        jenkins_job_name: str,
+        repository: str,
+        ref: str,
+        commit_sha: str,
+        version: str,
+        package_type: str,
+        skill_id: UUID | None,
+        requested_by: UUID | None,
+    ) -> StoredBuild:
+        """Insert the artifact and a queued build in one transaction.
+
+        ``queue_url`` and ``build_number`` stay null until Jenkins accepts the
+        trigger. A duplicate artifact name rolls both rows back as 409.
+        """
+
+        now = clock.utcnow()
+        artifact_id = uuid4()
+        artifact = ArtifactRow(
+            id=artifact_id,
+            name=artifact_name,
+            group_name=None,
+            description=artifact_description,
+            package_type=package_type,
+            created_at=now,
+        )
+        row = ProductBuildRow(
+            id=build_id,
+            name=name,
+            jenkins_job_name=jenkins_job_name,
+            repository=repository,
+            git_ref=ref,
+            commit_sha=commit_sha,
+            artifact_id=artifact_id,
+            version=version,
+            package_type=package_type,
+            queue_url=None,
+            build_number=None,
+            status=JobStatus.queued.value,
+            content_stored=False,
+            skill_id=skill_id,
+            requested_by=requested_by,
+            created_at=now,
+            updated_at=now,
+        )
+        with self._session() as session:
+            existing = session.scalar(
+                select(ArtifactRow.id).where(
+                    ArtifactRow.name == artifact_name,
+                    ArtifactRow.group_name.is_not_distinct_from(None),
+                )
+            )
+            if existing is not None:
+                raise Conflict("同组内制品名称已存在")
+            session.add(artifact)
+            session.add(row)
+            _commit_unique(session, "同组内制品名称已存在")
+            return _stored(session, row)
+
+    def attach_queue(self, build_id: UUID, queue_url: str | None) -> StoredBuild:
+        with self._session() as session:
+            row = session.get(ProductBuildRow, build_id)
+            if row is None:
+                raise NotFound("构建不存在")
+            row.queue_url = queue_url
+            row.updated_at = clock.utcnow()
+            session.commit()
+            return _stored(session, row)
+
+    def mark_not_built(self, build_id: UUID) -> StoredBuild:
+        """Terminal failure before a queue item or build number exists.
+
+        Leaves ``queue_url`` and ``build_number`` untouched.
+        """
+
+        with self._session() as session:
+            row = session.get(ProductBuildRow, build_id)
+            if row is None:
+                raise NotFound("构建不存在")
+            row.status = JobStatus.not_built.value
+            row.updated_at = clock.utcnow()
             session.commit()
             return _stored(session, row)
 

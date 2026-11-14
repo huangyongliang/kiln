@@ -166,13 +166,15 @@ async function submitBytes() {
       {
         "X-Kiln-Checksum-Algorithm": algorithm,
         "X-Kiln-Checksum": picked.checksum,
-        "X-Kiln-Source": "upload",
       },
     );
     notice.value = result.status === 201 ? "已上传" : "相同字节已保存";
     box.open = false;
     await load();
   } catch (caught) {
+    if (caught?.status === 409) {
+      await load();
+    }
     if (isForbidden(caught)) {
       box.error = actionDeniedText("artifact.upload");
       return;
@@ -321,6 +323,8 @@ function submit() {
     >
       <template v-if="box.reservation">
         <dl class="kv">
+          <dt>来源</dt>
+          <dd>{{ sourceLabel(box.target?.source) }}</dd>
           <dt>预约</dt>
           <dd class="mono">{{ box.reservation.id }}</dd>
           <dt>预约账号</dt>

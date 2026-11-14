@@ -196,6 +196,7 @@ class ArtifactVersionRow(Base):
             ondelete="SET NULL",
         ),
         nullable=True,
+        index=True,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     artifact: Mapped[ArtifactRow] = relationship(back_populates="versions")
@@ -236,6 +237,7 @@ class ReservationRow(Base):
             ondelete="SET NULL",
         ),
         nullable=True,
+        index=True,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -404,7 +406,11 @@ class ProductBuildRow(Base):
     repository: Mapped[str] = mapped_column(Text, nullable=False)
     git_ref: Mapped[str] = mapped_column(Text, nullable=False)
     commit_sha: Mapped[str] = mapped_column(Text, nullable=False)
-    artifact_id: Mapped[UUID] = mapped_column(ForeignKey("artifacts.id"), nullable=False)
+    artifact_id: Mapped[UUID] = mapped_column(
+        ForeignKey("artifacts.id"),
+        nullable=False,
+        index=True,
+    )
     version: Mapped[str] = mapped_column(Text, nullable=False)
     package_type: Mapped[str] = mapped_column(Text, nullable=False)
     queue_url: Mapped[str | None] = mapped_column(Text)
@@ -424,6 +430,7 @@ class ProductBuildRow(Base):
             ondelete="SET NULL",
         ),
         nullable=True,
+        index=True,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -463,6 +470,7 @@ class ExecutorJobRow(Base):
             ondelete="SET NULL",
         ),
         nullable=True,
+        index=True,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
