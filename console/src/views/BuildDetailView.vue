@@ -142,7 +142,7 @@ async function refresh() {
       :empty-text="missing ? '不存在' : '执行器未配置'"
       @retry="load"
     >
-      <p v-if="contentConflictText(build)" class="message">{{ contentConflictText(build) }}</p>
+      <p v-if="contentConflictText(build)" class="banner warn" role="status">{{ contentConflictText(build) }}</p>
       <section v-if="build" class="panel">
         <dl class="kv">
           <dt>发起人</dt>

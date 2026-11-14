@@ -17,7 +17,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
-from sqlalchemy import inspect, text
+from sqlalchemy import bindparam, inspect, text
 from sqlalchemy.engine import Engine, make_url
 
 from kiln.config import LOCAL_API_TOKEN
@@ -308,7 +308,7 @@ def test_product_build_skill_migration_round_trip(client: TestClient) -> None:
     """skill_id appears at head and is gone at 0006_skill_rejection."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0010_actor_attribution"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0011_actor_indexes"]
     engine = client.app.state.engine
     try:
         command.downgrade(cfg, "0006_skill_rejection")
@@ -335,7 +335,7 @@ def test_skill_rejection_migration_round_trip(client: TestClient) -> None:
     """Drop the rejection columns at 0005_local_login, then restore them at head."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0010_actor_attribution"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0011_actor_indexes"]
     engine = client.app.state.engine
     try:
         command.downgrade(cfg, "0005_local_login")
@@ -350,7 +350,7 @@ def test_skill_created_by_migration_round_trip(client: TestClient) -> None:
     """created_by appears at head and is gone at 0007_product_build_skill."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0010_actor_attribution"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0011_actor_indexes"]
     engine = client.app.state.engine
     try:
         _assert_created_by_schema(engine)
@@ -378,7 +378,7 @@ def test_llm_catalog_migration_round_trip(client: TestClient) -> None:
     """Downgrade drops a saved catalog. Upgrade again is back to env behavior."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0010_actor_attribution"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0011_actor_indexes"]
     engine = client.app.state.engine
     try:
         _assert_llm_catalog_tables(engine, present=True)
@@ -418,7 +418,7 @@ def test_actor_attribution_migration_on_empty_and_existing_databases(client: Tes
 
     cfg = _alembic_config(postgres_url())
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == ["0010_actor_attribution"]
+    assert script.get_heads() == ["0011_actor_indexes"]
     revision = script.get_revision("0010_actor_attribution")
     assert revision is not None
     assert revision.down_revision == "0009_llm_catalog"
@@ -442,6 +442,286 @@ def test_actor_attribution_migration_on_empty_and_existing_databases(client: Tes
     finally:
         command.upgrade(cfg, "head")
         truncate_domain(engine)
+
+
+_ACTOR_INDEXES = (
+    "ix_artifact_versions_created_by",
+    "ix_download_reservations_account_id",
+    "ix_product_builds_requested_by",
+    "ix_executor_jobs_requested_by",
+    "ix_product_builds_artifact_id",
+)
+
+
+def test_actor_index_migration_on_empty_and_populated_databases(client: TestClient) -> None:
+    """0011 adds five plain indexes. Downgrade removes them and leaves rows alone."""
+
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    from kiln.db.models import Base
+
+    cfg = _alembic_config(postgres_url())
+    script = ScriptDirectory.from_config(cfg)
+    assert script.get_heads() == ["0011_actor_indexes"]
+    revision = script.get_revision("0011_actor_indexes")
+    assert revision is not None
+    assert revision.down_revision == "0010_actor_attribution"
+    versions = Path(db_migrate.__file__).resolve().parent / "migrations" / "versions"
+    assert (versions / "0011_actor_indexes.py").is_file()
+    _assert_actor_indexes_on_empty_database()
+
+    engine = client.app.state.engine
+    planted: dict[str, str] | None = None
+    try:
+        command.downgrade(cfg, "0010_actor_attribution")
+        assert _actor_index_names(engine) == set()
+        planted = _insert_indexed_actor_rows(engine)
+        before = _indexed_actor_snapshot(engine, planted)
+        command.upgrade(cfg, "head")
+        _assert_actor_indexes(engine, present=True)
+        assert _indexed_actor_snapshot(engine, planted) == before
+        command.downgrade(cfg, "0010_actor_attribution")
+        assert _actor_index_names(engine) == set()
+        assert _indexed_actor_snapshot(engine, planted) == before
+        command.upgrade(cfg, "head")
+        _assert_actor_indexes(engine, present=True)
+        assert _indexed_actor_snapshot(engine, planted) == before
+        with engine.connect() as connection:
+            context = MigrationContext.configure(connection)
+            diff = compare_metadata(context, Base.metadata)
+        assert diff == []
+    finally:
+        command.upgrade(cfg, "head")
+        truncate_domain(engine)
+
+
+def _actor_index_names(engine: Engine) -> set[str]:
+    with engine.connect() as connection:
+        found = connection.execute(
+            text(
+                """
+                SELECT indexname
+                FROM pg_indexes
+                WHERE schemaname = 'public'
+                  AND indexname IN :names
+                """
+            ).bindparams(bindparam("names", expanding=True)),
+            {"names": list(_ACTOR_INDEXES)},
+        ).scalars()
+        return set(found)
+
+
+def _assert_actor_indexes(engine: Engine, *, present: bool) -> None:
+    found = _actor_index_names(engine)
+    if present:
+        assert found == set(_ACTOR_INDEXES)
+        with engine.connect() as connection:
+            for name in _ACTOR_INDEXES:
+                definition = connection.execute(
+                    text("SELECT indexdef FROM pg_indexes WHERE indexname = :name"),
+                    {"name": name},
+                ).scalar_one()
+                assert "USING btree" in definition
+                assert "UNIQUE" not in definition
+    else:
+        assert found == set()
+
+
+def _assert_actor_indexes_on_empty_database() -> None:
+    name = f"kiln_s1b_{uuid4().hex[:12]}"
+    assert re.fullmatch(r"kiln_s1b_[0-9a-f]{12}", name)
+    admin = create_db_engine(postgres_url()).execution_options(isolation_level="AUTOCOMMIT")
+    url = make_url(postgres_url()).set(database=name).render_as_string(hide_password=False)
+    empty: Engine | None = None
+    try:
+        with admin.connect() as connection:
+            connection.execute(text(f'CREATE DATABASE "{name}"'))
+        upgrade_database(url)
+        empty = create_db_engine(url)
+        _assert_actor_indexes(empty, present=True)
+        with empty.connect() as connection:
+            builds = connection.execute(text("SELECT count(*) FROM product_builds")).scalar_one()
+            versions = connection.execute(
+                text("SELECT count(*) FROM artifact_versions")
+            ).scalar_one()
+        assert builds == 0
+        assert versions == 0
+        command.downgrade(_alembic_config(url), "0010_actor_attribution")
+        _assert_actor_indexes(empty, present=False)
+        command.upgrade(_alembic_config(url), "head")
+        _assert_actor_indexes(empty, present=True)
+        assert ScriptDirectory.from_config(_alembic_config(url)).get_heads() == [
+            "0011_actor_indexes"
+        ]
+    finally:
+        if empty is not None:
+            empty.dispose()
+        with admin.connect() as connection:
+            connection.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+def _insert_indexed_actor_rows(engine: Engine) -> dict[str, str]:
+    planted = {
+        "account_id": str(uuid4()),
+        "artifact_id": str(uuid4()),
+        "build_id": str(uuid4()),
+        "job_id": str(uuid4()),
+        "reservation_id": str(uuid4()),
+        "username": f"idx_{uuid4().hex[:8]}",
+    }
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO accounts (id, username, display_name, status, created_at)
+                VALUES (:id, :username, '索引', 'active', TIMESTAMPTZ '2026-01-01T00:00:00Z')
+                """
+            ),
+            {"id": planted["account_id"], "username": planted["username"]},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO artifacts
+                    (id, name, group_name, description, package_type, created_at)
+                VALUES
+                    (:id, :name, NULL, '索引制品', 'generic',
+                     TIMESTAMPTZ '2026-01-01T00:00:00Z')
+                """
+            ),
+            {"id": planted["artifact_id"], "name": planted["username"]},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO artifact_versions (
+                    artifact_id, version, checksum_algorithm, checksum_value,
+                    size_bytes, source, content_available, blob_key, created_by, created_at
+                ) VALUES (
+                    :artifact_id, '1.0.0', 'sha256', :digest,
+                    4, 'upload', false, NULL, :account_id,
+                    TIMESTAMPTZ '2026-01-01T00:00:00Z'
+                )
+                """
+            ),
+            {
+                "artifact_id": planted["artifact_id"],
+                "digest": SHA256_A,
+                "account_id": planted["account_id"],
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO product_builds (
+                    id, name, jenkins_job_name, repository, git_ref, commit_sha,
+                    artifact_id, version, package_type, queue_url, build_number,
+                    status, content_stored, requested_by, created_at, updated_at
+                ) VALUES (
+                    :id, 'idx-build', :job_name, 'ada/demo', 'main', :sha,
+                    :artifact_id, '1.0.0', 'generic', NULL, NULL,
+                    'queued', false, :account_id,
+                    TIMESTAMPTZ '2026-01-01T00:00:00Z', TIMESTAMPTZ '2026-01-01T00:00:00Z'
+                )
+                """
+            ),
+            {
+                "id": planted["build_id"],
+                "job_name": f"kiln-build-{planted['build_id'].replace('-', '')}",
+                "sha": "b" * 40,
+                "artifact_id": planted["artifact_id"],
+                "account_id": planted["account_id"],
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO executor_jobs (
+                    id, name, jenkins_job_name, marker, queue_url, build_number,
+                    status, requested_by, created_at, updated_at
+                ) VALUES (
+                    :id, 'idx-job', :job_name, 'idx', NULL, NULL,
+                    'queued', :account_id,
+                    TIMESTAMPTZ '2026-01-01T00:00:00Z', TIMESTAMPTZ '2026-01-01T00:00:00Z'
+                )
+                """
+            ),
+            {
+                "id": planted["job_id"],
+                "job_name": f"kiln-{planted['job_id'].replace('-', '')}",
+                "account_id": planted["account_id"],
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO download_reservations (
+                    id, artifact_id, artifact_name, version, package_type,
+                    checksum_algorithm, checksum_value, requester, account_id,
+                    created_at, expires_at
+                ) VALUES (
+                    :id, :artifact_id, :name, '1.0.0', 'generic',
+                    'sha256', :digest, 'idx_user', :account_id,
+                    TIMESTAMPTZ '2026-01-01T00:00:00Z', TIMESTAMPTZ '2026-01-02T00:00:00Z'
+                )
+                """
+            ),
+            {
+                "id": planted["reservation_id"],
+                "artifact_id": planted["artifact_id"],
+                "name": planted["username"],
+                "digest": SHA256_A,
+                "account_id": planted["account_id"],
+            },
+        )
+    return planted
+
+
+def _indexed_actor_snapshot(engine: Engine, planted: dict[str, str]) -> tuple:
+    with engine.connect() as connection:
+        version = connection.execute(
+            text(
+                """
+                SELECT version, source, content_available, size_bytes, created_by::text
+                FROM artifact_versions
+                WHERE artifact_id = :id
+                """
+            ),
+            {"id": planted["artifact_id"]},
+        ).one()
+        build = connection.execute(
+            text(
+                """
+                SELECT status, queue_url, build_number, requested_by::text, content_stored
+                FROM product_builds
+                WHERE id = :id
+                """
+            ),
+            {"id": planted["build_id"]},
+        ).one()
+        job = connection.execute(
+            text(
+                """
+                SELECT status, requested_by::text
+                FROM executor_jobs
+                WHERE id = :id
+                """
+            ),
+            {"id": planted["job_id"]},
+        ).one()
+        reservation = connection.execute(
+            text(
+                """
+                SELECT requester, account_id::text
+                FROM download_reservations
+                WHERE id = :id
+                """
+            ),
+            {"id": planted["reservation_id"]},
+        ).one()
+    return (tuple(version), tuple(build), tuple(job), tuple(reservation))
 
 
 _ACTOR_COLUMNS = (
@@ -507,7 +787,7 @@ def _assert_actor_columns_on_empty_database() -> None:
         assert versions == 0
         upgrade_database(url)
         assert ScriptDirectory.from_config(_alembic_config(url)).get_heads() == [
-            "0010_actor_attribution"
+            "0011_actor_indexes"
         ]
     finally:
         if empty is not None:

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   BUILD_OWNED_REASON,
   FOREIGN_BYTES_TEXT,
+  FOREIGN_VERSION_TEXT,
   MACHINE_OR_HISTORY,
   actorLabel,
   contentConflictText,
@@ -40,8 +41,11 @@ test("build detail and artifact detail render the actor through actorLabel", () 
   assert.match(artifactView, /actorLabel\(item\.created_by, accounts\)/);
   assert.match(artifactView, /actorLabel\(box\.reservation\.account_id, accounts\)/);
   assert.equal(contentConflictText({ content_conflict: "foreign_bytes" }), FOREIGN_BYTES_TEXT);
+  assert.equal(contentConflictText({ content_conflict: "foreign_version" }), FOREIGN_VERSION_TEXT);
+  assert.notEqual(FOREIGN_BYTES_TEXT, FOREIGN_VERSION_TEXT);
   assert.equal(contentConflictText({ content_conflict: null }), "");
   assert.equal(contentConflictText(null), "");
+  assert.match(buildView, /v-if="contentConflictText\(build\)" class="banner warn"/);
 });
 
 test("a build-owned artifact does not offer upload", () => {
@@ -65,6 +69,14 @@ test("a logged-in reservation body does not carry a different requester", () => 
   assert.equal(machine.requester, "ops_user");
   assert.equal(machine.ttl_seconds, 3600);
   assert.match(artifactView, /reservationBody\(account\.value, box\.requester, box\.ttl\)/);
+});
+
+test("upload conflict reloads the artifact and retrieve shows the source", () => {
+  assert.match(artifactView, /caught\?\.status === 409/);
+  assert.match(artifactView, /await load\(\)/);
+  const conflict = artifactView.slice(artifactView.indexOf("catch (caught)"));
+  assert.match(conflict, /status === 409[\s\S]{0,120}await load\(\)/);
+  assert.match(artifactView, /<dt>来源<\/dt>\s*<dd>\{\{ sourceLabel\(box\.target\?\.source\) \}\}<\/dd>/);
 });
 
 test("the artifact list describes platform-owned bytes and does not promise Nexus", () => {

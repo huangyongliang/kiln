@@ -38,7 +38,20 @@ def retrieve(
                     "schema": {"type": "string", "format": "binary"},
                 }
             },
-            "description": "该版本已保存的制品字节",
+            "description": (
+                "该版本已保存的制品字节。"
+                "响应头 X-Kiln-Source 由平台按该版本实际 source 填写，值为 build 或 upload，"
+                "不读取请求输入。"
+                "PUT /artifacts/{id}/versions/{version}/content 上的同名请求头被忽略，不决定来源。"
+            ),
+            "headers": {
+                "X-Kiln-Source": {
+                    "description": (
+                        "平台按该版本存储的 source 填写，值为 build 或 upload，不读取请求输入。"
+                    ),
+                    "schema": {"type": "string", "enum": ["build", "upload"]},
+                }
+            },
         }
     },
 )
@@ -56,5 +69,6 @@ def retrieve_content(
             "X-Kiln-Checksum-Algorithm": stored.algorithm,
             "X-Kiln-Checksum": stored.digest,
             "X-Kiln-Content-Available": "true",
+            "X-Kiln-Source": stored.source,
         },
     )

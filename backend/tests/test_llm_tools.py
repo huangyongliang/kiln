@@ -5,6 +5,7 @@ builds are real Postgres rows. Git and Jenkins are in-process stubs. These
 tests always run. mock and off never enter the loop.
 """
 
+import hashlib
 import json
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from kiln.auth import Principal
+from kiln.domain.artifacts import BUILD_OWNED_WRITE_DETAIL
 from kiln.domain.builds import ProductBuild
 from kiln.domain.rbac import ROLE_INDEX, permissions_for
 from kiln.errors import GIT_SOURCE_UNCONFIGURED_DETAIL, JENKINS_UNCONFIGURED_DETAIL, UpstreamFailure
@@ -28,7 +30,14 @@ from kiln.llm.tools import (
     run_tool_loop,
 )
 from kiln.main import create_app
-from tests.support import app_settings, auth_headers, blob_files, publish_skill, truncate_domain
+from tests.support import (
+    app_settings,
+    auth_headers,
+    blob_files,
+    content_headers,
+    publish_skill,
+    truncate_domain,
+)
 
 _TOOL_NAMES = [
     "list_skills",
@@ -1219,9 +1228,58 @@ def test_jenkins_failure_after_artifact_create_deletes_the_job(tmp_path) -> None
         assert jenkins.calls[0][1].startswith("kiln-build-")
         assert jenkins.polled is False
         assert jenkins.downloaded is False
-        assert _count(engine, "product_builds") == 0
+        assert _count(engine, "product_builds") == 1
         assert _count(engine, "artifacts") == 1
         assert _count(engine, "artifact_versions") == 0
+        failed = _rows(
+            engine,
+            "SELECT status, queue_url, build_number, artifact_id::text FROM product_builds",
+        )
+        assert failed == [("not_built", None, None, failed[0][3])]
+        artifact_id = failed[0][3]
+        owned = client.get(f"/api/v1/artifacts/{artifact_id}")
+        assert owned.status_code == 200, owned.text
+        assert owned.json()["build_owned"] is True
+        digest = hashlib.sha256(b"manual").hexdigest()
+        builder = _login(client, "ada_retry", ["builder"])
+        for session in (builder, client):
+            registered = session.post(
+                f"/api/v1/artifacts/{artifact_id}/versions",
+                json={
+                    "version": "1.0.0",
+                    "checksum": {"algorithm": "sha256", "value": digest},
+                },
+            )
+            assert registered.status_code == 409, registered.text
+            assert registered.json()["detail"] == BUILD_OWNED_WRITE_DETAIL
+            uploaded = session.put(
+                f"/api/v1/artifacts/{artifact_id}/versions/1.0.0/content",
+                content=b"manual",
+                headers=content_headers(b"manual"),
+            )
+            assert uploaded.status_code == 409, uploaded.text
+            assert uploaded.json()["detail"] == BUILD_OWNED_WRITE_DETAIL
+        assert _count(engine, "artifact_versions") == 0
+        listed = client.get("/api/v1/builds")
+        assert listed.status_code == 200, listed.text
+        assert listed.json()["items"][0]["status"] == "not_built"
+        assert listed.json()["items"][0]["build_number"] is None
+        assert "queue_url" not in listed.json()["items"][0]
+        detail_response = client.get(f"/api/v1/builds/{listed.json()['items'][0]['id']}")
+        assert detail_response.status_code == 200, detail_response.text
+        assert detail_response.json()["status"] == "not_built"
+        assert jenkins.polled is False
+        direct = client.post(
+            "/api/v1/builds",
+            json={**_named_artifact(_BUILD, "direct-pkg"), "skill_id": bound["skill_id"]},
+        )
+        assert direct.status_code == 502
+        assert direct.json()["detail"] == detail
+        assert _rows(
+            engine,
+            "SELECT artifact_id::text, status, queue_url, build_number "
+            "FROM product_builds ORDER BY created_at, id",
+        )[1][1:] == ("not_built", None, None)
         assert _rows(engine, "SELECT name, status FROM skills") == [("retry-flow", "published")]
         assert _count(engine, "executor_jobs") == 0
         assert blob_files(client.app.state.blobs.root) == []
@@ -1411,7 +1469,11 @@ class _GitStub:
 class _JenkinsStub:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
+        self.create_error: Exception | None = None
         self.trigger_error: Exception | None = None
+        self.on_create: object | None = None
+        self.on_trigger: object | None = None
+        self.fail_read_progress = True
         self.polled = False
         self.downloaded = False
 
@@ -1434,10 +1496,14 @@ class _JenkinsStub:
                 clone_url,
             )
         )
+        if callable(self.on_create):
+            self.on_create(job_name)
         if git_token != "test-token":
             raise AssertionError("git token was not the test value")
         if declare_nexus_parameters:
             raise AssertionError("unset chat build declared nexus parameters")
+        if self.create_error is not None:
+            raise self.create_error
 
     def trigger_build(
         self,
@@ -1446,6 +1512,8 @@ class _JenkinsStub:
         parameters: dict[str, str] | None = None,
     ) -> str:
         self.calls.append(("trigger_build", job_name))
+        if callable(self.on_trigger):
+            self.on_trigger(job_name)
         if parameters:
             raise AssertionError("unset chat build passed nexus parameters")
         if self.trigger_error is not None:
@@ -1457,7 +1525,9 @@ class _JenkinsStub:
 
     def read_progress(self, *_args: object, **_kwargs: object) -> tuple[str, int | None]:
         self.polled = True
-        raise AssertionError("build_artifact polled Jenkins")
+        if self.fail_read_progress:
+            raise AssertionError("read_progress was called")
+        return "queued", None
 
     def download_artifact(self, *_args: object, **_kwargs: object) -> bytes:
         self.downloaded = True

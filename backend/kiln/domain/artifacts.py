@@ -41,6 +41,8 @@ class ArtifactSource(str, Enum):
 SESSION_UPLOAD_MAX_BYTES = 1_048_576
 
 BUILD_OWNED_WRITE_DETAIL = "该制品由产品构建产出，不接受手工登记或上传"
+BUILD_SOURCE_FILL_DETAIL = "该版本登记为构建来源，不接受手工补传"
+FOREIGN_BUILD_VERSION_DETAIL = "该版本不是产品构建产物"
 
 
 class Checksum(BaseModel):
@@ -153,6 +155,7 @@ class RetrieveResult(BaseModel):
     status: Literal["reserved"] = "reserved"
     content_available: bool
     content_path: str | None = None
+    source: ArtifactSource | None
     detail: str
 
 
@@ -163,3 +166,4 @@ class RetrievedBytes:
     version: str
     algorithm: str
     digest: str
+    source: str

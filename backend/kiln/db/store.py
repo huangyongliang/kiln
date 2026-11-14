@@ -35,6 +35,8 @@ from kiln.db.models import (
 from kiln.domain.accounts import Account, AccountCreate, SyncLink
 from kiln.domain.artifacts import (
     BUILD_OWNED_WRITE_DETAIL,
+    BUILD_SOURCE_FILL_DETAIL,
+    FOREIGN_BUILD_VERSION_DETAIL,
     PACKAGE_LABELS,
     VERSION_PATTERN,
     Artifact,
@@ -326,12 +328,22 @@ class PostgresStore:
         created_by: UUID | None = None,
     ) -> ArtifactVersion:
         with self._session() as session:
-            artifact = session.get(ArtifactRow, artifact_id)
+            artifact = session.scalar(
+                select(ArtifactRow).where(ArtifactRow.id == artifact_id).with_for_update()
+            )
             if artifact is None:
                 raise NotFound("制品不存在")
             if _artifact_is_build_owned(session, artifact_id):
                 raise Conflict(BUILD_OWNED_WRITE_DETAIL)
-            if session.get(ArtifactVersionRow, (artifact_id, payload.version)) is not None:
+            existing = session.scalar(
+                select(ArtifactVersionRow)
+                .where(
+                    ArtifactVersionRow.artifact_id == artifact_id,
+                    ArtifactVersionRow.version == payload.version,
+                )
+                .with_for_update()
+            )
+            if existing is not None:
                 raise Conflict("版本已存在且不可变")
             created_at = clock.utcnow()
             row = ArtifactVersionRow(
@@ -436,6 +448,13 @@ class PostgresStore:
                 )
                 .with_for_update()
             )
+            if (
+                row is not None
+                and manual
+                and not row.content_available
+                and row.source != ArtifactSource.upload.value
+            ):
+                raise Conflict(BUILD_SOURCE_FILL_DETAIL)
             if row is not None and not _same_version_bytes(row, checksum, len(data), key):
                 raise Conflict("版本已存在且不可变")
             self.blobs.write(checksum.algorithm, checksum.value, data)
@@ -472,6 +491,18 @@ class PostgresStore:
             version = session.get(ArtifactVersionRow, (row.artifact_id, row.version))
             available = bool(version is not None and version.content_available and version.blob_key)
             package_type = PackageType(row.package_type)
+            source = ArtifactSource(version.source) if version is not None else None
+            foreign = (
+                version is not None
+                and version.source != ArtifactSource.build.value
+                and _artifact_is_build_owned(session, row.artifact_id)
+            )
+            if foreign:
+                detail = FOREIGN_BUILD_VERSION_DETAIL
+            elif available:
+                detail = "制品字节已由平台保存，可从 content_path 取回。"
+            else:
+                detail = "该版本尚未保存制品字节。"
             return RetrieveResult(
                 reservation_id=row.id,
                 artifact_id=row.artifact_id,
@@ -485,11 +516,8 @@ class PostgresStore:
                 ),
                 content_available=available,
                 content_path=retrieve_content_path(row.id) if available else None,
-                detail=(
-                    "制品字节已由平台保存，可从 content_path 取回。"
-                    if available
-                    else "该版本尚未保存制品字节。"
-                ),
+                source=source,
+                detail=detail,
             )
 
     def read_reserved_bytes(self, reservation_id: UUID) -> RetrievedBytes:
@@ -508,6 +536,7 @@ class PostgresStore:
                 version=row.version,
                 algorithm=version.checksum_algorithm,
                 digest=version.checksum_value,
+                source=version.source,
             )
 
     def list_skills(

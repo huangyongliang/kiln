@@ -6,6 +6,7 @@
 export const MACHINE_OR_HISTORY = "机器令牌或历史记录";
 export const BUILD_OWNED_REASON = "该制品由产品构建产出，不接受手工登记或上传";
 export const FOREIGN_BYTES_TEXT = "该版本已有非构建来源的字节，不能当作构建产物";
+export const FOREIGN_VERSION_TEXT = "该版本已登记为非构建来源，还没有字节，不能当作构建产物";
 
 export function actorLabel(accountId, accounts) {
   if (accountId == null || accountId === "") {
@@ -42,6 +43,9 @@ export function reservationBody(account, requester, ttlSeconds) {
 export function contentConflictText(build) {
   if (build?.content_conflict === "foreign_bytes") {
     return FOREIGN_BYTES_TEXT;
+  }
+  if (build?.content_conflict === "foreign_version") {
+    return FOREIGN_VERSION_TEXT;
   }
   return "";
 }
