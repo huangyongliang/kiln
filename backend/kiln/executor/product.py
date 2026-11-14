@@ -24,7 +24,7 @@ from kiln.domain.builds import (
 )
 from kiln.domain.jobs import TERMINAL_STATUSES, JobStatus
 from kiln.domain.skills import SkillStatus
-from kiln.errors import Conflict, Unprocessable, UpstreamFailure
+from kiln.errors import Conflict, NotFound, Unprocessable, UpstreamFailure
 from kiln.executor.jenkins import JenkinsClient
 from kiln.executor.script import (
     NEXUS_PARAMETER_NAMES,
@@ -113,16 +113,31 @@ def create_product_build(
 
 
 def sync_status(builds: BuildStore, jenkins: JenkinsClient, build_id: UUID) -> StoredBuild:
+    """Refresh a build from Jenkins.
+
+    A ``not_built`` row with no build number is the trigger-failure record.
+    Leave it alone and do not call Jenkins. A queued row with no queue URL
+    is still polled by job name: Jenkins may have accepted the trigger
+    without a Location header, or the job may not exist yet.
+    """
+
     current = builds.get_build(build_id)
-    if current.queue_url is None and current.build_number is None:
+    if current.status == JobStatus.not_built and current.build_number is None:
         return current
     if current.status in TERMINAL_STATUSES and current.build_number is not None:
         return current
-    status_name, number = jenkins.read_progress(
-        current.jenkins_job_name,
-        current.queue_url,
-        current.build_number,
-    )
+    try:
+        status_name, number = jenkins.read_progress(
+            current.jenkins_job_name,
+            current.queue_url,
+            current.build_number,
+        )
+    except NotFound:
+        if current.build_number is None and current.status == JobStatus.queued:
+            return current
+        raise
+    if current.status == JobStatus.not_built:
+        return current
     status = JobStatus(status_name)
     if status == current.status and number == current.build_number:
         return current

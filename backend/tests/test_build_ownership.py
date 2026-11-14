@@ -27,7 +27,8 @@ from kiln.domain.artifacts import (
     Checksum,
 )
 from kiln.domain.builds import ProductBuild
-from kiln.errors import Conflict, UpstreamFailure
+from kiln.errors import Conflict, NotFound, UpstreamFailure
+from kiln.executor.jenkins import JenkinsClient
 from tests.support import auth_headers, content_headers, publish_skill, truncate_domain
 from tests.test_artifact_integrity import _login
 from tests.test_product_build import _body, _ready_executor
@@ -44,7 +45,7 @@ def test_pending_build_rejects_manual_writes_before_jenkins_returns(tmp_path: Pa
 
     assert "queue_url" not in ProductBuild.model_fields
     app, _git, jenkins = _ready_executor(tmp_path)
-    jenkins.fail_read_progress = True
+    jenkins.missing_job = True
     payload = b"owned-window"
     digest = hashlib.sha256(payload).hexdigest()
     seen: list[tuple[str, str, str, int, str]] = []
@@ -97,7 +98,9 @@ def test_pending_build_rejects_manual_writes_before_jenkins_returns(tmp_path: Pa
     assert body["status"] == "queued"
     assert body["build_number"] is None
     assert "queue_url" not in body
-    assert [item[0] for item in jenkins.calls] == ["create_product_job", "trigger_build"]
+    lifecycle = [name for name, *_rest in jenkins.calls if name != "read_progress"]
+    assert lifecycle == ["create_product_job", "trigger_build"]
+    assert any(name == "read_progress" for name, *_rest in jenkins.calls)
     phases = {item[0] for item in seen}
     assert phases == {"create_product_job", "trigger_build"}
     assert len(seen) == 8
@@ -111,6 +114,138 @@ def test_pending_build_rejects_manual_writes_before_jenkins_returns(tmp_path: Pa
             {"id": body["id"]},
         ).one()
     assert stored == (_QUEUE, None, "queued")
+
+
+def test_trigger_without_queue_url_polls_by_job_name(tmp_path: Path) -> None:
+    """A trigger with no Location header stays queued, then polls the job name."""
+
+    app, _git, jenkins = _ready_executor(tmp_path)
+    jenkins.omit_queue_url = True
+    payload = b"no-location-bytes"
+    jenkins.payload = payload
+    with TestClient(app, headers=auth_headers()) as client:
+        truncate_domain(app.state.engine)
+        skill = publish_skill(client, "no-queue", ["ada/demo"])
+        created = client.post("/api/v1/builds", json=_body(skill_id=skill["id"]))
+        assert created.status_code == 201, created.text
+        body = created.json()
+        assert body["status"] == "queued"
+        assert body["build_number"] is None
+        assert "queue_url" not in body
+        with app.state.engine.connect() as connection:
+            queued = connection.execute(
+                text("SELECT status, queue_url, build_number FROM product_builds WHERE id = :id"),
+                {"id": body["id"]},
+            ).one()
+        assert tuple(queued) == ("queued", None, None)
+        finished = client.get(f"/api/v1/builds/{body['id']}")
+        assert finished.status_code == 200, finished.text
+        stored = finished.json()
+        assert stored["status"] == "success"
+        assert stored["build_number"] == 1
+        assert stored["content_available"] is True
+        assert stored["content_conflict"] is None
+        progress = [call for call in jenkins.calls if call[0] == "read_progress"]
+        assert progress
+        assert progress[0][1] == body["jenkins_job_name"]
+        assert progress[0][2] is None
+        assert progress[0][3] is None
+        version = client.get(f"/api/v1/artifacts/{body['artifact_id']}").json()["versions"][0]
+        assert version["source"] == "build"
+        assert version["content_available"] is True
+        reserved = client.post(
+            f"/api/v1/artifacts/{body['artifact_id']}/versions/{body['version']}/download-reservations",
+            json={"requester": "ops_user"},
+        )
+        assert reserved.status_code == 201, reserved.text
+        downloaded = client.get(f"{reserved.json()['retrieve_path']}/content")
+        assert downloaded.status_code == 200
+        assert downloaded.content == payload
+        assert downloaded.headers["X-Kiln-Source"] == "build"
+
+
+def test_pending_read_stays_queued_when_the_job_is_missing(tmp_path: Path) -> None:
+    """Reads during the Jenkins window stay queued when the job 404s."""
+
+    app, _git, jenkins = _ready_executor(tmp_path)
+    jenkins.missing_job = True
+    seen: list[tuple[str, int, str | None]] = []
+    with _running(app) as base:
+        truncate_domain(app.state.engine)
+        with httpx.Client(base_url=base, timeout=10, trust_env=False) as http:
+            skill = _publish(http)
+            machine = auth_headers()
+
+            def probe(phase: str, job_name: str) -> None:
+                build_id = str(UUID(job_name.removeprefix("kiln-build-")))
+                detail = http.get(f"/api/v1/builds/{build_id}", headers=machine)
+                listed = http.get("/api/v1/builds", headers=machine)
+                for response in (detail, listed):
+                    assert response.status_code == 200, (phase, response.status_code, response.text)
+                    assert response.status_code < 500
+                body = detail.json()
+                assert body["status"] == "queued"
+                assert body["build_number"] is None
+                assert body["status"] not in {"not_built", "failure"}
+                match = next(item for item in listed.json()["items"] if item["id"] == build_id)
+                assert match["status"] == "queued"
+                assert match["build_number"] is None
+                seen.append((phase, detail.status_code, body["status"]))
+
+            jenkins.on_create = lambda job_name: probe("create_product_job", job_name)
+            jenkins.on_trigger = lambda job_name: probe("trigger_build", job_name)
+            created = http.post(
+                "/api/v1/builds",
+                headers=machine,
+                json=_body(skill_id=skill["id"], artifact_name="missing-job"),
+            )
+    assert created.status_code == 201, created.text
+    assert {item[0] for item in seen} == {"create_product_job", "trigger_build"}
+    assert all(status == 200 and state == "queued" for _phase, status, state in seen)
+    progress = [call for call in jenkins.calls if call[0] == "read_progress"]
+    assert progress
+    assert all(call[2] is None and call[3] is None for call in progress)
+    with app.state.engine.connect() as connection:
+        row = connection.execute(
+            text("SELECT status, build_number FROM product_builds WHERE id = :id"),
+            {"id": created.json()["id"]},
+        ).one()
+    assert tuple(row) == ("queued", None)
+
+
+def test_read_progress_treats_a_missing_job_as_still_queued() -> None:
+    def missing(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/api/json")
+        return httpx.Response(404, text="missing")
+
+    jenkins = JenkinsClient(
+        "http://jenkins.example",
+        "kiln",
+        "token",
+        httpx.Client(transport=httpx.MockTransport(missing)),
+    )
+    status, number = jenkins.read_progress("kiln-build-pending", None, None)
+    assert status == "queued"
+    assert number is None
+
+    def empty(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"lastBuild": None})
+
+    quiet = JenkinsClient(
+        "http://jenkins.example",
+        "kiln",
+        "token",
+        httpx.Client(transport=httpx.MockTransport(empty)),
+    )
+    status, number = quiet.read_progress("kiln-build-empty", None, None)
+    assert status == "queued"
+    assert number is None
+    try:
+        jenkins.read_progress("kiln-build-pending", None, 3)
+    except NotFound as exc:
+        assert exc.detail == "Jenkins 上已没有这个任务"
+    else:
+        raise AssertionError("a numbered build still reports a missing job")
 
 
 def test_build_window_race_never_accepts_a_manual_write(tmp_path: Path) -> None:
@@ -267,6 +402,13 @@ def test_jenkins_failure_keeps_a_not_built_row(
         assert again.json()["status"] == "not_built"
         assert again.json()["build_number"] is None
         assert "queue_url" not in again.json()
+        assert not any(name == "read_progress" for name, *_rest in jenkins.calls)
+        listed = client.get("/api/v1/builds")
+        assert listed.status_code == 200, listed.text
+        match = next(item for item in listed.json()["items"] if item["id"] == row.id)
+        assert match["status"] == "not_built"
+        assert match["build_number"] is None
+        assert not any(name == "read_progress" for name, *_rest in jenkins.calls)
         assert _version_count(app.state.engine, str(row.artifact_id)) == 0
 
 

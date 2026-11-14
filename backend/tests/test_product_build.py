@@ -19,7 +19,7 @@ from sqlalchemy import text
 from kiln.db.engine import create_db_engine
 from kiln.domain.builds import repository_in_skill_scope
 from kiln.domain.jobs import JobStatus
-from kiln.errors import BadRequest
+from kiln.errors import BadRequest, NotFound
 from kiln.executor.script import product_build_command, product_job_config
 from kiln.git.refs import parse_ref
 from kiln.main import create_app
@@ -636,6 +636,8 @@ class _RecordingJenkins:
         self.on_create: object | None = None
         self.on_trigger: object | None = None
         self.fail_read_progress = False
+        self.missing_job = False
+        self.omit_queue_url = False
 
     def create_product_job(self, job_name: str, **_kwargs: object) -> None:
         self.calls.append(("create_product_job", job_name))
@@ -649,21 +651,31 @@ class _RecordingJenkins:
         job_name: str,
         *,
         parameters: dict[str, str] | None = None,
-    ) -> str:
+    ) -> str | None:
         self.calls.append(("trigger_build", job_name))
         self.parameters = parameters
         if callable(self.on_trigger):
             self.on_trigger(job_name)
         if self.trigger_error is not None:
             raise self.trigger_error
+        if self.omit_queue_url:
+            return None
         return "http://127.0.0.1:9/queue/item/1/"
 
     def delete_job(self, job_name: str) -> None:
         self.calls.append(("delete_job", job_name))
 
-    def read_progress(self, *_args: object, **_kwargs: object) -> tuple[str, int]:
+    def read_progress(
+        self,
+        job_name: str = "",
+        queue_url: str | None = None,
+        build_number: int | None = None,
+    ) -> tuple[str, int | None]:
+        self.calls.append(("read_progress", job_name, queue_url, build_number))
         if self.fail_read_progress:
             raise AssertionError("read_progress was called")
+        if self.missing_job:
+            raise NotFound("Jenkins 上已没有这个任务")
         return "success", 1
 
     def download_artifact(self, *_args: object, **_kwargs: object) -> bytes:

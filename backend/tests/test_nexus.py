@@ -549,7 +549,7 @@ def test_build_log_redacts_the_nexus_password(tmp_path: Path) -> None:
             artifact_id=artifact.json()["id"],
             version="1",
             package_type="generic",
-            queue_url="http://127.0.0.1:9/queue/item/1/",
+            queue_url=None,
         )
         logged = build_log(app.state.builds, app.state.jenkins, settings, build_id)
         via_api = client.get(f"/api/v1/builds/{build_id}/log")

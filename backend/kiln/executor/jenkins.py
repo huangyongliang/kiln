@@ -173,10 +173,19 @@ class JenkinsClient:
         return text[-_LOG_LIMIT:], True
 
     def _last_build_number(self, job_name: str) -> int | None:
-        body = self._json(
-            f"/job/{quote(job_name, safe='')}/api/json",
-            {"tree": "lastBuild[number]"},
-        )
+        """Latest build number, or None when the job is missing or has no builds.
+
+        A 404 here is the pending window: the product row exists before
+        Jenkins has the job. Callers keep the row queued instead of failing.
+        """
+
+        try:
+            body = self._json(
+                f"/job/{quote(job_name, safe='')}/api/json",
+                {"tree": "lastBuild[number]"},
+            )
+        except NotFound:
+            return None
         last = body.get("lastBuild")
         if not isinstance(last, dict):
             return None
