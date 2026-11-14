@@ -13,7 +13,7 @@ import { latestVersion } from "../format";
 import { canDo, canSee } from "../permissions";
 
 const note =
-  "平台自管目录、不可变版本和制品字节。字节保存在平台本地存储。版本入库后可以取回这些字节。Nexus 集成还没有接上。";
+  "平台自管目录、不可变版本和制品字节。字节保存在平台本地存储，不发布、不同步到 Nexus。版本入库后可以取回这些字节。";
 
 const PACKAGE_OPTIONS = [
   ["maven", "Maven"],

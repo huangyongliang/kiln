@@ -3,6 +3,7 @@ import { onMounted, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRoute } from "vue-router";
 
 import { accessReady, perms } from "../access";
+import { actorLabel, contentConflictText } from "../actors";
 import { errorText, getJson, isForbidden, isNotConfigured } from "../api";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
@@ -16,6 +17,7 @@ const TERMINAL = new Set(["success", "failure", "unstable", "aborted", "not_buil
 
 const route = useRoute();
 const build = ref(null);
+const accounts = ref(null);
 const logText = ref("");
 const truncated = ref(false);
 const mode = ref("loading");
@@ -41,6 +43,15 @@ function stop() {
   timer = 0;
 }
 
+async function loadAccounts() {
+  try {
+    const body = await getJson("/api/v1/accounts");
+    accounts.value = Array.isArray(body?.items) ? body.items : null;
+  } catch {
+    accounts.value = null;
+  }
+}
+
 async function load() {
   stop();
   forbidden.value = false;
@@ -59,6 +70,7 @@ async function load() {
     return;
   }
   mode.value = "loading";
+  await loadAccounts();
   const ok = await refresh();
   if (ok && build.value && !TERMINAL.has(build.value.status)) {
     timer = window.setInterval(refresh, 2000);
@@ -130,8 +142,11 @@ async function refresh() {
       :empty-text="missing ? '不存在' : '执行器未配置'"
       @retry="load"
     >
+      <p v-if="contentConflictText(build)" class="message">{{ contentConflictText(build) }}</p>
       <section v-if="build" class="panel">
         <dl class="kv">
+          <dt>发起人</dt>
+          <dd>{{ actorLabel(build.requested_by, accounts) }}</dd>
           <dt>编号</dt>
           <dd class="mono">{{ build.build_number ?? "—" }}</dd>
           <dt>Skill</dt>

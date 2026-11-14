@@ -9,6 +9,7 @@ proxy does not probe it before the build starts.
 
 import hashlib
 import re
+from typing import Literal
 from uuid import UUID, uuid4
 
 from kiln.config import Settings
@@ -44,6 +45,8 @@ def create_product_build(
     source: GitSource,
     settings: Settings,
     payload: ProductBuildCreate,
+    *,
+    requested_by: UUID | None = None,
 ) -> StoredBuild:
     owner, name = parse_repository(payload.repository)
     ref = parse_ref(payload.ref)
@@ -101,6 +104,7 @@ def create_product_build(
             package_type=payload.package_type.value,
             queue_url=queue_url,
             skill_id=skill.id,
+            requested_by=requested_by,
         )
     except Exception:
         try:
@@ -135,9 +139,14 @@ def collect_build(
     current = sync_status(builds, jenkins, build_id)
     if current.status != JobStatus.success or current.build_number is None:
         return current
-    if current.content_stored or builds.version_has_bytes(current.artifact_id, current.version):
+    record = builds.version_record(current.artifact_id, current.version)
+    if record is not None and record.source != ArtifactSource.build.value:
+        return current
+    if record is not None and record.has_bytes:
         if not current.content_stored:
             return builds.mark_content_stored(current.id)
+        return current
+    if current.content_stored:
         return current
     data = jenkins.download_artifact(
         current.jenkins_job_name,
@@ -152,6 +161,7 @@ def collect_build(
         data,
         Checksum(algorithm="sha256", value=digest),
         ArtifactSource.build,
+        created_by=None,
     )
     return builds.mark_content_stored(current.id)
 
@@ -214,6 +224,11 @@ def _redact(text: str, *secrets: str) -> str:
 
 
 def publish(builds: BuildStore, stored: StoredBuild) -> ProductBuild:
-    return stored.public(
-        content_available=builds.version_has_bytes(stored.artifact_id, stored.version)
+    record = builds.version_record(stored.artifact_id, stored.version)
+    build_bytes = (
+        record is not None and record.has_bytes and record.source == ArtifactSource.build.value
     )
+    conflict: Literal["foreign_bytes"] | None = None
+    if record is not None and record.has_bytes and record.source != ArtifactSource.build.value:
+        conflict = "foreign_bytes"
+    return stored.public(content_available=build_bytes, content_conflict=conflict)

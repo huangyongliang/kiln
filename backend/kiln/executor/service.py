@@ -8,7 +8,13 @@ from kiln.errors import Conflict
 from kiln.executor.jenkins import JenkinsClient
 
 
-def create_job(store: JobStore, jenkins: JenkinsClient, payload: JobCreate) -> StoredJob:
+def create_job(
+    store: JobStore,
+    jenkins: JenkinsClient,
+    payload: JobCreate,
+    *,
+    requested_by: UUID | None = None,
+) -> StoredJob:
     job_id = uuid4()
     jenkins_job_name = f"kiln-{job_id.hex}"
     display_name = payload.name or jenkins_job_name
@@ -21,6 +27,7 @@ def create_job(store: JobStore, jenkins: JenkinsClient, payload: JobCreate) -> S
             jenkins_job_name=jenkins_job_name,
             marker=payload.marker,
             queue_url=queue_url,
+            requested_by=requested_by,
         )
     except Exception:
         try:

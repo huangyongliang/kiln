@@ -87,7 +87,7 @@ cp .env.example .env
 | `KILN_HTTP_PORT` | `8000` | 同上。改这个值不会改变 compose 发布的 `127.0.0.1:8000:8000` |
 | `KILN_CORS_ORIGINS` | `http://localhost:5173,http://localhost:8080` | 进程直接运行时生效。compose 给容器写死了同一组来源，不读取 `.env` 里的这一行 |
 | `DATABASE_URL` | `postgresql://kiln:kiln@localhost:5432/kiln` | 进程直接运行时进入配置。容器内的值由 compose 拼成 `postgresql://…@postgres:5432/kiln`，主机名是服务名 `postgres` |
-| `KILN_API_TOKEN` | `kiln-local` | `/api/v1` 的 Bearer 令牌。compose 在未设置时传入 `kiln-local`。这个值只用于本地，不能用于生产。留空时 API 在加载配置时失败 |
+| `KILN_API_TOKEN` | `kiln-local` | `/api/v1` 的 Bearer 令牌。compose 在未设置时传入 `kiln-local`。这个值只用于本地，不能用于生产。只有显式空字符串会拒绝启动；未设置时回落 `kiln-local` |
 | `POSTGRES_USER` | `kiln` | 只由 compose 插值，传给 Postgres 容器，并用来拼接容器内的 `DATABASE_URL` |
 | `POSTGRES_PASSWORD` | `kiln` | 同上 |
 | `POSTGRES_DB` | `kiln` | 同上 |
@@ -113,7 +113,7 @@ cp .env.example .env
 | `KILN_NEXUS_PASSWORD` | 空 | 可选口令。只从环境读取，不能提交 |
 | `KILN_NEXUS_TIMEOUT_SECONDS` | `10` | 单次调用超时，大于 0 且不超过 60。compose 未设置时传入 10 |
 | `KILN_ARTIFACT_ROOT` | 进程方式默认 `var/kiln-artifacts`；compose 固定为 `/var/lib/kiln/artifacts` | 平台自管制品字节的本地目录。compose 不读取 `.env` 里的这一行，而是写死容器内路径并挂载命名卷 `kiln-artifact-data` |
-| `KILN_ARTIFACT_MAX_BYTES` | `67108864` | 单次保存的字节上限。compose 在未设置时传入这个值 |
+| `KILN_ARTIFACT_MAX_BYTES` | `67108864` | 机器令牌保存字节，以及构建收集的上限。compose 在未设置时传入这个值。默认值仍是 67108864。登录会话上传上限是 1048576 字节，不另设环境变量 |
 | `KILN_OIDC_ISSUER_URL` | 空 | 用户信息同步的发行方地址。留空则只使用本地口令。compose 原样传入。不要把公司用户系统的地址写进仓库 |
 | `KILN_OIDC_CLIENT_ID` | 空 | 用户信息同步的客户端标识。任一项必填变量有值时必须同时填写 |
 | `KILN_OIDC_CLIENT_SECRET` | 空 | 用户信息同步的客户端密钥。只从环境读取 |
@@ -245,7 +245,7 @@ curl -fsS "http://127.0.0.1:8000/api/v1/artifacts/${ART_ID}/versions/1/content" 
   --data-binary @/tmp/kiln-sample.bin
 ```
 
-响应里 `content_available` 为 true。预约之后，`GET /api/v1/retrieve/{reservation_id}/content` 返回同一组字节。只重启 API 进程不会丢掉这个文件；删掉 `kiln-artifact-data` 才会。
+响应里 `content_available` 为 true，`source` 为 `upload`。来源由平台决定，`X-Kiln-Source` 不决定来源。登记版本时 `source` 只能是 `upload`，省略时也是 `upload`；传入 `build` 返回 422。`source=build` 只由产品构建的收集写入。登录会话单次上传超过 1048576 字节返回 413；这条机器令牌示例仍使用 `KILN_ARTIFACT_MAX_BYTES`。预约时，登录用户的 `requester` 取自会话用户名，请求体可省略，与当前用户名不一致则返回 422。机器令牌必须提供 `requester`。`GET /api/v1/retrieve/{reservation_id}` 与 `GET /api/v1/retrieve/{reservation_id}/content` 都需要 `artifact.download`。预约之后，内容路径返回同一组字节。只重启 API 进程不会丢掉这个文件；删掉 `kiln-artifact-data` 才会。已被产品构建引用的制品不接受上述手工登记或上传，包括机器令牌，返回 409，正文是「该制品由产品构建产出，不接受手工登记或上传」。上面的示例登记的是手工制品，不是某次构建的 `artifact_id`。本切片之前入库的版本，`source` 可能由调用方声明，平台不回填。
 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/v1/accounts
@@ -304,7 +304,7 @@ Compose 把 `LLM_BASE_URL` 原样写进 `kiln-api`。容器里的 `127.0.0.1` �
 
 创建兼容任务的请求体是 `{"name":"compat","marker":"kiln-ok"}`。`marker` 只能是字母、数字和 `._:-`。kiln 在 Jenkins 上建一个自由风格任务，让它打印这个标记，然后 `GET /api/v1/jobs/{id}` 看状态，`GET /api/v1/jobs/{id}/log` 读日志。这只用来核对日志，不产出制品字节，也不部署到运行环境。
 
-产品构建的请求体是 `{"skill_id":"<已发布 skill 的 uuid>","repository":"owner/name","ref":"main","artifact_name":"sample-pkg","version":"1.0.0","package_type":"generic"}`。`skill_id` 必填，且该 Skill 必须已发布。仓库根目录要有 `kiln-build.sh`，成功时写出 `kiln-dist/artifact.bin`。kiln 先用当前适配器把 `ref` 解析成提交，再让 Jenkins 克隆该提交并运行脚本。Skill 步骤不会被执行，也不会变成 Jenkins 参数。`GIT_CLONE_BASE_URL` 留空时，克隆根地址就是 `GIT_BASE_URL`。构建成功后，`GET /api/v1/builds/{id}` 里 `content_available` 为 true，字节在 `KILN_ARTIFACT_ROOT`。预约之后，`GET /api/v1/retrieve/{reservation_id}/content` 返回同一组字节。响应里 `deploys_to_runtime` 为 false。令牌只放在环境里，不写入数据库，也不出现在返回的日志里。
+产品构建的请求体是 `{"skill_id":"<已发布 skill 的 uuid>","repository":"owner/name","ref":"main","artifact_name":"sample-pkg","version":"1.0.0","package_type":"generic"}`。`skill_id` 必填，且该 Skill 必须已发布。仓库根目录要有 `kiln-build.sh`，成功时写出 `kiln-dist/artifact.bin`。kiln 先用当前适配器把 `ref` 解析成提交，再让 Jenkins 克隆该提交并运行脚本。Skill 步骤不会被执行，也不会变成 Jenkins 参数。`GIT_CLONE_BASE_URL` 留空时，克隆根地址就是 `GIT_BASE_URL`。构建成功后，`GET /api/v1/builds/{id}` 里 `content_available` 为 true，字节在 `KILN_ARTIFACT_ROOT`，版本 `source` 为 `build`。收集走进程内写入，不经过 HTTP。若该版本已经有非构建来源的字节，详情里 `content_available` 为 false，`content_conflict` 为 `foreign_bytes`，这些字节不会被当成构建产物。响应里 `deploys_to_runtime` 为 false，并带只读 `requested_by`。会话发起时它是账号 id，机器令牌或历史记录为 null。任务响应同样带 `requested_by`。版本带只读 `created_by`：会话上传或登记时是账号 id，构建收集写入的版本为 null。预约带只读 `account_id`。令牌只放在环境里，不写入数据库，也不出现在返回的日志里。本切片之前入库的版本，`source` 可能由调用方声明，平台不回填。
 
 产品构建必须带已发布的 Skill。实验室接线只改本机 `.env`：填写 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN`，以及 `GIT_PROVIDER`、`GIT_BASE_URL`、`GIT_TOKEN`，需要时再填 `GIT_CLONE_BASE_URL`，让 kiln-app 进程访问已经在跑的 Jenkins 与 Gitea。进程在容器内时，`127.0.0.1` 是容器自己，不是宿主机；克隆根地址用 Jenkins 看得到的网络视角。不要把地址或令牌写进仓库。对话工具仅在 `LLM_PROVIDER=openai` 且端点可达时运行，`mock` 与 `off` 不调用工具。`examples/kiln-build.sh` 由运维复制到实验室仓库，不在日常 CI 里对真实 Jenkins 执行。制品留在 `KILN_ARTIFACT_ROOT`。日常构建保持 `KILN_NEXUS_*` 为空，不把制品发布到 Nexus，也不使用公司 Nexus。
 

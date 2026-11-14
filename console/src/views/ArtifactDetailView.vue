@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
 import { accessReady, account, actionDeniedText, perms } from "../access";
+import { BUILD_OWNED_REASON, actorLabel, reservationBody, uploadAllowed } from "../actors";
 import { errorText, getJson, isForbidden, postJson, putBytes } from "../api";
 import AppIcon from "../components/AppIcon.vue";
 import CopyButton from "../components/CopyButton.vue";
@@ -18,6 +19,7 @@ import { canDo, canSee } from "../permissions";
 
 const route = useRoute();
 const artifact = ref(null);
+const accounts = ref(null);
 const mode = ref("loading");
 const error = ref("");
 const forbidden = ref(false);
@@ -39,6 +41,7 @@ const box = reactive({
 });
 
 const canUpload = computed(() => canDo("artifact.upload", perms.value));
+const uploadOffered = computed(() => uploadAllowed(artifact.value, canUpload.value));
 const canReserve = computed(() => canDo("artifact.reserve", perms.value));
 const canHash = computed(() => window.isSecureContext && Boolean(window.crypto?.subtle));
 const requesterLocked = computed(() => Boolean(account.value?.username));
@@ -52,6 +55,15 @@ watch(() => route.params.id, load);
 watch(accessReady, (ready) => {
   if (ready) load();
 });
+
+async function loadAccounts() {
+  try {
+    const body = await getJson("/api/v1/accounts");
+    accounts.value = Array.isArray(body?.items) ? body.items : null;
+  } catch {
+    accounts.value = null;
+  }
+}
 
 async function load() {
   forbidden.value = false;
@@ -70,6 +82,7 @@ async function load() {
   }
   mode.value = "loading";
   error.value = "";
+  await loadAccounts();
   try {
     artifact.value = await getJson(apiPath`/api/v1/artifacts/${id}`);
     pageCrumb.value = `制品 / ${artifact.value.name}`;
@@ -177,18 +190,23 @@ async function submitBytes() {
 
 async function submitReserve() {
   if (box.reservation) return;
-  const who = requesterLocked.value ? account.value.username : box.requester.trim();
-  const whoMessage = usernameError(who);
-  box.errors = whoMessage ? { requester: whoMessage } : {};
-  box.error = "";
-  if (whoMessage) return;
+  const body = reservationBody(account.value, box.requester, box.ttl);
+  if (!account.value?.username) {
+    const whoMessage = usernameError(body.requester || "");
+    box.errors = whoMessage ? { requester: whoMessage } : {};
+    box.error = "";
+    if (whoMessage) return;
+  } else {
+    box.errors = {};
+    box.error = "";
+  }
   box.busy = true;
   try {
     const id = route.params.id;
     const version = box.target.version;
     box.reservation = await postJson(
       apiPath`/api/v1/artifacts/${id}/versions/${version}/download-reservations`,
-      { requester: who, ttl_seconds: Number(box.ttl) },
+      body,
     );
   } catch (caught) {
     if (isForbidden(caught)) {
@@ -223,10 +241,11 @@ function submit() {
           <span v-if="artifact.group" class="muted">{{ artifact.group }}</span>
         </p>
       </template>
-      <template v-if="artifact && canUpload" #actions>
+      <template v-if="artifact && uploadOffered" #actions>
         <button type="button" class="btn" @click="resetBox('upload')">上传新版本</button>
       </template>
     </PageIntro>
+    <p v-if="artifact?.build_owned" class="hint">{{ BUILD_OWNED_REASON }}</p>
     <p v-if="artifact?.description" class="prose">{{ artifact.description }}</p>
     <p v-if="notice" class="message">{{ notice }}</p>
     <StatePanel
@@ -246,7 +265,7 @@ function submit() {
             <table>
               <thead>
                 <tr>
-                  <th>版本</th><th>校验</th><th>大小</th><th>来源</th><th>字节</th><th>入库时间</th><th>操作</th>
+                  <th>版本</th><th>校验</th><th>大小</th><th>来源</th><th>字节</th><th>操作人</th><th>入库时间</th><th>操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -264,10 +283,11 @@ function submit() {
                       :label="item.content_available ? '已入库' : '尚无字节'"
                     />
                   </td>
+                  <td>{{ actorLabel(item.created_by, accounts) }}</td>
                   <td class="nowrap">{{ formatTime(item.created_at) }}</td>
                   <td class="nowrap">
                     <button
-                      v-if="!item.content_available && canUpload"
+                      v-if="!item.content_available && uploadOffered"
                       type="button"
                       class="btn btn-secondary"
                       @click="resetBox('fill', item)"
@@ -303,6 +323,8 @@ function submit() {
         <dl class="kv">
           <dt>预约</dt>
           <dd class="mono">{{ box.reservation.id }}</dd>
+          <dt>预约账号</dt>
+          <dd>{{ actorLabel(box.reservation.account_id, accounts) }}</dd>
           <dt>到期</dt>
           <dd>{{ formatTime(box.reservation.expires_at) }}</dd>
           <dt>路径</dt>

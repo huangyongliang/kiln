@@ -188,7 +188,6 @@ def _update_skill(payload: object, context: ToolContext, principal: Principal) -
 
 
 def _build_artifact(payload: object, context: ToolContext, principal: Principal) -> ToolResult:
-    del principal
     created = ProductBuildCreate.model_validate(payload)
     jenkins = context.jenkins
     source = context.git_source
@@ -203,6 +202,7 @@ def _build_artifact(payload: object, context: ToolContext, principal: Principal)
         source,
         context.settings,
         created,
+        requested_by=_account_id(principal),
     )
     published = publish(context.builds, stored)
     return ToolResult(

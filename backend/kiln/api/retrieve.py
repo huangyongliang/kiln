@@ -17,6 +17,7 @@ router = APIRouter(tags=["取包"], dependencies=[Depends(require_auth)])
     "/retrieve/{reservation_id}",
     response_model=RetrieveResult,
     summary="按预约查看取包信息",
+    dependencies=[Depends(require_permission("artifact.download"))],
 )
 def retrieve(
     reservation_id: UUID,

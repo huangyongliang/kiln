@@ -36,6 +36,13 @@ class ArtifactSource(str, Enum):
     upload = "upload"
 
 
+# HTTP uploads from a signed-in account. Not an environment variable.
+# Machine tokens and in-process build collection keep KILN_ARTIFACT_MAX_BYTES.
+SESSION_UPLOAD_MAX_BYTES = 1_048_576
+
+BUILD_OWNED_WRITE_DETAIL = "该制品由产品构建产出，不接受手工登记或上传"
+
+
 class Checksum(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -67,7 +74,13 @@ class ArtifactVersionCreate(BaseModel):
     version: str = Field(pattern=VERSION_PATTERN)
     checksum: Checksum
     size_bytes: int | None = Field(default=None, ge=0)
-    source: ArtifactSource = ArtifactSource.build
+    source: ArtifactSource = ArtifactSource.upload
+
+    @model_validator(mode="after")
+    def http_source_is_upload(self) -> "ArtifactVersionCreate":
+        if self.source is not ArtifactSource.upload:
+            raise ValueError("来源只能是 upload")
+        return self
 
 
 class ArtifactVersion(BaseModel):
@@ -78,6 +91,7 @@ class ArtifactVersion(BaseModel):
     size_bytes: int | None
     source: ArtifactSource
     content_available: bool
+    created_by: UUID | None = None
     created_at: datetime
 
 
@@ -91,6 +105,7 @@ class Artifact(BaseModel):
     package_type: PackageType
     package_type_label: str
     versions: list[ArtifactVersion]
+    build_owned: bool = False
     created_at: datetime
 
 
@@ -102,7 +117,7 @@ class ArtifactList(BaseModel):
 class DownloadReservationCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    requester: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,31}$")
+    requester: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{2,31}$")
     ttl_seconds: int = Field(default=900, ge=60, le=86400)
 
 
@@ -117,6 +132,7 @@ class Reservation(BaseModel):
     package_type_label: str
     checksum: Checksum
     requester: str
+    account_id: UUID | None = None
     created_at: datetime
     expires_at: datetime
     retrieve_path: str
