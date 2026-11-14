@@ -412,6 +412,35 @@ def test_jenkins_failure_keeps_a_not_built_row(
         assert _version_count(app.state.engine, str(row.artifact_id)) == 0
 
 
+def test_save_run_keeps_not_built_when_progress_returns_later(tmp_path: Path) -> None:
+    """A progress read that began while queued cannot overwrite not_built."""
+
+    app, _git, jenkins = _ready_executor(tmp_path)
+    with TestClient(app, headers=auth_headers()) as client:
+        truncate_domain(app.state.engine)
+        skill = publish_skill(client, "stale-sync", ["ada/demo"])
+        created = client.post("/api/v1/builds", json=_body(skill_id=skill["id"]))
+        assert created.status_code == 201, created.text
+        build_id = created.json()["id"]
+        assert created.json()["status"] == "queued"
+
+        def read_progress(*_args: object, **_kwargs: object) -> tuple[str, int]:
+            app.state.builds.mark_not_built(UUID(build_id))
+            return "running", 1
+
+        jenkins.read_progress = read_progress  # type: ignore[method-assign]
+        detail = client.get(f"/api/v1/builds/{build_id}")
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["status"] == "not_built"
+        assert detail.json()["build_number"] is None
+        with app.state.engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT status, build_number FROM product_builds WHERE id = :id"),
+                {"id": build_id},
+            ).one()
+        assert tuple(row) == ("not_built", None)
+
+
 def test_mark_not_built_failure_still_raises_the_original_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

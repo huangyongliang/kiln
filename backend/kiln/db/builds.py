@@ -256,10 +256,21 @@ class BuildStore:
         status: JobStatus,
         build_number: int | None,
     ) -> StoredBuild:
+        """Record Jenkins progress. A committed ``not_built`` row is left as it is.
+
+        The status check runs under ``FOR UPDATE`` so a sync that read
+        ``queued`` cannot write over ``not_built`` committed while Jenkins
+        was being read. ``mark_not_built`` is the path that sets that status.
+        """
+
         with self._session() as session:
-            row = session.get(ProductBuildRow, build_id)
+            row = session.scalar(
+                select(ProductBuildRow).where(ProductBuildRow.id == build_id).with_for_update()
+            )
             if row is None:
                 raise NotFound("构建不存在")
+            if row.status == JobStatus.not_built.value:
+                return _stored(session, row)
             row.status = status.value
             row.build_number = build_number
             row.updated_at = clock.utcnow()
