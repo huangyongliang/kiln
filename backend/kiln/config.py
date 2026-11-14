@@ -29,8 +29,13 @@ from urllib.parse import urlsplit
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Shared by local compose, .env.example, and tests. Not a production secret.
-LOCAL_API_TOKEN = "kiln-local"
+# Values rejected after stripping. Not a default, and there is no switch that
+# turns the check off.
+REJECTED_API_TOKENS = {"kiln-local"}
+API_TOKEN_MIN_LENGTH = 32
+API_TOKEN_ERROR = "必须设置 KILN_API_TOKEN，且不能使用示例值或少于 32 个字符"
+BUILD_PENDING_TIMEOUT_MIN_SECONDS = 60
+BUILD_PENDING_TIMEOUT_MAX_SECONDS = 86400
 
 # LLM_MODELS items. The 32-item cap applies to the parsed allow-list only.
 # Prepending a missing LLM_MODEL happens later and may add one extra catalog
@@ -47,10 +52,15 @@ class Settings(BaseSettings):
     artifacts, versions, download reservations, and skills. The default URL
     is for local use and CI only.
 
-    `KILN_API_TOKEN` is required. The default is for local use and CI only.
-    An empty token is rejected so the gate cannot be turned off by leaving
-    the variable blank. It remains a machine credential with every catalog
-    permission, alongside user sessions.
+    `KILN_API_TOKEN` is required. Missing, blank, a rejected example, or a
+    value shorter than 32 characters after stripping refuses startup. The
+    error does not echo the value. There is no switch that allows an unsafe
+    token. It remains a machine credential with every catalog permission,
+    alongside user sessions.
+
+    `KILN_BUILD_PENDING_TIMEOUT_SECONDS` defaults to 1800 and must be between
+    60 and 86400. A queued product build that still has no Jenkins number
+    after that long is marked `not_built`.
 
     `KILN_ARTIFACT_ROOT` is the platform-owned directory for artifact bytes.
     It is a local path, not a Nexus URL.
@@ -76,7 +86,14 @@ class Settings(BaseSettings):
     kiln_cors_origins: str = "http://localhost:5173,http://localhost:8080"
 
     database_url: str = "postgresql://kiln:kiln@localhost:5432/kiln"
-    kiln_api_token: SecretStr = SecretStr(LOCAL_API_TOKEN)
+    # Empty on purpose. An unset variable hits the same rejection as a blank
+    # one, so the process cannot start with a built-in token.
+    kiln_api_token: SecretStr = SecretStr("")
+    kiln_build_pending_timeout_seconds: int = Field(
+        default=1800,
+        ge=BUILD_PENDING_TIMEOUT_MIN_SECONDS,
+        le=BUILD_PENDING_TIMEOUT_MAX_SECONDS,
+    )
 
     llm_provider: Literal["openai", "mock", "off"] = "off"
     llm_base_url: str = ""
@@ -239,9 +256,12 @@ class Settings(BaseSettings):
     def api_token_required(cls, value: object) -> object:
         if isinstance(value, SecretStr):
             value = value.get_secret_value()
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError("必须设置 KILN_API_TOKEN")
-        return value.strip()
+        if not isinstance(value, str):
+            raise ValueError(API_TOKEN_ERROR)
+        text = value.strip()
+        if not text or text in REJECTED_API_TOKENS or len(text) < API_TOKEN_MIN_LENGTH:
+            raise ValueError(API_TOKEN_ERROR)
+        return text
 
     @model_validator(mode="after")
     def openai_requires_base_url(self) -> "Settings":

@@ -1,15 +1,24 @@
 import pytest
 from pydantic import ValidationError
 
-from kiln.config import LOCAL_API_TOKEN, Settings
+from kiln.config import Settings, get_settings
+from kiln.main import create_app
+from tests.support import TEST_API_TOKEN
 
 
-def test_defaults_leave_the_model_off() -> None:
+def test_defaults_leave_the_model_off(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(_env_file=None)
     assert settings.llm_provider == "off"
     assert settings.llm_api_key_value() == ""
     assert settings.database_url.startswith("postgresql://")
-    assert settings.api_token_value() == LOCAL_API_TOKEN
+    assert settings.api_token_value() == TEST_API_TOKEN
+    assert settings.kiln_build_pending_timeout_seconds == 1800
+    monkeypatch.delenv("KILN_API_TOKEN", raising=False)
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="必须设置 KILN_API_TOKEN"):
+        Settings(_env_file=None)
+    with pytest.raises(ValidationError, match="必须设置 KILN_API_TOKEN"):
+        create_app()
 
 
 def test_generic_port_variables_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -31,8 +40,21 @@ def test_none_alias_is_off() -> None:
 
 
 def test_blank_api_token_is_rejected() -> None:
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="必须设置 KILN_API_TOKEN"):
         Settings(kiln_api_token="  ", _env_file=None)
+
+
+def test_example_api_token_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="必须设置 KILN_API_TOKEN") as caught:
+        Settings(kiln_api_token="kiln-local", _env_file=None)
+    assert "kiln-local" not in str(caught.value)
+
+
+def test_short_api_token_is_rejected() -> None:
+    token = "x" * 31
+    with pytest.raises(ValidationError, match="必须设置 KILN_API_TOKEN") as caught:
+        Settings(kiln_api_token=token, _env_file=None)
+    assert token not in str(caught.value)
 
 
 def test_openai_requires_base_url() -> None:
@@ -127,7 +149,7 @@ def test_oidc_is_unset_until_every_required_value_is_present() -> None:
     assert configured.oidc_configured is True
     assert configured.oidc_scopes() == "openid profile email"
     assert configured.oidc_employment_active_values() == {"active", "employed"}
-    assert configured.api_token_value() == LOCAL_API_TOKEN
+    assert configured.api_token_value() == TEST_API_TOKEN
 
 
 def test_openai_accepts_a_configured_endpoint() -> None:

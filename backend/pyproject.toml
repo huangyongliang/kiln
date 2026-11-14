@@ -28,6 +28,7 @@ dev = [
 
 [project.scripts]
 kiln-api = "kiln.main:run"
+kiln-admin = "kiln.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["kiln*"]
