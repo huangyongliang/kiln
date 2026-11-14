@@ -20,13 +20,18 @@ from fastapi.testclient import TestClient
 from sqlalchemy import bindparam, inspect, text
 from sqlalchemy.engine import Engine, make_url
 
-from kiln.config import LOCAL_API_TOKEN
 from kiln.db import migrate as db_migrate
 from kiln.db.engine import create_db_engine
 from kiln.db.migrate import upgrade_database
 from kiln.db.url import to_sqlalchemy_url
 from kiln.domain.rbac import PERMISSIONS, ROLES
-from tests.support import auth_headers, content_headers, postgres_url, truncate_domain
+from tests.support import (
+    TEST_API_TOKEN,
+    auth_headers,
+    content_headers,
+    postgres_url,
+    truncate_domain,
+)
 
 BACKEND = Path(__file__).resolve().parents[1]
 SHA256_A = "ab" * 32
@@ -1216,7 +1221,7 @@ def _api_env(database_url: str, artifact_root: str) -> dict[str, str]:
     env["LLM_API_KEY"] = ""
     env["LLM_MODEL"] = ""
     env["LLM_MODELS"] = ""
-    env["KILN_API_TOKEN"] = LOCAL_API_TOKEN
+    env["KILN_API_TOKEN"] = TEST_API_TOKEN
     env["JENKINS_URL"] = ""
     env["JENKINS_USER"] = ""
     env["JENKINS_API_TOKEN"] = ""

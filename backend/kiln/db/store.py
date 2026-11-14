@@ -67,6 +67,10 @@ from kiln.storage.local import LocalBlobStore
 
 _VERSION = re.compile(VERSION_PATTERN)
 
+
+class AdminAlreadyPresent(Exception):
+    """An account already holds the admin role. Bootstrap must not write."""
+
 _SKILL_LOAD = (
     selectinload(SkillRow.inputs),
     selectinload(SkillRow.steps),
@@ -148,6 +152,52 @@ class PostgresStore:
             for index, role_id in enumerate(payload.role_ids)
         ]
         with self._session() as session:
+            existing = session.scalar(
+                select(AccountRow.id).where(AccountRow.username == payload.username)
+            )
+            if existing is not None:
+                raise Conflict("用户名已存在")
+            session.add(row)
+            _commit_unique(session, "用户名已存在")
+            return _account(row)
+
+    def bootstrap_admin(self, payload: AccountCreate) -> Account:
+        """Insert the first local admin, or refuse when any admin already exists.
+
+        Locks ``rbac_roles`` id ``admin`` with ``FOR UPDATE`` in this
+        transaction. Later changes that protect the last admin take the same
+        lock first. Active and disabled holders both count. The insert builds
+        an ``AccountRow`` the same way ``create_account`` does. Callers do
+        not write SQL.
+        """
+
+        if payload.password is None:
+            raise BadRequest("口令不符合要求")
+        account_id = uuid4()
+        created_at = clock.utcnow()
+        row = AccountRow(
+            id=account_id,
+            username=payload.username,
+            display_name=payload.display_name,
+            email=payload.email,
+            status="active",
+            password_hash=hash_password(payload.password),
+            created_at=created_at,
+        )
+        row.roles = [AccountRoleRow(role_id="admin", position=0)]
+        with self._session() as session:
+            locked = session.scalar(
+                select(RoleRow).where(RoleRow.id == "admin").with_for_update()
+            )
+            if locked is None:
+                raise RuntimeError("admin role is missing from rbac_roles")
+            holding_admin = session.scalar(
+                select(AccountRoleRow.account_id)
+                .where(AccountRoleRow.role_id == "admin")
+                .limit(1)
+            )
+            if holding_admin is not None:
+                raise AdminAlreadyPresent()
             existing = session.scalar(
                 select(AccountRow.id).where(AccountRow.username == payload.username)
             )

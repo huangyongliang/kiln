@@ -9,8 +9,10 @@ proxy does not probe it before the build starts.
 
 import hashlib
 import re
+from datetime import timedelta
 from uuid import UUID, uuid4
 
+from kiln import clock
 from kiln.config import Settings
 from kiln.db.builds import BuildStore, StoredBuild
 from kiln.db.store import PostgresStore
@@ -112,13 +114,24 @@ def create_product_build(
         raise
 
 
-def sync_status(builds: BuildStore, jenkins: JenkinsClient, build_id: UUID) -> StoredBuild:
+def sync_status(
+    builds: BuildStore,
+    jenkins: JenkinsClient,
+    build_id: UUID,
+    *,
+    pending_timeout_seconds: int,
+) -> StoredBuild:
     """Refresh a build from Jenkins.
 
-    A ``not_built`` row with no build number is the trigger-failure record.
-    Leave it alone and do not call Jenkins. A queued row with no queue URL
-    is still polled by job name: Jenkins may have accepted the trigger
-    without a Location header, or the job may not exist yet.
+    A ``not_built`` row with no build number is left alone and does not call
+    Jenkins. A queued row with no queue URL is still polled by job name:
+    Jenkins may have accepted the trigger without a Location header, or the
+    job may not exist yet.
+
+    After a successful read that is still ``("queued", None)``, a queued row
+    with no build number whose ``created_at`` is strictly older than
+    ``pending_timeout_seconds`` is expired. ``UpstreamFailure`` is not a
+    timeout: it propagates and the row stays as it was.
     """
 
     current = builds.get_build(build_id)
@@ -136,8 +149,21 @@ def sync_status(builds: BuildStore, jenkins: JenkinsClient, build_id: UUID) -> S
         if current.build_number is None and current.status == JobStatus.queued:
             return current
         raise
-    if current.status == JobStatus.not_built:
-        return current
+    if (
+        status_name == "queued"
+        and number is None
+        and current.status == JobStatus.queued
+        and current.build_number is None
+    ):
+        cutoff = clock.utcnow() - timedelta(seconds=pending_timeout_seconds)
+        if current.created_at < cutoff:
+            changed = builds.expire_pending(current.id, cutoff)
+            if changed:
+                try:
+                    jenkins.delete_job(current.jenkins_job_name)
+                except Exception:
+                    pass
+            return builds.get_build(current.id)
     status = JobStatus(status_name)
     if status == current.status and number == current.build_number:
         return current
@@ -151,7 +177,12 @@ def collect_build(
     settings: Settings,
     build_id: UUID,
 ) -> StoredBuild:
-    current = sync_status(builds, jenkins, build_id)
+    current = sync_status(
+        builds,
+        jenkins,
+        build_id,
+        pending_timeout_seconds=settings.kiln_build_pending_timeout_seconds,
+    )
     if current.status != JobStatus.success or current.build_number is None:
         return current
     record = builds.version_record(current.artifact_id, current.version)
@@ -199,7 +230,12 @@ def build_log(
     settings: Settings,
     build_id: UUID,
 ) -> BuildLog:
-    current = sync_status(builds, jenkins, build_id)
+    current = sync_status(
+        builds,
+        jenkins,
+        build_id,
+        pending_timeout_seconds=settings.kiln_build_pending_timeout_seconds,
+    )
     if current.build_number is None:
         raise Conflict("这次构建还没有日志")
     text, truncated = jenkins.read_log(current.jenkins_job_name, current.build_number)

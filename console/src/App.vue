@@ -162,7 +162,7 @@ async function logout() {
             <input id="api-token" v-model="token" type="password" autocomplete="off" />
             <button type="submit" class="btn btn-secondary">保存</button>
             <p class="token-note">
-              登录后，控制台通过会话访问 /api。这里的令牌是机器和开发用的 KILN_API_TOKEN，不是主要入口。本地示例是 kiln-local，不能用于生产。
+              登录后，控制台通过会话访问 /api。这里的令牌是机器和开发用的 KILN_API_TOKEN，不是主要入口。
             </p>
           </form>
         </details>

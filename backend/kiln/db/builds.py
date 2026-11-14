@@ -237,17 +237,51 @@ class BuildStore:
     def mark_not_built(self, build_id: UUID) -> StoredBuild:
         """Terminal failure before a queue item or build number exists.
 
-        Leaves ``queue_url`` and ``build_number`` untouched.
+        Locks the row with ``FOR UPDATE``, the same lock as ``save_run`` and
+        ``expire_pending``. Inside the lock, only a row that is still
+        ``queued`` with ``build_number`` NULL becomes ``not_built``. Any other
+        state is returned unchanged and is not written. ``queue_url`` and
+        ``build_number`` are left as they are.
         """
 
         with self._session() as session:
-            row = session.get(ProductBuildRow, build_id)
+            row = session.scalar(
+                select(ProductBuildRow).where(ProductBuildRow.id == build_id).with_for_update()
+            )
             if row is None:
                 raise NotFound("构建不存在")
+            if row.status != JobStatus.queued.value or row.build_number is not None:
+                return _stored(session, row)
             row.status = JobStatus.not_built.value
             row.updated_at = clock.utcnow()
             session.commit()
             return _stored(session, row)
+
+    def expire_pending(self, build_id: UUID, cutoff: datetime) -> bool:
+        """Mark an old still-queued build with no number as ``not_built``.
+
+        Uses the same ``FOR UPDATE`` lock as ``save_run``. The queued status,
+        null ``build_number``, and ``created_at`` strictly before ``cutoff``
+        are checked again inside the lock. ``queue_url`` and ``build_number``
+        stay unchanged. Returns whether this call changed the row.
+        """
+
+        with self._session() as session:
+            row = session.scalar(
+                select(ProductBuildRow).where(ProductBuildRow.id == build_id).with_for_update()
+            )
+            if row is None:
+                raise NotFound("构建不存在")
+            if (
+                row.status != JobStatus.queued.value
+                or row.build_number is not None
+                or row.created_at >= cutoff
+            ):
+                return False
+            row.status = JobStatus.not_built.value
+            row.updated_at = clock.utcnow()
+            session.commit()
+            return True
 
     def save_run(
         self,
@@ -260,7 +294,9 @@ class BuildStore:
 
         The status check runs under ``FOR UPDATE`` so a sync that read
         ``queued`` cannot write over ``not_built`` committed while Jenkins
-        was being read. ``mark_not_built`` is the path that sets that status.
+        was being read. ``mark_not_built`` and ``expire_pending`` set that
+        status under the same lock, and only while the row is still queued
+        with no build number.
         """
 
         with self._session() as session:

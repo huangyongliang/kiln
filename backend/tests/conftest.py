@@ -13,6 +13,7 @@ from kiln.config import get_settings  # noqa: E402
 from kiln.main import create_app  # noqa: E402
 from tests.external import ExternalTargets, load_external_targets  # noqa: E402
 from tests.support import (  # noqa: E402
+    TEST_API_TOKEN,
     app_settings,
     auth_headers,
     require_database,
@@ -33,6 +34,7 @@ ENV_KEYS = (
     "LLM_MODELS",
     "LLM_TIMEOUT_SECONDS",
     "KILN_API_TOKEN",
+    "KILN_BUILD_PENDING_TIMEOUT_SECONDS",
     "JENKINS_URL",
     "JENKINS_USER",
     "JENKINS_API_TOKEN",
@@ -71,6 +73,7 @@ def postgres_required() -> None:
 def isolated_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("KILN_API_TOKEN", TEST_API_TOKEN)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

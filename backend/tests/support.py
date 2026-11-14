@@ -10,8 +10,11 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from kiln.config import LOCAL_API_TOKEN, Settings
+from kiln.config import Settings
 from kiln.db.engine import create_db_engine
+
+# Fixed test credential. Obviously not a secret. At least 32 characters.
+TEST_API_TOKEN = "kiln-test-api-token-not-a-secret-32ch"
 
 _DEFAULT_DATABASE_URL = "postgresql://kiln:kiln@127.0.0.1:5432/kiln"
 _IDENT = re.compile(r"^[a-z_]+$")
@@ -45,7 +48,7 @@ def redact_database_url(database_url: str) -> str:
     return re.sub(r"://([^:@/]+):([^@/]+)@", r"://\1:***@", database_url)
 
 
-def auth_headers(token: str = LOCAL_API_TOKEN) -> dict[str, str]:
+def auth_headers(token: str = TEST_API_TOKEN) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -53,6 +56,7 @@ def app_settings(**overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "database_url": postgres_url(),
         "kiln_artifact_root": str(_TEST_ARTIFACT_ROOT),
+        "kiln_api_token": TEST_API_TOKEN,
         "_env_file": None,
     }
     values.update(overrides)

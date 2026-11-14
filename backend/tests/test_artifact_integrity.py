@@ -391,8 +391,9 @@ def test_docs_and_runtime_flag_stay_within_the_slice() -> None:
     deploy = (ROOT / "docs" / "DEPLOY.md").read_text(encoding="utf-8")
     example = (ROOT / ".env.example").read_text(encoding="utf-8")
     for document in (readme, deploy):
-        assert "只有显式空字符串会拒绝启动" in document
-        assert "未设置时回落 `kiln-local`" in document
+        assert "必填；缺失、空、`kiln-local` 或少于 32 个字符时拒绝启动" in document
+        assert "只有显式空字符串会拒绝启动" not in document
+        assert "未设置时回落" not in document
         assert "1048576" in document
         assert BUILD_OWNED_WRITE_DETAIL in document
         assert "不回填" in document

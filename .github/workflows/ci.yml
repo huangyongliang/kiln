@@ -79,6 +79,9 @@ jobs:
   compose:
     name: compose
     runs-on: ubuntu-latest
+    env:
+      # 不是密钥，只供 compose 插值。
+      KILN_API_TOKEN: ci-compose-config-placeholder-0000000000
     steps:
       - uses: actions/checkout@v4
       - name: Validate compose file

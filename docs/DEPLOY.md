@@ -87,7 +87,7 @@ cp .env.example .env
 | `KILN_HTTP_PORT` | `8000` | 同上。改这个值不会改变 compose 发布的 `127.0.0.1:8000:8000` |
 | `KILN_CORS_ORIGINS` | `http://localhost:5173,http://localhost:8080` | 进程直接运行时生效。compose 给容器写死了同一组来源，不读取 `.env` 里的这一行 |
 | `DATABASE_URL` | `postgresql://kiln:kiln@localhost:5432/kiln` | 进程直接运行时进入配置。容器内的值由 compose 拼成 `postgresql://…@postgres:5432/kiln`，主机名是服务名 `postgres` |
-| `KILN_API_TOKEN` | `kiln-local` | `/api/v1` 的 Bearer 令牌。compose 在未设置时传入 `kiln-local`。这个值只用于本地，不能用于生产。只有显式空字符串会拒绝启动；未设置时回落 `kiln-local` |
+| `KILN_API_TOKEN` | 无 | 必填；缺失、空、`kiln-local` 或少于 32 个字符时拒绝启动。`/api/v1` 的 Bearer 令牌。compose 使用 `${KILN_API_TOKEN:?…}`，未设置时在插值阶段失败。生成：python -c "import secrets; print(secrets.token_hex(32))" |
 | `POSTGRES_USER` | `kiln` | 只由 compose 插值，传给 Postgres 容器，并用来拼接容器内的 `DATABASE_URL` |
 | `POSTGRES_PASSWORD` | `kiln` | 同上 |
 | `POSTGRES_DB` | `kiln` | 同上 |
@@ -101,6 +101,7 @@ cp .env.example .env
 | `JENKINS_USER` | 空 | 与 URL、令牌一起设置。compose 原样传入 |
 | `JENKINS_API_TOKEN` | 空 | Jenkins API 令牌或该用户口令。只放在环境或本机 `.env`，不能提交 |
 | `JENKINS_TIMEOUT_SECONDS` | `30` | 单次调用超时，大于 0 且不超过 120 |
+| `KILN_BUILD_PENDING_TIMEOUT_SECONDS` | `1800` | 取值 60 到 86400，超出则拒绝启动。compose 未设置时传入 1800。Jenkins 排队超过阈值、还没有构建编号的产品构建会被标为 `not_built` 并删除任务。Jenkins 长期繁忙时调大这个值 |
 | `GIT_PROVIDER` | `off` | `gitea`、`gitlab` 或 `off`。compose 未设置时传入 `off` |
 | `GIT_BASE_URL` | 空 | `gitea` 或 `gitlab` 时必填。compose 原样传入。没有生产默认值 |
 | `GIT_CLONE_BASE_URL` | 空 | Jenkins 用来克隆的代码源根地址。留空则使用 `GIT_BASE_URL`。compose 原样传入。不能带用户名或口令，也没有生产默认值 |
@@ -171,10 +172,10 @@ docker compose ps
 curl -fsS http://127.0.0.1:8000/health
 curl -fsS http://127.0.0.1:8000/
 curl -fsS http://127.0.0.1:8000/api/v1/llm/provider \
-  -H 'Authorization: Bearer kiln-local'
+  -H "Authorization: Bearer $KILN_API_TOKEN"
 ```
 
-`/health` 和 `/` 不需要令牌。`/api/v1/llm/provider` 需要。未带令牌时返回 401，正文是 `需要访问令牌`。`kiln-local` 只用于本地。
+`/health` 和 `/` 不需要令牌。`/api/v1/llm/provider` 需要。未带令牌时返回 401，正文是 `需要访问令牌`。
 
 `/health` 的正文是：
 
@@ -211,7 +212,7 @@ docker exec kiln-postgres pg_isready -U kiln -d kiln
 
 ```bash
 curl -fsS http://127.0.0.1:8000/api/v1/accounts \
-  -H 'Authorization: Bearer kiln-local' \
+  -H "Authorization: Bearer $KILN_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"username":"ada","display_name":"Ada"}'
 docker compose restart api
@@ -221,24 +222,24 @@ docker compose restart api
 
 ```bash
 curl -fsS http://127.0.0.1:8000/api/v1/accounts \
-  -H 'Authorization: Bearer kiln-local'
+  -H "Authorization: Bearer $KILN_API_TOKEN"
 ```
 
 不带令牌再查一次，应得到 401，库里的 `ada` 不会因此消失。未带令牌也不能保存或下载制品字节。
 
-保存并取回一组字节时，先登记制品，再 `PUT` 原始字节。校验和是这组字节的 sha256。下面的示例只说明调用形状；`kiln-local` 只用于本地。
+保存并取回一组字节时，先登记制品，再 `PUT` 原始字节。校验和是这组字节的 sha256。下面的示例只说明调用形状。
 
 ```bash
 printf 'kiln' > /tmp/kiln-sample.bin
 SUM=$(sha256sum /tmp/kiln-sample.bin | awk '{print $1}')
 ART=$(curl -fsS http://127.0.0.1:8000/api/v1/artifacts \
-  -H 'Authorization: Bearer kiln-local' \
+  -H "Authorization: Bearer $KILN_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"name":"sample-pkg","package_type":"generic"}')
 ART_ID=$(printf '%s' "$ART" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 curl -fsS "http://127.0.0.1:8000/api/v1/artifacts/${ART_ID}/versions/1/content" \
   -X PUT \
-  -H 'Authorization: Bearer kiln-local' \
+  -H "Authorization: Bearer $KILN_API_TOKEN" \
   -H 'Content-Type: application/octet-stream' \
   -H 'X-Kiln-Checksum-Algorithm: sha256' \
   -H "X-Kiln-Checksum: ${SUM}" \
@@ -250,6 +251,18 @@ curl -fsS "http://127.0.0.1:8000/api/v1/artifacts/${ART_ID}/versions/1/content" 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/v1/accounts
 ```
+
+## 首个管理员
+
+空库没有任何账号。`kiln-admin bootstrap-admin` 创建第一个本地管理员。标准输入是终端时口令用交互输入两次并比对；否则从标准输入读第一行，例如 `docker compose exec -T api kiln-admin bootstrap-admin --username ada --display-name Ada < 口令文件`。不接受命令行参数或环境变量形式的口令。用户名规则与 `POST /api/v1/accounts` 相同，口令为 8–128 个字符。命令会先读取配置，因此 `KILN_API_TOKEN` 也必须已按上面的规则设置。
+
+```bash
+docker compose exec api kiln-admin bootstrap-admin --username ada --display-name Ada
+```
+
+可以加 `--email`。退出码：`0` 输出「已创建管理员 <username>」；`3` 输出「已存在管理员，未做改动」（库里已有持有 admin 角色的账号，不论启用还是停用）；`2` 参数或口令不合规；`4` 输出「用户名已存在」（用户名已被非管理员占用）。任何输出和日志都不包含口令或令牌。
+
+机器令牌调用 `POST /api/v1/accounts` 并带 `role_ids: ["admin"]` 的路径仍然可用。库里只剩已停用的管理员时，引导命令仍退出 3，此时用机器令牌 `PATCH` 重新启用（S2b 之后）或 `POST /accounts` 新建管理员。
 
 ## 账号
 
@@ -287,7 +300,7 @@ LLM_API_KEY=
 ```bash
 docker compose up --build -d api
 curl -fsS http://127.0.0.1:8000/api/v1/llm/provider \
-  -H 'Authorization: Bearer kiln-local'
+  -H "Authorization: Bearer $KILN_API_TOKEN"
 ```
 
 Compose 把 `LLM_BASE_URL` 原样写进 `kiln-api`。容器里的 `127.0.0.1` 是容器自己，不是宿主机。仓库没有 `extra_hosts`，也没有规定从容器访问宿主机的主机名。模型若跑在别的机器或容器网络能路由到的地址上，把那个地址填进 `LLM_BASE_URL`。进程直接跑在宿主机上时，`127.0.0.1` 才指向宿主机。
@@ -304,7 +317,7 @@ Compose 把 `LLM_BASE_URL` 原样写进 `kiln-api`。容器里的 `127.0.0.1` �
 
 创建兼容任务的请求体是 `{"name":"compat","marker":"kiln-ok"}`。`marker` 只能是字母、数字和 `._:-`。kiln 在 Jenkins 上建一个自由风格任务，让它打印这个标记，然后 `GET /api/v1/jobs/{id}` 看状态，`GET /api/v1/jobs/{id}/log` 读日志。这只用来核对日志，不产出制品字节，也不部署到运行环境。
 
-产品构建的请求体是 `{"skill_id":"<已发布 skill 的 uuid>","repository":"owner/name","ref":"main","artifact_name":"sample-pkg","version":"1.0.0","package_type":"generic"}`。`skill_id` 必填，且该 Skill 必须已发布。仓库根目录要有 `kiln-build.sh`，成功时写出 `kiln-dist/artifact.bin`。kiln 先用当前适配器把 `ref` 解析成提交，再让 Jenkins 克隆该提交并运行脚本。Skill 步骤不会被执行，也不会变成 Jenkins 参数。`GIT_CLONE_BASE_URL` 留空时，克隆根地址就是 `GIT_BASE_URL`。kiln 在调用 Jenkins 之前，用同一个事务写入制品行和一条状态为 `queued` 的构建行，此时 `build_number` 为空。Jenkins 创建任务、触发构建或回写队列地址失败时，这条构建标为 `not_built`，制品保持构建所属，调用方仍收到原来的错误。构建成功后，`GET /api/v1/builds/{id}` 里 `content_available` 为 true，字节在 `KILN_ARTIFACT_ROOT`，版本 `source` 为 `build`。收集走进程内写入，不经过 HTTP。若该版本已经有非构建来源的字节，详情里 `content_available` 为 false，`content_conflict` 为 `foreign_bytes`。若该版本只登记了非构建来源、还没有字节，`content_conflict` 为 `foreign_version`，`content_available` 同样为 false。两种冲突都不会把该版本当成构建产物，也不标记内容已收集。迁移 `0011_actor_indexes` 只为操作人外键和 `product_builds.artifact_id` 增加普通索引，不改已有数据，也不建唯一约束。响应里 `deploys_to_runtime` 为 false，并带只读 `requested_by`。会话发起时它是账号 id，机器令牌或历史记录为 null。任务响应同样带 `requested_by`。版本带只读 `created_by`：会话上传或登记时是账号 id，构建收集写入的版本为 null。预约带只读 `account_id`。令牌只放在环境里，不写入数据库，也不出现在返回的日志里。本切片之前入库的版本，`source` 可能由调用方声明，平台不回填。
+产品构建的请求体是 `{"skill_id":"<已发布 skill 的 uuid>","repository":"owner/name","ref":"main","artifact_name":"sample-pkg","version":"1.0.0","package_type":"generic"}`。`skill_id` 必填，且该 Skill 必须已发布。仓库根目录要有 `kiln-build.sh`，成功时写出 `kiln-dist/artifact.bin`。kiln 先用当前适配器把 `ref` 解析成提交，再让 Jenkins 克隆该提交并运行脚本。Skill 步骤不会被执行，也不会变成 Jenkins 参数。`GIT_CLONE_BASE_URL` 留空时，克隆根地址就是 `GIT_BASE_URL`。kiln 在调用 Jenkins 之前，用同一个事务写入制品行和一条状态为 `queued` 的构建行，此时 `build_number` 为空。Jenkins 创建任务、触发构建或回写队列地址失败时，这条构建标为 `not_built`，制品保持构建所属，调用方仍收到原来的错误。重新读取 Jenkins 后仍是排队且没有编号、并且创建时间早于 `KILN_BUILD_PENDING_TIMEOUT_SECONDS` 时，这条构建也会标为 `not_built` 并删除任务。Jenkins 长期繁忙时调大这个值。构建成功后，`GET /api/v1/builds/{id}` 里 `content_available` 为 true，字节在 `KILN_ARTIFACT_ROOT`，版本 `source` 为 `build`。收集走进程内写入，不经过 HTTP。若该版本已经有非构建来源的字节，详情里 `content_available` 为 false，`content_conflict` 为 `foreign_bytes`。若该版本只登记了非构建来源、还没有字节，`content_conflict` 为 `foreign_version`，`content_available` 同样为 false。两种冲突都不会把该版本当成构建产物，也不标记内容已收集。迁移 `0011_actor_indexes` 只为操作人外键和 `product_builds.artifact_id` 增加普通索引，不改已有数据，也不建唯一约束。响应里 `deploys_to_runtime` 为 false，并带只读 `requested_by`。会话发起时它是账号 id，机器令牌或历史记录为 null。任务响应同样带 `requested_by`。版本带只读 `created_by`：会话上传或登记时是账号 id，构建收集写入的版本为 null。预约带只读 `account_id`。令牌只放在环境里，不写入数据库，也不出现在返回的日志里。本切片之前入库的版本，`source` 可能由调用方声明，平台不回填。
 
 产品构建必须带已发布的 Skill。实验室接线只改本机 `.env`：填写 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN`，以及 `GIT_PROVIDER`、`GIT_BASE_URL`、`GIT_TOKEN`，需要时再填 `GIT_CLONE_BASE_URL`，让 kiln-app 进程访问已经在跑的 Jenkins 与 Gitea。进程在容器内时，`127.0.0.1` 是容器自己，不是宿主机；克隆根地址用 Jenkins 看得到的网络视角。不要把地址或令牌写进仓库。对话工具仅在 `LLM_PROVIDER=openai` 且端点可达时运行，`mock` 与 `off` 不调用工具。`examples/kiln-build.sh` 由运维复制到实验室仓库，不在日常 CI 里对真实 Jenkins 执行。制品留在 `KILN_ARTIFACT_ROOT`。日常构建保持 `KILN_NEXUS_*` 为空，不把制品发布到 Nexus，也不使用公司 Nexus。
 

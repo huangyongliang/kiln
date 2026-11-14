@@ -2,7 +2,7 @@
 # profile `lab` 里的 Jenkins 与 Gitea 仍是占位，不会随 `docker compose up` 启动，
 # 也不是共享实验机上已经在跑的那套。执行器和代码源地址来自环境变量。
 # 容器名使用 kiln- 前缀。发布端口只绑在 127.0.0.1。容器内 API 仍监听 0.0.0.0。
-# 这里的数据库口令和 KILN_API_TOKEN 默认值 kiln-local 只用于本地，不是生产密钥。
+# 数据库口令只用于本地；KILN_API_TOKEN 必须自行生成。
 # 不要在这个文件里填写 Jenkins、Git 或依赖代理口令。
 
 name: kiln
@@ -33,7 +33,9 @@ services:
     environment:
       # API 启动时用这条连接串执行迁移，并读写账号、权限目录、制品、预约和 skill。
       DATABASE_URL: "postgresql://${POSTGRES_USER:-kiln}:${POSTGRES_PASSWORD:-kiln}@postgres:5432/${POSTGRES_DB:-kiln}"
-      KILN_API_TOKEN: ${KILN_API_TOKEN:-kiln-local}
+      KILN_API_TOKEN: ${KILN_API_TOKEN:?请在 .env 中设置 KILN_API_TOKEN（至少 32 个字符）}
+      # 排队超过该秒数且没有构建编号时，产品构建标为 not_built 并删除 Jenkins 任务。
+      KILN_BUILD_PENDING_TIMEOUT_SECONDS: ${KILN_BUILD_PENDING_TIMEOUT_SECONDS:-1800}
       KILN_CORS_ORIGINS: http://localhost:8080,http://localhost:5173
       LLM_PROVIDER: ${LLM_PROVIDER:-off}
       LLM_BASE_URL: ${LLM_BASE_URL:-}

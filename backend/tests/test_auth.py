@@ -5,9 +5,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from kiln.config import LOCAL_API_TOKEN
 from kiln.main import create_app
-from tests.support import app_settings, auth_headers, blob_files, content_headers
+from tests.support import TEST_API_TOKEN, app_settings, auth_headers, blob_files, content_headers
 
 SHA = "cd" * 32
 
@@ -154,7 +153,7 @@ def test_anonymous_requests_do_not_change_durable_rows(client: TestClient) -> No
         )
         assert again.status_code == 401
         queried = anon.post(
-            f"/api/v1/accounts?access_token={LOCAL_API_TOKEN}",
+            f"/api/v1/accounts?access_token={TEST_API_TOKEN}",
             json={"username": "query_user", "display_name": "查询"},
         )
         assert queried.status_code == 401
@@ -234,7 +233,7 @@ def test_anonymous_clients_cannot_store_or_download_bytes(client: TestClient) ->
         assert wrong.status_code == 401
         assert payload not in wrong.content
 
-        queried = anon.get(f"{content_path}?access_token={LOCAL_API_TOKEN}")
+        queried = anon.get(f"{content_path}?access_token={TEST_API_TOKEN}")
         assert queried.status_code == 401
         assert payload not in queried.content
 
