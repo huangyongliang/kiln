@@ -4,7 +4,9 @@ Rows keep the commit and the catalog link. Artifact bytes stay in the
 platform blob store. Git tokens are not written here.
 """
 
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import select
@@ -38,6 +40,7 @@ class StoredBuild:
         content_stored: bool,
         skill_id: UUID | None,
         skill_name: str | None,
+        requested_by: UUID | None,
         created_at: datetime,
         updated_at: datetime,
     ) -> None:
@@ -56,10 +59,16 @@ class StoredBuild:
         self.content_stored = content_stored
         self.skill_id = skill_id
         self.skill_name = skill_name
+        self.requested_by = requested_by
         self.created_at = created_at
         self.updated_at = updated_at
 
-    def public(self, *, content_available: bool) -> ProductBuild:
+    def public(
+        self,
+        *,
+        content_available: bool,
+        content_conflict: Literal["foreign_bytes"] | None = None,
+    ) -> ProductBuild:
         return ProductBuild(
             id=self.id,
             name=self.name,
@@ -75,9 +84,17 @@ class StoredBuild:
             version=self.version,
             package_type=PackageType(self.package_type),
             content_available=content_available,
+            content_conflict=content_conflict,
             created_at=self.created_at,
             updated_at=self.updated_at,
+            requested_by=self.requested_by,
         )
+
+
+@dataclass(frozen=True)
+class VersionRecord:
+    source: str
+    has_bytes: bool
 
 
 class BuildStore:
@@ -115,6 +132,7 @@ class BuildStore:
         package_type: str,
         queue_url: str | None,
         skill_id: UUID | None = None,
+        requested_by: UUID | None = None,
     ) -> StoredBuild:
         now = clock.utcnow()
         row = ProductBuildRow(
@@ -132,6 +150,7 @@ class BuildStore:
             status=JobStatus.queued.value,
             content_stored=False,
             skill_id=skill_id,
+            requested_by=requested_by,
             created_at=now,
             updated_at=now,
         )
@@ -168,9 +187,18 @@ class BuildStore:
             return _stored(session, row)
 
     def version_has_bytes(self, artifact_id: UUID, version: str) -> bool:
+        record = self.version_record(artifact_id, version)
+        return bool(record is not None and record.has_bytes)
+
+    def version_record(self, artifact_id: UUID, version: str) -> VersionRecord | None:
         with self._session() as session:
             row = session.get(ArtifactVersionRow, (artifact_id, version))
-            return bool(row is not None and row.content_available and row.blob_key)
+            if row is None:
+                return None
+            return VersionRecord(
+                source=row.source,
+                has_bytes=bool(row.content_available and row.blob_key),
+            )
 
 
 def _skill_name(session: Session, skill_id: UUID | None) -> str | None:
@@ -196,6 +224,7 @@ def _stored(session: Session, row: ProductBuildRow) -> StoredBuild:
         content_stored=row.content_stored,
         skill_id=row.skill_id,
         skill_name=_skill_name(session, row.skill_id),
+        requested_by=row.requested_by,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

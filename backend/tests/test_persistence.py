@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -9,6 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import IO
+from uuid import uuid4
 
 import httpx
 from alembic import command
@@ -16,7 +18,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
 
 from kiln.config import LOCAL_API_TOKEN
 from kiln.db import migrate as db_migrate
@@ -120,7 +122,6 @@ def test_records_survive_api_process_restart() -> None:
                     "version": "1.0.0",
                     "checksum": {"algorithm": "sha256", "value": SHA256_A},
                     "size_bytes": 32,
-                    "source": "build",
                 },
             )
             reservation = _post(
@@ -191,6 +192,7 @@ def test_records_survive_api_process_restart() -> None:
             assert restored["id"] == artifact["id"]
             assert restored["versions"][0]["version"] == "1.0.0"
             assert restored["versions"][0]["checksum"]["value"] == SHA256_A
+            assert restored["versions"][0]["source"] == "upload"
 
             retrieved = http.get(f"{base}{reservation['retrieve_path']}")
             assert retrieved.status_code == 200
@@ -306,7 +308,7 @@ def test_product_build_skill_migration_round_trip(client: TestClient) -> None:
     """skill_id appears at head and is gone at 0006_skill_rejection."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0009_llm_catalog"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0010_actor_attribution"]
     engine = client.app.state.engine
     try:
         command.downgrade(cfg, "0006_skill_rejection")
@@ -333,7 +335,7 @@ def test_skill_rejection_migration_round_trip(client: TestClient) -> None:
     """Drop the rejection columns at 0005_local_login, then restore them at head."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0009_llm_catalog"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0010_actor_attribution"]
     engine = client.app.state.engine
     try:
         command.downgrade(cfg, "0005_local_login")
@@ -348,7 +350,7 @@ def test_skill_created_by_migration_round_trip(client: TestClient) -> None:
     """created_by appears at head and is gone at 0007_product_build_skill."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0009_llm_catalog"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0010_actor_attribution"]
     engine = client.app.state.engine
     try:
         _assert_created_by_schema(engine)
@@ -376,7 +378,7 @@ def test_llm_catalog_migration_round_trip(client: TestClient) -> None:
     """Downgrade drops a saved catalog. Upgrade again is back to env behavior."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0009_llm_catalog"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0010_actor_attribution"]
     engine = client.app.state.engine
     try:
         _assert_llm_catalog_tables(engine, present=True)
@@ -409,6 +411,353 @@ def test_llm_catalog_migration_round_trip(client: TestClient) -> None:
         assert saved == 0
     finally:
         command.upgrade(cfg, "head")
+
+
+def test_actor_attribution_migration_on_empty_and_existing_databases(client: TestClient) -> None:
+    """Add nullable actor columns at head. Existing rows stay null. Delete sets null."""
+
+    cfg = _alembic_config(postgres_url())
+    script = ScriptDirectory.from_config(cfg)
+    assert script.get_heads() == ["0010_actor_attribution"]
+    revision = script.get_revision("0010_actor_attribution")
+    assert revision is not None
+    assert revision.down_revision == "0009_llm_catalog"
+    _assert_actor_columns_on_empty_database()
+
+    engine = client.app.state.engine
+    try:
+        command.downgrade(cfg, "0009_llm_catalog")
+        _assert_actor_columns(engine, present=False)
+        planted = _insert_pre_actor_rows(engine)
+        command.upgrade(cfg, "head")
+        _assert_actor_columns(engine, present=True)
+        _assert_pre_actor_rows_unchanged(engine, planted)
+        _point_actor_columns_at_account(engine, planted)
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM accounts WHERE id = :id"),
+                {"id": planted["account_id"]},
+            )
+        _assert_account_delete_nulls_actor_columns(engine, planted)
+    finally:
+        command.upgrade(cfg, "head")
+        truncate_domain(engine)
+
+
+_ACTOR_COLUMNS = (
+    ("product_builds", "requested_by", "fk_product_builds_requested_by_accounts"),
+    ("executor_jobs", "requested_by", "fk_executor_jobs_requested_by_accounts"),
+    ("artifact_versions", "created_by", "fk_artifact_versions_created_by_accounts"),
+    ("download_reservations", "account_id", "fk_download_reservations_account_id_accounts"),
+)
+
+
+def _assert_actor_columns(engine: Engine, *, present: bool) -> None:
+    with engine.connect() as connection:
+        for table, column, constraint in _ACTOR_COLUMNS:
+            kind = connection.execute(
+                text(
+                    """
+                    SELECT data_type || ' ' || is_nullable
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = :table
+                      AND column_name = :column
+                    """
+                ),
+                {"table": table, "column": column},
+            ).scalar_one_or_none()
+            rule = connection.execute(
+                text(
+                    """
+                    SELECT delete_rule
+                    FROM information_schema.referential_constraints
+                    WHERE constraint_schema = 'public'
+                      AND constraint_name = :name
+                    """
+                ),
+                {"name": constraint},
+            ).scalar_one_or_none()
+            if present:
+                assert kind == "uuid YES", (table, column, kind)
+                assert rule == "SET NULL", (constraint, rule)
+            else:
+                assert kind is None, (table, column, kind)
+                assert rule is None, (constraint, rule)
+
+
+def _assert_actor_columns_on_empty_database() -> None:
+    name = f"kiln_s1_{uuid4().hex[:12]}"
+    assert re.fullmatch(r"kiln_s1_[0-9a-f]{12}", name)
+    admin = create_db_engine(postgres_url()).execution_options(isolation_level="AUTOCOMMIT")
+    url = make_url(postgres_url()).set(database=name).render_as_string(hide_password=False)
+    empty: Engine | None = None
+    try:
+        with admin.connect() as connection:
+            connection.execute(text(f'CREATE DATABASE "{name}"'))
+        upgrade_database(url)
+        empty = create_db_engine(url)
+        _assert_actor_columns(empty, present=True)
+        with empty.connect() as connection:
+            builds = connection.execute(text("SELECT count(*) FROM product_builds")).scalar_one()
+            versions = connection.execute(
+                text("SELECT count(*) FROM artifact_versions")
+            ).scalar_one()
+        assert builds == 0
+        assert versions == 0
+        upgrade_database(url)
+        assert ScriptDirectory.from_config(_alembic_config(url)).get_heads() == [
+            "0010_actor_attribution"
+        ]
+    finally:
+        if empty is not None:
+            empty.dispose()
+        with admin.connect() as connection:
+            connection.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+def _insert_pre_actor_rows(engine: Engine) -> dict[str, str]:
+    planted = {
+        "account_id": str(uuid4()),
+        "artifact_id": str(uuid4()),
+        "build_id": str(uuid4()),
+        "job_id": str(uuid4()),
+        "reservation_id": str(uuid4()),
+    }
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO accounts (id, username, display_name, status, created_at)
+                VALUES (:id, 'actor_hist', '历史', 'active', TIMESTAMPTZ '2026-01-01T00:00:00Z')
+                """
+            ),
+            {"id": planted["account_id"]},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO artifacts
+                    (id, name, group_name, description, package_type, created_at)
+                VALUES
+                    (:id, 'hist-pkg', NULL, '历史制品', 'generic',
+                     TIMESTAMPTZ '2026-01-01T00:00:00Z')
+                """
+            ),
+            {"id": planted["artifact_id"]},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO artifact_versions (
+                    artifact_id, version, checksum_algorithm, checksum_value,
+                    size_bytes, source, content_available, blob_key, created_at
+                ) VALUES (
+                    :artifact_id, '1.0.0', 'sha256', :digest,
+                    NULL, 'upload', false, NULL, TIMESTAMPTZ '2026-01-01T00:00:00Z'
+                )
+                """
+            ),
+            {"artifact_id": planted["artifact_id"], "digest": SHA256_A},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO product_builds (
+                    id, name, jenkins_job_name, repository, git_ref, commit_sha,
+                    artifact_id, version, package_type, queue_url, build_number,
+                    status, content_stored, created_at, updated_at
+                ) VALUES (
+                    :id, 'hist-build', :job_name, 'ada/demo', 'main', :sha,
+                    :artifact_id, '1.0.0', 'generic', NULL, NULL,
+                    'queued', false,
+                    TIMESTAMPTZ '2026-01-01T00:00:00Z', TIMESTAMPTZ '2026-01-01T00:00:00Z'
+                )
+                """
+            ),
+            {
+                "id": planted["build_id"],
+                "job_name": f"kiln-build-{planted['build_id'].replace('-', '')}",
+                "sha": "a" * 40,
+                "artifact_id": planted["artifact_id"],
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO executor_jobs (
+                    id, name, jenkins_job_name, marker, queue_url, build_number,
+                    status, created_at, updated_at
+                ) VALUES (
+                    :id, 'hist-job', :job_name, 'hist', NULL, NULL,
+                    'queued',
+                    TIMESTAMPTZ '2026-01-01T00:00:00Z', TIMESTAMPTZ '2026-01-01T00:00:00Z'
+                )
+                """
+            ),
+            {
+                "id": planted["job_id"],
+                "job_name": f"kiln-{planted['job_id'].replace('-', '')}",
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO download_reservations (
+                    id, artifact_id, artifact_name, version, package_type,
+                    checksum_algorithm, checksum_value, requester, created_at, expires_at
+                ) VALUES (
+                    :id, :artifact_id, 'hist-pkg', '1.0.0', 'generic',
+                    'sha256', :digest, 'actor_hist',
+                    TIMESTAMPTZ '2026-01-01T00:00:00Z', TIMESTAMPTZ '2026-01-02T00:00:00Z'
+                )
+                """
+            ),
+            {
+                "id": planted["reservation_id"],
+                "artifact_id": planted["artifact_id"],
+                "digest": SHA256_A,
+            },
+        )
+    return planted
+
+
+def _assert_pre_actor_rows_unchanged(engine: Engine, planted: dict[str, str]) -> None:
+    with engine.connect() as connection:
+        artifact = connection.execute(
+            text("SELECT name FROM artifacts WHERE id = :id"),
+            {"id": planted["artifact_id"]},
+        ).one()
+        version = connection.execute(
+            text(
+                """
+                SELECT source, created_by
+                FROM artifact_versions
+                WHERE artifact_id = :id AND version = '1.0.0'
+                """
+            ),
+            {"id": planted["artifact_id"]},
+        ).one()
+        build = connection.execute(
+            text(
+                """
+                SELECT repository, status, requested_by, content_stored
+                FROM product_builds WHERE id = :id
+                """
+            ),
+            {"id": planted["build_id"]},
+        ).one()
+        job = connection.execute(
+            text("SELECT marker, requested_by FROM executor_jobs WHERE id = :id"),
+            {"id": planted["job_id"]},
+        ).one()
+        reservation = connection.execute(
+            text(
+                """
+                SELECT requester, account_id
+                FROM download_reservations WHERE id = :id
+                """
+            ),
+            {"id": planted["reservation_id"]},
+        ).one()
+    assert artifact.name == "hist-pkg"
+    assert version.source == "upload"
+    assert version.created_by is None
+    assert build.repository == "ada/demo"
+    assert build.status == "queued"
+    assert build.requested_by is None
+    assert build.content_stored is False
+    assert job.marker == "hist"
+    assert job.requested_by is None
+    assert reservation.requester == "actor_hist"
+    assert reservation.account_id is None
+
+
+def _point_actor_columns_at_account(engine: Engine, planted: dict[str, str]) -> None:
+    account_id = planted["account_id"]
+    with engine.begin() as connection:
+        connection.execute(
+            text("UPDATE product_builds SET requested_by = :account WHERE id = :id"),
+            {"account": account_id, "id": planted["build_id"]},
+        )
+        connection.execute(
+            text("UPDATE executor_jobs SET requested_by = :account WHERE id = :id"),
+            {"account": account_id, "id": planted["job_id"]},
+        )
+        connection.execute(
+            text(
+                """
+                UPDATE artifact_versions
+                SET created_by = :account
+                WHERE artifact_id = :id AND version = '1.0.0'
+                """
+            ),
+            {"account": account_id, "id": planted["artifact_id"]},
+        )
+        connection.execute(
+            text("UPDATE download_reservations SET account_id = :account WHERE id = :id"),
+            {"account": account_id, "id": planted["reservation_id"]},
+        )
+
+
+def _assert_account_delete_nulls_actor_columns(engine: Engine, planted: dict[str, str]) -> None:
+    with engine.connect() as connection:
+        accounts = connection.execute(
+            text("SELECT count(*) FROM accounts WHERE id = :id"),
+            {"id": planted["account_id"]},
+        ).scalar_one()
+        artifacts = connection.execute(
+            text("SELECT count(*) FROM artifacts WHERE id = :id"),
+            {"id": planted["artifact_id"]},
+        ).scalar_one()
+        versions = connection.execute(
+            text("SELECT count(*) FROM artifact_versions WHERE artifact_id = :id"),
+            {"id": planted["artifact_id"]},
+        ).scalar_one()
+        created_by = connection.execute(
+            text(
+                """
+                SELECT created_by FROM artifact_versions
+                WHERE artifact_id = :id AND version = '1.0.0'
+                """
+            ),
+            {"id": planted["artifact_id"]},
+        ).scalar_one()
+        builds = connection.execute(
+            text("SELECT count(*) FROM product_builds WHERE id = :id"),
+            {"id": planted["build_id"]},
+        ).scalar_one()
+        requested_by = connection.execute(
+            text("SELECT requested_by FROM product_builds WHERE id = :id"),
+            {"id": planted["build_id"]},
+        ).scalar_one()
+        jobs = connection.execute(
+            text("SELECT count(*) FROM executor_jobs WHERE id = :id"),
+            {"id": planted["job_id"]},
+        ).scalar_one()
+        job_actor = connection.execute(
+            text("SELECT requested_by FROM executor_jobs WHERE id = :id"),
+            {"id": planted["job_id"]},
+        ).scalar_one()
+        reservations = connection.execute(
+            text("SELECT count(*) FROM download_reservations WHERE id = :id"),
+            {"id": planted["reservation_id"]},
+        ).scalar_one()
+        reservation_actor = connection.execute(
+            text("SELECT account_id FROM download_reservations WHERE id = :id"),
+            {"id": planted["reservation_id"]},
+        ).scalar_one()
+    assert accounts == 0
+    assert artifacts == 1
+    assert versions == 1
+    assert created_by is None
+    assert builds == 1
+    assert requested_by is None
+    assert jobs == 1
+    assert job_actor is None
+    assert reservations == 1
+    assert reservation_actor is None
 
 
 def _assert_llm_catalog_tables(engine: Engine, *, present: bool) -> None:

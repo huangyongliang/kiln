@@ -12,10 +12,11 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from kiln.api.deps import get_store
-from kiln.auth import require_auth, require_permission
+from kiln.auth import Principal, account_id, require_auth, require_permission
 from kiln.config import Settings
 from kiln.db.store import PostgresStore
 from kiln.domain.artifacts import (
+    SESSION_UPLOAD_MAX_BYTES,
     Artifact,
     ArtifactCreate,
     ArtifactList,
@@ -26,7 +27,7 @@ from kiln.domain.artifacts import (
     DownloadReservationCreate,
     Reservation,
 )
-from kiln.errors import BadRequest, PayloadTooLarge
+from kiln.errors import BadRequest, PayloadTooLarge, Unprocessable
 
 router = APIRouter(
     prefix="/artifacts",
@@ -77,13 +78,20 @@ def add_version(
     artifact_id: UUID,
     payload: ArtifactVersionCreate,
     store: PostgresStore = Depends(get_store),
+    principal: Principal = Depends(require_auth),
 ) -> ArtifactVersion:
-    return store.add_version(artifact_id, payload)
+    return store.add_version(artifact_id, payload, created_by=account_id(principal))
 
 
-async def _read_limited_body(request: Request) -> bytes:
+async def _read_limited_body(
+    request: Request,
+    principal: Principal = Depends(require_auth),
+) -> bytes:
     settings: Settings = request.app.state.settings
-    limit = settings.kiln_artifact_max_bytes
+    if principal.account is not None:
+        limit = SESSION_UPLOAD_MAX_BYTES
+    else:
+        limit = settings.kiln_artifact_max_bytes
     declared = request.headers.get("content-length")
     if declared is not None and declared.strip():
         try:
@@ -120,8 +128,8 @@ def store_version_content(
     body: bytes = Depends(_read_limited_body),
     checksum_algorithm: Literal["sha256", "sha512"] = Header(alias="X-Kiln-Checksum-Algorithm"),
     checksum_value: str = Header(alias="X-Kiln-Checksum"),
-    source: ArtifactSource = Header(default=ArtifactSource.upload, alias="X-Kiln-Source"),
     store: PostgresStore = Depends(get_store),
+    principal: Principal = Depends(require_auth),
 ) -> JSONResponse:
     try:
         checksum = Checksum(algorithm=checksum_algorithm, value=checksum_value)
@@ -132,7 +140,9 @@ def store_version_content(
         version,
         body,
         checksum,
-        source,
+        ArtifactSource.upload,
+        created_by=account_id(principal),
+        manual=True,
     )
     return JSONResponse(
         status_code=201 if created else 200,
@@ -152,5 +162,27 @@ def reserve_download(
     version: str,
     payload: DownloadReservationCreate,
     store: PostgresStore = Depends(get_store),
+    principal: Principal = Depends(require_auth),
 ) -> Reservation:
-    return store.reserve_download(artifact_id, version, payload)
+    requester, actor = _reservation_actor(principal, payload)
+    return store.reserve_download(
+        artifact_id,
+        version,
+        payload,
+        requester=requester,
+        account_id=actor,
+    )
+
+
+def _reservation_actor(
+    principal: Principal,
+    payload: DownloadReservationCreate,
+) -> tuple[str, UUID | None]:
+    account = principal.account
+    if account is not None:
+        if payload.requester is not None and payload.requester != account.username:
+            raise Unprocessable("预约人与当前用户不一致")
+        return account.username, account.id
+    if payload.requester is None:
+        raise Unprocessable("机器令牌必须提供 requester")
+    return payload.requester, None

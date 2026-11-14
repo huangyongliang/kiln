@@ -22,6 +22,7 @@ from kiln.db.models import (
     ArtifactRow,
     ArtifactVersionRow,
     PermissionRow,
+    ProductBuildRow,
     ReservationRow,
     RoleRow,
     SessionRow,
@@ -33,6 +34,7 @@ from kiln.db.models import (
 )
 from kiln.domain.accounts import Account, AccountCreate, SyncLink
 from kiln.domain.artifacts import (
+    BUILD_OWNED_WRITE_DETAIL,
     PACKAGE_LABELS,
     VERSION_PATTERN,
     Artifact,
@@ -278,7 +280,8 @@ class PostgresStore:
                 .order_by(ArtifactRow.created_at, ArtifactRow.id)
                 .options(selectinload(ArtifactRow.versions))
             ).all()
-            return [_artifact(row) for row in rows]
+            owned = _build_owned_ids(session)
+            return [_artifact(row, build_owned=row.id in owned) for row in rows]
 
     def get_artifact(self, artifact_id: UUID) -> Artifact:
         with self._session() as session:
@@ -289,7 +292,7 @@ class PostgresStore:
             ).first()
             if row is None:
                 raise NotFound("制品不存在")
-            return _artifact(row)
+            return _artifact(row, build_owned=_artifact_is_build_owned(session, artifact_id))
 
     def create_artifact(self, payload: ArtifactCreate) -> Artifact:
         artifact_id = uuid4()
@@ -313,13 +316,21 @@ class PostgresStore:
                 raise Conflict("同组内制品名称已存在")
             session.add(row)
             _commit_unique(session, "同组内制品名称已存在")
-            return _artifact(row)
+            return _artifact(row, build_owned=False)
 
-    def add_version(self, artifact_id: UUID, payload: ArtifactVersionCreate) -> ArtifactVersion:
+    def add_version(
+        self,
+        artifact_id: UUID,
+        payload: ArtifactVersionCreate,
+        *,
+        created_by: UUID | None = None,
+    ) -> ArtifactVersion:
         with self._session() as session:
             artifact = session.get(ArtifactRow, artifact_id)
             if artifact is None:
                 raise NotFound("制品不存在")
+            if _artifact_is_build_owned(session, artifact_id):
+                raise Conflict(BUILD_OWNED_WRITE_DETAIL)
             if session.get(ArtifactVersionRow, (artifact_id, payload.version)) is not None:
                 raise Conflict("版本已存在且不可变")
             created_at = clock.utcnow()
@@ -332,6 +343,7 @@ class PostgresStore:
                 source=payload.source.value,
                 content_available=False,
                 blob_key=None,
+                created_by=created_by,
                 created_at=created_at,
             )
             session.add(row)
@@ -343,6 +355,9 @@ class PostgresStore:
         artifact_id: UUID,
         version: str,
         payload: DownloadReservationCreate,
+        *,
+        requester: str,
+        account_id: UUID | None,
     ) -> Reservation:
         with self._session() as session:
             artifact = session.get(ArtifactRow, artifact_id)
@@ -363,7 +378,8 @@ class PostgresStore:
                 package_type=artifact.package_type,
                 checksum_algorithm=matched.checksum_algorithm,
                 checksum_value=matched.checksum_value,
-                requester=payload.requester,
+                requester=requester,
+                account_id=account_id,
                 created_at=created_at,
                 expires_at=expires_at,
             )
@@ -380,7 +396,8 @@ class PostgresStore:
                     algorithm=matched.checksum_algorithm,
                     value=matched.checksum_value,
                 ),
-                requester=payload.requester,
+                requester=requester,
+                account_id=account_id,
                 created_at=created_at,
                 expires_at=expires_at,
                 retrieve_path=retrieve_path(reservation_id),
@@ -393,6 +410,9 @@ class PostgresStore:
         data: bytes,
         checksum: Checksum,
         source: ArtifactSource,
+        *,
+        created_by: UUID | None = None,
+        manual: bool = False,
     ) -> tuple[ArtifactVersion, bool]:
         if _VERSION.fullmatch(version) is None:
             raise BadRequest("版本号不正确")
@@ -406,6 +426,8 @@ class PostgresStore:
             )
             if artifact is None:
                 raise NotFound("制品不存在")
+            if manual and _artifact_is_build_owned(session, artifact_id):
+                raise Conflict(BUILD_OWNED_WRITE_DETAIL)
             row = session.scalar(
                 select(ArtifactVersionRow)
                 .where(
@@ -428,6 +450,7 @@ class PostgresStore:
                     source=source.value,
                     content_available=True,
                     blob_key=key,
+                    created_by=created_by,
                     created_at=created_at,
                 )
                 session.add(row)
@@ -435,6 +458,8 @@ class PostgresStore:
                 return _version(row), True
             if row.content_available:
                 return _version(row), False
+            if row.created_by is None and created_by is not None:
+                row.created_by = created_by
             row.size_bytes = len(data)
             row.content_available = True
             row.blob_key = key
@@ -751,11 +776,12 @@ def _version(row: ArtifactVersionRow) -> ArtifactVersion:
         size_bytes=row.size_bytes,
         source=ArtifactSource(row.source),
         content_available=row.content_available,
+        created_by=row.created_by,
         created_at=row.created_at,
     )
 
 
-def _artifact(row: ArtifactRow) -> Artifact:
+def _artifact(row: ArtifactRow, *, build_owned: bool) -> Artifact:
     package_type = PackageType(row.package_type)
     versions = sorted(row.versions, key=lambda item: (item.created_at, item.version))
     return Artifact(
@@ -766,8 +792,20 @@ def _artifact(row: ArtifactRow) -> Artifact:
         package_type=package_type,
         package_type_label=PACKAGE_LABELS[package_type],
         versions=[_version(item) for item in versions],
+        build_owned=build_owned,
         created_at=row.created_at,
     )
+
+
+def _build_owned_ids(session: Session) -> set[UUID]:
+    return set(session.scalars(select(ProductBuildRow.artifact_id)).all())
+
+
+def _artifact_is_build_owned(session: Session, artifact_id: UUID) -> bool:
+    found = session.scalar(
+        select(ProductBuildRow.id).where(ProductBuildRow.artifact_id == artifact_id).limit(1)
+    )
+    return found is not None
 
 
 def _skill(row: SkillRow) -> Skill:

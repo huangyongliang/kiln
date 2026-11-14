@@ -48,8 +48,10 @@ class ProductBuild(BaseModel):
     version: str
     package_type: PackageType
     content_available: bool
+    content_conflict: Literal["foreign_bytes"] | None = None
     created_at: datetime
     updated_at: datetime
+    requested_by: UUID | None = None
     deploys_to_runtime: Literal[False] = False
 
 

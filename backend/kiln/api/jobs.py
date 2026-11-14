@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 
 from kiln.api.deps import get_jenkins, get_job_store, get_settings
-from kiln.auth import require_auth, require_permission
+from kiln.auth import Principal, account_id, require_auth, require_permission
 from kiln.config import Settings
 from kiln.db.jobs import JobStore
 from kiln.domain.jobs import ExecutorInfo, Job, JobCreate, JobList, JobLog
@@ -60,8 +60,9 @@ def post_job(
     payload: JobCreate,
     store: JobStore = Depends(get_job_store),
     jenkins: JenkinsClient = Depends(get_jenkins),
+    principal: Principal = Depends(require_auth),
 ) -> Job:
-    return create_job(store, jenkins, payload).public()
+    return create_job(store, jenkins, payload, requested_by=account_id(principal)).public()
 
 
 @router.get(

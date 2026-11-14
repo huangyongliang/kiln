@@ -352,7 +352,9 @@ def test_privileged_reads_are_503_until_configured_then_200(
             assert commit["provider"] == "gitea"
 
 
-def test_reader_keeps_catalog_and_retrieve_metadata_reads(client: TestClient) -> None:
+def test_reader_keeps_catalog_reads_and_retrieve_metadata_needs_download(
+    client: TestClient,
+) -> None:
     payload = b"reader-bytes"
     created = client.post(
         "/api/v1/artifacts",
@@ -386,18 +388,21 @@ def test_reader_keeps_catalog_and_retrieve_metadata_reads(client: TestClient) ->
         "/api/v1/rbac/roles",
         "/api/v1/rbac/permissions",
         "/api/v1/llm/provider",
-        meta_path,
     )
     for path in allowed:
         response = reader.get(path)
         assert response.status_code == 200, path
-    meta = reader.get(meta_path)
-    assert meta.json()["content_available"] is True
+    denied_meta = reader.get(meta_path)
+    assert denied_meta.status_code == 403
+    assert denied_meta.json()["detail"] == "没有权限"
     content = reader.get(f"{meta_path}/content")
     assert content.status_code == 403
     assert content.json()["detail"] == "没有权限"
 
     builder = _login(client, "ada_download", ["builder"])
+    meta = builder.get(meta_path)
+    assert meta.status_code == 200, meta.text
+    assert meta.json()["content_available"] is True
     downloaded = builder.get(f"{meta_path}/content")
     assert downloaded.status_code == 200, downloaded.text
     assert downloaded.content == payload

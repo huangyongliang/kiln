@@ -188,6 +188,15 @@ class ArtifactVersionRow(Base):
     source: Mapped[str] = mapped_column(Text, nullable=False)
     content_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     blob_key: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "accounts.id",
+            name="fk_artifact_versions_created_by_accounts",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     artifact: Mapped[ArtifactRow] = relationship(back_populates="versions")
 
@@ -219,6 +228,15 @@ class ReservationRow(Base):
     checksum_algorithm: Mapped[str] = mapped_column(Text, nullable=False)
     checksum_value: Mapped[str] = mapped_column(Text, nullable=False)
     requester: Mapped[str] = mapped_column(Text, nullable=False)
+    account_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "accounts.id",
+            name="fk_download_reservations_account_id_accounts",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -398,6 +416,15 @@ class ProductBuildRow(Base):
         ForeignKey("skills.id", name="fk_product_builds_skill_id_skills"),
         nullable=True,
     )
+    requested_by: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "accounts.id",
+            name="fk_product_builds_requested_by_accounts",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -428,6 +455,15 @@ class ExecutorJobRow(Base):
     queue_url: Mapped[str | None] = mapped_column(Text)
     build_number: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_by: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "accounts.id",
+            name="fk_executor_jobs_requested_by_accounts",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

@@ -101,7 +101,7 @@ docker compose --profile lab up
 | `KILN_HTTP_PORT` | `8000` | API 监听端口 |
 | `KILN_CORS_ORIGINS` | 本地控制台来源 | 逗号分隔 |
 | `DATABASE_URL` | 本地 Postgres | 元数据连接串。API 启动时连接并迁移 |
-| `KILN_API_TOKEN` | `kiln-local` | `/api/v1` 的 Bearer 令牌。`kiln-local` 只用于本地和 CI，不能用于生产。留空时 API 拒绝启动 |
+| `KILN_API_TOKEN` | `kiln-local` | `/api/v1` 的 Bearer 令牌。`kiln-local` 只用于本地和 CI，不能用于生产。只有显式空字符串会拒绝启动；未设置时回落 `kiln-local` |
 | `LLM_PROVIDER` | `off` | `openai`、`mock` 或 `off`。`none` 和 `disabled` 视为 `off` |
 | `LLM_BASE_URL` | 空 | OpenAI 兼容根路径，例如 `http://127.0.0.1:11434/v1`。`openai` 时必填 |
 | `LLM_API_KEY` | 空 | 仅从环境读取。无鉴权的本地端点可以留空 |
@@ -124,7 +124,7 @@ docker compose --profile lab up
 | `KILN_NEXUS_PASSWORD` | 空 | 可选口令。只从环境读取，不写入仓库、数据库或任务 `config.xml` |
 | `KILN_NEXUS_TIMEOUT_SECONDS` | `10` | 单次依赖代理 HTTP 调用超时，最大 60 |
 | `KILN_ARTIFACT_ROOT` | `var/kiln-artifacts` | 平台自管制品字节的本地目录。相对路径按进程工作目录解析。不是 Nexus 地址 |
-| `KILN_ARTIFACT_MAX_BYTES` | `67108864` | 单次保存的字节上限 |
+| `KILN_ARTIFACT_MAX_BYTES` | `67108864` | 机器令牌保存字节，以及构建收集下载 Jenkins 产物时的上限。默认值仍是 67108864。登录会话的上传上限固定为 1048576 字节，不读取这项，也不按请求头分流，没有单独的环境变量 |
 | `KILN_OIDC_ISSUER_URL` | 空 | 用户信息同步的发行方地址。留空则只使用本地口令。不要把公司用户系统的地址写进仓库 |
 | `KILN_OIDC_CLIENT_ID` | 空 | 用户信息同步的客户端标识。配置时必填 |
 | `KILN_OIDC_CLIENT_SECRET` | 空 | 用户信息同步的客户端密钥。只从环境读取 |
@@ -141,20 +141,20 @@ docker compose --profile lab up
 
 ## API 大纲
 
-前缀 `/api/v1`。账号、RBAC 目录、制品、版本、下载预约、skill 和用户会话保存在 PostgreSQL，API 进程重启后仍然在。登录、退出、用户信息同步的开始与回调，以及「是否已配置」探测不需要事先持有令牌。其余路由接受会话 cookie、登录返回的 Bearer 令牌，或机器令牌 `KILN_API_TOKEN`。没有这些凭证时返回 401，不会改库。`/health` 和 `/docs` 不需要令牌；说明页本身不能绕过这道门去写入。已登录用户的写入会按现有权限目录校验。`POST /jobs` 需要 `executor.run`。`POST /builds` 需要 `executor.run` 与 `skill.use`。`POST /llm/chat` 需要 `agent.qa`。只读角色不能调用这三处写入。读取账号、制品和 skill 分别需要 `account.read`、`artifact.read` 和 `skill.read`。读取执行器状态、依赖代理、任务、产品构建及其日志需要 `executor.read`。读取代码源适配器、仓库列表并解析引用需要 `git.read`。只读角色可以查看账号、skill 与制品，不能查看任务、构建或代码源清单。`GET /llm/provider`、`GET /rbac/roles`、`GET /rbac/permissions` 和取包元数据仍只需会话或机器令牌。取包字节需要 `artifact.download`。权限不足时返回 403，正文是「没有权限」，并且先于未配置检查。`GET` / `PUT /llm/catalog` 缺少 `llm.manage` 时，detail 写明 `llm.manage`。机器令牌拥有目录中的全部权限。
+前缀 `/api/v1`。账号、RBAC 目录、制品、版本、下载预约、skill 和用户会话保存在 PostgreSQL，API 进程重启后仍然在。登录、退出、用户信息同步的开始与回调，以及「是否已配置」探测不需要事先持有令牌。其余路由接受会话 cookie、登录返回的 Bearer 令牌，或机器令牌 `KILN_API_TOKEN`。没有这些凭证时返回 401，不会改库。`/health` 和 `/docs` 不需要令牌；说明页本身不能绕过这道门去写入。已登录用户的写入会按现有权限目录校验。`POST /jobs` 需要 `executor.run`。`POST /builds` 需要 `executor.run` 与 `skill.use`。`POST /llm/chat` 需要 `agent.qa`。只读角色不能调用这三处写入。读取账号、制品和 skill 分别需要 `account.read`、`artifact.read` 和 `skill.read`。读取执行器状态、依赖代理、任务、产品构建及其日志需要 `executor.read`。读取代码源适配器、仓库列表并解析引用需要 `git.read`。只读角色可以查看账号、skill 与制品，不能查看任务、构建或代码源清单。`GET /llm/provider`、`GET /rbac/roles` 和 `GET /rbac/permissions` 仍只需会话或机器令牌。取包元数据 `GET /retrieve/{id}` 与取包字节都需要 `artifact.download`。权限不足时返回 403，正文是「没有权限」，并且先于未配置检查。`GET` / `PUT /llm/catalog` 缺少 `llm.manage` 时，detail 写明 `llm.manage`。机器令牌拥有目录中的全部权限。
 
 - 登录：`POST /auth/login` 校验本地口令，写入会话哈希，设置 httpOnly cookie，并返回 Bearer 令牌。`POST /auth/logout` 撤销会话。口令只以哈希保存，响应里不出现口令
 - 用户信息同步：`GET /auth/sync` 说明是否已配置。未配置时 `GET /auth/oidc/start` 与 `GET /auth/oidc/callback` 返回「用户信息同步未配置」。配置后使用授权码和 PKCE，按发行方与 subject 找到或创建 kiln 账号。新账号的默认角色是 `reader`，不设置口令，也不复制公司侧的组或角色。在职状态未通过或账号已停用时不建立会话
 - 本地账号：`GET/POST /accounts`，`GET /accounts/{id}`。列出和查看需要 `account.read`。创建账号可以带口令，调用方需要 `account.manage`。账号带 `source`：`local` 本地、`sync` 用户信息同步
 - RBAC 目录：`GET /rbac/roles`，`GET /rbac/permissions`
-- 制品：`GET /artifacts` 与 `GET /artifacts/{id}` 需要 `artifact.read`，`POST /artifacts` 登记制品，`POST /artifacts/{id}/versions` 登记尚无字节的版本
-- 保存字节：`PUT /artifacts/{id}/versions/{version}/content`，请求体是原始字节，并用 `X-Kiln-Checksum-Algorithm`、`X-Kiln-Checksum` 声明校验和。成功后该版本的 `content_available` 为 true
-- 下载预约：`POST /artifacts/{id}/versions/{version}/download-reservations`
-- 取包：`GET /retrieve/{reservation_id}` 返回预约信息。字节已保存时 `content_available` 为 true，`GET /retrieve/{reservation_id}/content` 返回这些字节
+- 制品：`GET /artifacts` 与 `GET /artifacts/{id}` 需要 `artifact.read`，`POST /artifacts` 登记制品。响应带 `build_owned`：该制品被任一产品构建引用时为 true。`POST /artifacts/{id}/versions` 登记尚无字节的版本。来源由平台决定：`source` 默认且只接受 `upload`，传入 `build` 返回 422。版本响应带只读 `created_by`（账号 id；机器令牌或历史行为 null）
+- 保存字节：`PUT /artifacts/{id}/versions/{version}/content`，请求体是原始字节，并用 `X-Kiln-Checksum-Algorithm`、`X-Kiln-Checksum` 声明校验和。成功后该版本的 `content_available` 为 true，`source` 为 `upload`。`X-Kiln-Source` 不决定来源。登录会话超过 1048576 字节返回 413；机器令牌仍用 `KILN_ARTIFACT_MAX_BYTES`。构建收集不受这道会话上限影响。已被产品构建引用的制品，登记版本和上传字节都返回 409，正文是「该制品由产品构建产出，不接受手工登记或上传」，机器令牌也不例外。本切片之前入库的版本，`source` 可能由调用方声明，平台不回填
+- 下载预约：`POST /artifacts/{id}/versions/{version}/download-reservations`。登录用户的 `requester` 取自会话用户名，请求体可省略；若提供且与当前用户名不同，返回 422。机器令牌必须提供 `requester`，`account_id` 为 null。登录用户成功时 `account_id` 为当前账号
+- 取包：`GET /retrieve/{reservation_id}` 与 `GET /retrieve/{reservation_id}/content` 都需要 `artifact.download`。字节已保存时 `content_available` 为 true，内容路径返回这些字节。没有 `artifact.download` 的会话（例如只读角色）访问元数据也返回 403
 - Skill：`GET /skills` 与 `GET /skills/{id}` 需要 `skill.read`。`POST /skills` 创建草稿，需要 `skill.use`，登录账号会记下 `created_by`。`PATCH /skills/{id}` 用与创建相同的正文替换草稿的可变字段，不改变状态，也不改退回记录。创建者（有 `skill.use`）或有 `skill.publish` 的人可以改草稿；审核中和已发布返回 409。`GET /skills` 可选 `scope=mine`（我产出的）或 `scope=usable`（我能用的已发布 Skill，还需要 `skill.use`），可与 `status` 一起用。省略 `scope` 仍列出全库。`POST /skills/{id}/submit-review` 需要 `skill.submit`。`POST /skills/{id}/publish` 需要 `skill.publish`。`POST /skills/{id}/reject` 需要 `skill.publish`，把审核中的 skill 退回草稿，正文 `{"reason":"…"}` 必填
 - 模型：`GET /llm/provider` 仍只需会话或机器令牌。没有 `agent.qa` 的调用者 `models` 与 `default_model` 都为空。其余调用者在尚未托管时看到 openai 的环境变量目录，`mock` 与 `off` 为空，`default_model` 是 `LLM_MODEL` 或空。已托管后，具备 `agent.qa` 的调用者的 `models` 与 `default_model` 改为其可用集合及其默认；`mock` 与 `off` 的 `models` 仍为空。`GET` / `PUT /llm/catalog` 需要 `llm.manage`，缺少该权限时 403 的 detail 写明 `llm.manage`。该接口维护目录和四个固定角色的分配，不返回密钥，也不回显端点。`PUT` 整体替换，后一次保存生效，不使用 ETag。`POST /llm/chat` 需要 `agent.qa`。尚未托管时，目录非空则 `model` 必须落在全局目录中；目录为空且设置了 `LLM_MODEL` 时只允许该 id；两者都未配置则返回 400，不再转发。已托管后按调用者集合校验，集合为空不再转发。只读角色不能调用对话。对话可协助起草和改稿，但不能提交审核或发布。列出「我产出的 / 我能用的」使用 `scope`。工具只在 `LLM_PROVIDER=openai` 时运行；`mock` 与 `off` 不调用工具。模型关闭时用表单新建和编辑草稿。发布后的构建仍与 POST /builds 相同。
-- 执行器：`GET /executor`，`POST /jobs`（需要 `executor.run`），`GET /jobs`，`GET /jobs/{id}`，`GET /jobs/{id}/log`。任务记录在 PostgreSQL。状态和日志来自 Jenkins。响应里 `deploys_to_runtime` 为 false。兼容任务只打印调用方给出的标记。读取执行器状态、任务和日志需要 `executor.read`。只读角色没有这项权限
-- 产品构建：`POST /builds`（需要 `executor.run` 与 `skill.use`），`GET /builds`，`GET /builds/{id}`，`GET /builds/{id}/log`。请求体必须给出已发布 skill 的 `skill_id`，以及 `repository`、`ref`、`artifact_name`、`version`、`package_type`。kiln 用当前代码源适配器解析提交，Jenkins 克隆该提交并运行仓库根目录的 `kiln-build.sh`。脚本必须写出 `kiln-dist/artifact.bin`。Skill 步骤不会被执行。构建成功后，这些字节写入 `KILN_ARTIFACT_ROOT`，对应版本的 `content_available` 为 true，`source` 为 `build`。取包接口返回同一组字节。响应里 `deploys_to_runtime` 为 false。读取构建和日志需要 `executor.read`
+- 执行器：`GET /executor`，`POST /jobs`（需要 `executor.run`），`GET /jobs`，`GET /jobs/{id}`，`GET /jobs/{id}/log`。任务记录在 PostgreSQL。状态和日志来自 Jenkins。响应里 `deploys_to_runtime` 为 false，并带只读 `requested_by`（发起任务的账号 id；机器令牌或历史记录为 null）。兼容任务只打印调用方给出的标记。读取执行器状态、任务和日志需要 `executor.read`。只读角色没有这项权限
+- 产品构建：`POST /builds`（需要 `executor.run` 与 `skill.use`），`GET /builds`，`GET /builds/{id}`，`GET /builds/{id}/log`。请求体必须给出已发布 skill 的 `skill_id`，以及 `repository`、`ref`、`artifact_name`、`version`、`package_type`。kiln 用当前代码源适配器解析提交，Jenkins 克隆该提交并运行仓库根目录的 `kiln-build.sh`。脚本必须写出 `kiln-dist/artifact.bin`。Skill 步骤不会被执行。构建成功后，这些字节写入 `KILN_ARTIFACT_ROOT`，对应版本的 `content_available` 为 true，`source` 为 `build`，`created_by` 为 null（发起人见构建的 `requested_by`）。`source=build` 只由这次收集写入。取包接口返回同一组字节。若该版本已有非构建来源的字节，详情里 `content_available` 为 false，`content_conflict` 为 `foreign_bytes`，收集不会把这些字节当成构建产物。响应里 `deploys_to_runtime` 为 false，并带只读 `requested_by`。对话 `build_artifact` 同样记下发起账号。读取构建和日志需要 `executor.read`
 - 依赖代理：`GET /dependency-proxy` 需要 `executor.read`。未配置时 `configured` 为 false，`publishes_artifacts` 为 false，并且不向外连接。配置后探测是否可达；失败仍返回 200，`reachable` 为 false。响应不包含口令。制品不发布到 Nexus
 - 代码源：`GET /git/source`，`GET /git/repositories`，`GET /git/commits?repository=owner/name&ref=main`。这三处需要 `git.read`
 

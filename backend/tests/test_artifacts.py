@@ -168,7 +168,7 @@ def test_stored_bytes_round_trip_from_the_local_directory(client: TestClient) ->
     body = stored.json()
     assert body["content_available"] is True
     assert body["size_bytes"] == len(payload)
-    assert body["source"] == "build"
+    assert body["source"] == "upload"
     assert body["checksum"]["algorithm"] == "sha256"
     assert body["checksum"]["value"] == hashlib.sha256(payload).hexdigest()
 
@@ -250,7 +250,6 @@ def test_upload_must_match_a_registered_version(client: TestClient) -> None:
         json={
             "version": "1.0.0",
             "checksum": {"algorithm": "sha256", "value": hashlib.sha256(payload).hexdigest()},
-            "source": "build",
         },
     )
     assert registered.status_code == 201
@@ -273,7 +272,7 @@ def test_upload_must_match_a_registered_version(client: TestClient) -> None:
     )
     assert stored.status_code == 201
     assert stored.json()["content_available"] is True
-    assert stored.json()["source"] == "build"
+    assert stored.json()["source"] == "upload"
     assert stored.json()["size_bytes"] == len(payload)
     assert (root / "sha256" / hashlib.sha256(payload).hexdigest()).read_bytes() == payload
 

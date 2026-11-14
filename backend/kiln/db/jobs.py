@@ -24,6 +24,7 @@ class StoredJob:
         queue_url: str | None,
         build_number: int | None,
         status: JobStatus,
+        requested_by: UUID | None,
         created_at: datetime,
         updated_at: datetime,
     ) -> None:
@@ -34,6 +35,7 @@ class StoredJob:
         self.queue_url = queue_url
         self.build_number = build_number
         self.status = status
+        self.requested_by = requested_by
         self.created_at = created_at
         self.updated_at = updated_at
 
@@ -47,6 +49,7 @@ class StoredJob:
             build_number=self.build_number,
             created_at=self.created_at,
             updated_at=self.updated_at,
+            requested_by=self.requested_by,
         )
 
 
@@ -79,6 +82,7 @@ class JobStore:
         jenkins_job_name: str,
         marker: str,
         queue_url: str | None,
+        requested_by: UUID | None = None,
     ) -> StoredJob:
         now = clock.utcnow()
         row = ExecutorJobRow(
@@ -89,6 +93,7 @@ class JobStore:
             queue_url=queue_url,
             build_number=None,
             status=JobStatus.queued.value,
+            requested_by=requested_by,
             created_at=now,
             updated_at=now,
         )
@@ -124,6 +129,7 @@ def _stored(row: ExecutorJobRow) -> StoredJob:
         queue_url=row.queue_url,
         build_number=row.build_number,
         status=JobStatus(row.status),
+        requested_by=row.requested_by,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

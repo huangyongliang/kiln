@@ -50,6 +50,7 @@ class Job(BaseModel):
     build_number: int | None
     created_at: datetime
     updated_at: datetime
+    requested_by: UUID | None = None
     deploys_to_runtime: Literal[False] = False
 
 

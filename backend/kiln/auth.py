@@ -9,6 +9,7 @@ import hashlib
 import hmac
 from dataclasses import dataclass
 from typing import Literal
+from uuid import UUID
 
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -90,6 +91,12 @@ def _resolve_principal(
         if token_matches(bearer, settings.api_token_value()):
             return Principal(kind="machine", permissions=ALL_PERMISSIONS)
     raise Unauthorized()
+
+
+def account_id(principal: Principal) -> UUID | None:
+    if principal.account is None:
+        return None
+    return principal.account.id
 
 
 def _user_principal(account: Account) -> Principal:
