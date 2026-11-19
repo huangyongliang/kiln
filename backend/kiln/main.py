@@ -1,5 +1,6 @@
 """FastAPI application factory."""
 
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,6 +12,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from kiln import __version__
 from kiln.api import (
@@ -26,7 +28,7 @@ from kiln.api import (
     retrieve,
     skills,
 )
-from kiln.config import Settings, get_settings
+from kiln.config import Settings, get_settings, settings_failure_lines
 from kiln.db.builds import BuildStore
 from kiln.db.engine import create_db_engine
 from kiln.db.jobs import JobStore
@@ -112,7 +114,10 @@ def create_app(
     http_client: httpx.Client | None = None,
     nexus_http_client: httpx.Client | None = None,
 ) -> FastAPI:
-    resolved = settings if settings is not None else get_settings()
+    if settings is None:
+        resolved = _settings_or_exit()
+    else:
+        resolved = settings
     owns_client = http_client is None
     if http_client is None:
         client = httpx.Client(timeout=resolved.llm_timeout_seconds)
@@ -201,7 +206,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=resolved.cors_origins(),
         allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "OPTIONS"],
         allow_headers=["Accept", "Authorization", "Content-Type"],
     )
 
@@ -239,6 +244,9 @@ def create_app(
     return app
 
 
+_SECRET_FIELDS = frozenset({"password", "current_password", "new_password"})
+
+
 def _redact_password(detail: object) -> object:
     encoded = jsonable_encoder(detail)
     return _redact_encoded(encoded)
@@ -250,17 +258,28 @@ def _redact_encoded(detail: object) -> object:
     if isinstance(detail, dict):
         cleaned = {key: _redact_encoded(value) for key, value in detail.items()}
         loc = cleaned.get("loc")
-        if isinstance(loc, list) and "password" in loc:
+        if isinstance(loc, list) and any(name in _SECRET_FIELDS for name in loc):
             cleaned.pop("input", None)
         hidden = cleaned.get("input")
-        if isinstance(hidden, dict) and "password" in hidden:
-            cleaned["input"] = {key: value for key, value in hidden.items() if key != "password"}
+        if isinstance(hidden, dict) and any(name in hidden for name in _SECRET_FIELDS):
+            cleaned["input"] = {
+                key: value for key, value in hidden.items() if key not in _SECRET_FIELDS
+            }
         return cleaned
     return detail
 
 
+def _settings_or_exit() -> Settings:
+    try:
+        return get_settings()
+    except ValidationError as exc:
+        for line in settings_failure_lines(exc):
+            print(line, file=sys.stderr)
+        raise SystemExit(2) from None
+
+
 def run() -> None:
-    settings = get_settings()
+    settings = _settings_or_exit()
     uvicorn.run(
         "kiln.main:create_app",
         factory=True,

@@ -3,9 +3,11 @@ import { computed, ref, watch } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 
 import { accessReady, account, ensureAccess, perms, roleTags } from "./access";
-import { requestJson } from "./api";
+import { conflictText, passwordChangeErrors, showOwnPassword } from "./accountLifecycle";
+import { errorText, postJson, requestJson } from "./api";
 import { clearChatStorage } from "./chat";
 import AppIcon from "./components/AppIcon.vue";
+import FormDialog from "./components/FormDialog.vue";
 import { pageCrumb } from "./crumb";
 import { canSee } from "./permissions";
 import { clearAccount } from "./session";
@@ -16,6 +18,12 @@ const route = useRoute();
 const token = ref("");
 const healthOk = ref(false);
 const healthKnown = ref(false);
+const ownOpen = ref(false);
+const ownCurrent = ref("");
+const ownNext = ref("");
+const ownError = ref("");
+const ownFieldErrors = ref({});
+const ownBusy = ref(false);
 
 const links = [
   { to: "/", route: "overview", label: "概览", icon: "overview" },
@@ -105,6 +113,42 @@ function saveToken() {
   window.location.reload();
 }
 
+function openOwnPassword() {
+  ownCurrent.value = "";
+  ownNext.value = "";
+  ownError.value = "";
+  ownFieldErrors.value = {};
+  ownOpen.value = true;
+}
+
+async function submitOwnPassword() {
+  if (ownBusy.value) {
+    return;
+  }
+  const local = passwordChangeErrors(ownCurrent.value, ownNext.value);
+  ownFieldErrors.value = local;
+  ownError.value = "";
+  if (Object.keys(local).length) {
+    return;
+  }
+  const current = ownCurrent.value;
+  const next = ownNext.value;
+  ownCurrent.value = "";
+  ownNext.value = "";
+  ownBusy.value = true;
+  try {
+    await postJson("/api/v1/auth/password", {
+      current_password: current,
+      new_password: next,
+    });
+    ownOpen.value = false;
+  } catch (caught) {
+    ownError.value = conflictText(caught) || errorText(caught, "无法修改口令");
+  } finally {
+    ownBusy.value = false;
+  }
+}
+
 async function logout() {
   try {
     await requestJson("/api/v1/auth/logout", { method: "POST" });
@@ -154,6 +198,9 @@ async function logout() {
         <p v-if="roleTags.length" class="role-row">
           <span v-for="name in roleTags" :key="name" class="tag">{{ name }}</span>
         </p>
+        <button v-if="showOwnPassword(account)" type="button" class="logout" @click="openOwnPassword">
+          修改口令
+        </button>
         <button type="button" class="logout" @click="logout">退出</button>
         <details class="dev-panel">
           <summary>开发者</summary>
@@ -185,6 +232,27 @@ async function logout() {
       </main>
       <footer class="footnote">kiln 一期 · 数据保存在 PostgreSQL · 不部署到运行环境</footer>
     </div>
+    <FormDialog
+      v-if="ownOpen"
+      title="修改口令"
+      :busy="ownBusy"
+      :error="ownError"
+      @close="ownOpen = false"
+      @submit="submitOwnPassword"
+    >
+      <div class="field">
+        <label for="own-current">当前口令</label>
+        <input id="own-current" v-model="ownCurrent" type="password" autocomplete="current-password" />
+        <p v-if="ownFieldErrors.current_password" class="field-error">
+          {{ ownFieldErrors.current_password }}
+        </p>
+      </div>
+      <div class="field">
+        <label for="own-next">新口令</label>
+        <input id="own-next" v-model="ownNext" type="password" autocomplete="new-password" />
+        <p v-if="ownFieldErrors.new_password" class="field-error">{{ ownFieldErrors.new_password }}</p>
+      </div>
+    </FormDialog>
     <div v-if="toasts.length" class="toast-wrap" aria-live="polite">
       <div v-for="item in toasts" :key="item.id" class="toast">{{ item.text }}</div>
     </div>

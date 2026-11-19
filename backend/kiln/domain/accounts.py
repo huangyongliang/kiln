@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from kiln.domain.rbac import ROLE_INDEX
 from kiln.domain.text import has_invisible_control
@@ -53,12 +53,42 @@ class AccountCreate(BaseModel):
     @field_validator("role_ids")
     @classmethod
     def known_roles(cls, value: list[str]) -> list[str]:
-        unknown = [item for item in value if item not in ROLE_INDEX]
-        if unknown:
-            raise ValueError("未知角色：" + "、".join(unknown))
-        if len(set(value)) != len(value):
-            raise ValueError("角色重复")
-        return value
+        return _known_roles(value, minimum=0)
+
+
+class AccountUpdate(BaseModel):
+    """Change status, roles, or both. Nothing else on the account is writable."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["active", "disabled"] | None = None
+    role_ids: list[str] | None = None
+
+    @field_validator("role_ids")
+    @classmethod
+    def known_roles(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        return _known_roles(value, minimum=1)
+
+    @model_validator(mode="after")
+    def at_least_one_change(self) -> "AccountUpdate":
+        if self.status is None and self.role_ids is None:
+            raise ValueError("至少提供 status 或 role_ids")
+        return self
+
+
+class PasswordReset(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    password: str = Field(min_length=8, max_length=128)
+
+
+class PasswordChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 class Account(BaseModel):
@@ -72,6 +102,19 @@ class Account(BaseModel):
     source: Literal["local", "sync"]
     role_ids: list[str]
     created_at: datetime
+    updated_at: datetime
+    updated_by: UUID | None
+
+
+def _known_roles(value: list[str], *, minimum: int) -> list[str]:
+    if len(value) < minimum:
+        raise ValueError("至少选择一个角色")
+    unknown = [item for item in value if item not in ROLE_INDEX]
+    if unknown:
+        raise ValueError("未知角色：" + "、".join(unknown))
+    if len(set(value)) != len(value):
+        raise ValueError("角色重复")
+    return value
 
 
 class AccountList(BaseModel):
