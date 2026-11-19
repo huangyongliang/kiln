@@ -260,6 +260,15 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/v1/accounts
 docker compose exec api kiln-admin bootstrap-admin --username ada --display-name Ada
 ```
 
+在仓库根目录的虚拟环境里执行同一条命令（当前工作目录是仓库根，这样能读到根目录的 `.env`）：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e "./backend[dev]"
+kiln-admin bootstrap-admin --username ada --display-name Ada
+```
+
 可以加 `--email`。退出码：`0` 输出「已创建管理员 <username>」；`3` 输出「已存在管理员，未做改动」（库里已有持有 admin 角色的账号，不论启用还是停用）；`2` 参数或口令不合规，或 `KILN_API_TOKEN` / 其他配置不合格，失败说明写到标准错误并指出不合规的规则；`4` 输出「用户名已存在」（用户名已被非管理员占用）；`5` 输出「无法连接数据库。请确认 PostgreSQL 已启动，并且 DATABASE_URL 正确」。同时执行两次引导时，迁移或角色目录的竞争会重试；落败的一次退出码 3，不会打印堆栈。重试仍失败时退出码 1，标准错误只说明请重试。任何输出和日志都不包含口令或令牌。
 
 机器令牌调用 `POST /api/v1/accounts` 并带 `role_ids: ["admin"]` 的路径仍然可用。库里只剩已停用的管理员时，引导命令仍退出 3，此时用机器令牌 `PATCH` 重新启用（S2b 之后）或 `POST /accounts` 新建管理员。

@@ -119,7 +119,8 @@ def test_bootstrap_admin_creates_then_refuses(
     again = main(["bootstrap-admin", "--username", "ada_other", "--display-name", "Other"])
     again_out = capsys.readouterr()
     assert again == 3
-    assert again_out.out.strip() == "已存在管理员，未做改动"
+    assert again_out.err.strip() == "已存在管理员，未做改动"
+    assert again_out.out.strip() == ""
     assert _account_count(client.app.state.engine) == 1
     assert PASSWORD not in again_out.out
     assert PASSWORD not in again_out.err
@@ -151,7 +152,8 @@ def test_bootstrap_refuses_a_disabled_admin(
     code = main(["bootstrap-admin", "--username", "ada_second", "--display-name", "Second"])
     captured = capsys.readouterr()
     assert code == 3
-    assert captured.out.strip() == "已存在管理员，未做改动"
+    assert captured.err.strip() == "已存在管理员，未做改动"
+    assert captured.out.strip() == ""
     assert _account_count(client.app.state.engine) == 1
     assert PASSWORD not in captured.out + captured.err
 
@@ -189,7 +191,8 @@ def test_bootstrap_rejects_a_taken_non_admin_username(
     code = main(["bootstrap-admin", "--username", "ada_reader", "--display-name", "Reader"])
     captured = capsys.readouterr()
     assert code == 4
-    assert captured.out.strip() == "用户名已存在"
+    assert captured.err.strip() == "用户名已存在"
+    assert captured.out.strip() == ""
     assert _account_count(client.app.state.engine) == 1
     assert PASSWORD not in captured.out + captured.err
 

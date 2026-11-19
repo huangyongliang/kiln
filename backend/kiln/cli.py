@@ -104,11 +104,11 @@ def main(argv: list[str] | None = None) -> int:
         try:
             account = store.bootstrap_admin(payload)
         except AdminAlreadyPresent:
-            print("已存在管理员，未做改动")
+            print("已存在管理员，未做改动", file=sys.stderr)
             return 3
         except Conflict as exc:
             if exc.detail == "用户名已存在":
-                print("用户名已存在")
+                print("用户名已存在", file=sys.stderr)
                 return 4
             raise
         except BadRequest:
