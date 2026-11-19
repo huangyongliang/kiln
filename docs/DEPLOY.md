@@ -2,7 +2,7 @@
 
 本文说明如何在一台新机器上启动当前仓库里的一期骨架。范围只包括把已有进程跑起来并核对它们。平台不负责把制品发布到运行环境。架构取舍以 [README](../README.md) 所链的架构方案为准。仓库没有写出的地址、口令、主机名和任务名，本文留空。
 
-当前版本号是 `0.1.0`（`backend/kiln/__init__.py` 的 `__version__`）。`GET /health` 返回的 `version` 与它一致。
+当前版本号是 `0.1.0`（`backend/kiln/__init__.py` 的 `__version__`）。`GET /health` 返回的 `version` 与它一致。`GET /ready` 成功时的 `version` 也与它一致。
 
 ## 依赖系统
 
@@ -170,33 +170,37 @@ docker compose ps
 
 ```bash
 curl -fsS http://127.0.0.1:8000/health
+curl -fsS http://127.0.0.1:8000/ready
 curl -fsS http://127.0.0.1:8000/
 curl -fsS http://127.0.0.1:8000/api/v1/llm/provider \
   -H "Authorization: Bearer $KILN_API_TOKEN"
 ```
 
-`/health` 和 `/` 不需要令牌。`/api/v1/llm/provider` 需要。未带令牌时返回 401，正文是 `需要访问令牌`。
+`/health`、`/ready` 和 `/` 不需要令牌。`/api/v1/llm/provider` 需要。未带令牌时返回 401，正文是 `需要访问令牌`。
 
-`/health` 的正文是：
+`/health` 与 `/ready` 成功时的正文相同：
 
 ```json
 {"status":"ok","service":"kiln","version":"0.1.0"}
 ```
 
-`/` 返回 `service`、`health`（`/health`）和 `docs`（`/docs`）。默认模型状态是 `provider` 为 `off`，`base_url` 和 `default_model` 为 null，`models` 为空列表，两个 `*_configured` 字段为 false。
+`/` 返回 `service`、`health`（`/health`）、`ready`（`/ready`）和 `docs`（`/docs`）。默认模型状态是 `provider` 为 `off`，`base_url` 和 `default_model` 为 null，`models` 为空列表，两个 `*_configured` 字段为 false。
 
-`/health` 不查询 Postgres，也不访问模型端点。返回 `ok` 只说明 API 进程在应答。进程能启动，表示启动当时的迁移已经完成；之后数据库断开时，`/health` 仍可能返回 `ok`。
+`/health` 不查询 Postgres，也不访问模型端点。返回 `ok` 只说明 API 进程在应答。进程能启动，表示启动当时的迁移已经完成；之后数据库断开时，`/health` 仍可能返回 `ok`。compose 的 API 健康检查继续打 `http://127.0.0.1:8000/health`。`docker compose ps` 里的 healthy 只说明进程在应答。
 
-接口说明在 <http://127.0.0.1:8000/docs>。控制台的 nginx 只反代 `/api/` 和 `/health`，不反代 `/docs`。
+`/ready` 用现有引擎执行 `SELECT 1`，语句超时固定 2 秒。库可用时返回上面的正文。连不上、查询失败或超时时返回 503，正文恰好是 `{"detail":"数据库不可用"}`。响应和日志都不写连接串、口令或异常细节。它不检查 alembic 头，也不访问模型端点，不因 `LLM_PROVIDER=off` 或 Jenkins、代码源、Nexus 未配置而失败。这些依赖未配置时各自的 503 正文不同，不要和「数据库不可用」混在一起。
+
+接口说明在 <http://127.0.0.1:8000/docs>。控制台的 nginx 反代 `/api/`、`/health` 和 `/ready`，不反代 `/docs`。`/health`、`/ready` 与 `/docs` 都不接受写入。
 
 ### 控制台
 
 ```bash
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/
 curl -fsS http://127.0.0.1:8080/health
+curl -fsS http://127.0.0.1:8080/ready
 ```
 
-浏览器打开 <http://127.0.0.1:8080>。概览页读取 `/health`。页面有概览、构建、制品、Skill、账号与权限、对话。`console/nginx.conf` 把 `/api/` 和 `/health` 转到 compose 网络里的 `api:8000`，并把客户端请求体限制为 `1m`。直接访问宿主机 `8000` 不经过这道限制。控制台可新建账号、起草与审核 skill、发起构建、登记与上传制品（单次 ≤1 MB）、预约下载。
+浏览器打开 <http://127.0.0.1:8080>。概览页读取 `/health`。顶栏 `.topbar-right` 仍读取 `/health`，不改读 `/ready`。页面有概览、构建、制品、Skill、账号与权限、对话。`console/nginx.conf` 把 `/api/`、`/health` 和 `/ready` 转到 compose 网络里的 `api:8000`，并把客户端请求体限制为 `1m`。直接访问宿主机 `8000` 不经过这道限制。控制台可新建账号、起草与审核 skill、发起构建、登记与上传制品（单次 ≤1 MB）、预约下载。
 
 ### Postgres
 
@@ -207,6 +211,8 @@ docker exec kiln-postgres pg_isready -U kiln -d kiln
 若改过 `.env` 的 `POSTGRES_USER` 或 `POSTGRES_DB`，这里换成相同的值。成功时输出中含有 `accepting connections`。
 
 这只说明数据库容器在接受连接。API 使用这条连接保存领域数据。制品字节在命名卷 `kiln-artifact-data` 里。重启 API 容器后，账号、制品元数据、预约、skill 和已保存的字节都还在；`docker compose down -v` 会连这些数据卷一起删除。
+
+只备份数据库或只备份制品卷都不完整：账号、制品元数据、预约、skill 和会话在服务 `postgres` 的库里，字节在 `kiln-artifact-data`。`.env` 与令牌不在这两个卷里，要另行保管。`down -v` 会删掉尚未备份的数据。步骤见「备份与恢复」。
 
 可以这样核对重启后记录还在。下面的用户名须匹配 `^[a-z][a-z0-9_-]{2,31}$`。
 
@@ -269,7 +275,7 @@ python -m pip install -e "./backend[dev]"
 kiln-admin bootstrap-admin --username ada --display-name Ada
 ```
 
-可以加 `--email`。退出码：`0` 输出「已创建管理员 <username>」；`3` 输出「已存在管理员，未做改动」（库里已有持有 admin 角色的账号，不论启用还是停用）；`2` 参数或口令不合规，或 `KILN_API_TOKEN` / 其他配置不合格，失败说明写到标准错误并指出不合规的规则；`4` 输出「用户名已存在」（用户名已被非管理员占用）；`5` 输出「无法连接数据库。请确认 PostgreSQL 已启动，并且 DATABASE_URL 正确」。同时执行两次引导时，迁移或角色目录的竞争会重试；落败的一次退出码 3，不会打印堆栈。重试仍失败时退出码 1，标准错误只说明请重试。任何输出和日志都不包含口令或令牌。
+可以加 `--email`。退出码：`0` 写到标准输出「已创建管理员 <username>」；`3` 写到标准错误「已存在管理员，未做改动」（库里已有持有 admin 角色的账号，不论启用还是停用）；`2` 参数或口令不合规，或 `KILN_API_TOKEN` / 其他配置不合格，失败说明写到标准错误并指出不合规的规则；`4` 写到标准错误「用户名已存在」（用户名已被非管理员占用）；`5` 写到标准错误「无法连接数据库。请确认 PostgreSQL 已启动，并且 DATABASE_URL 正确」。同时执行两次引导时，迁移或角色目录的竞争会重试；落败的一次退出码 3，不会打印堆栈。重试仍失败时退出码 1，标准错误只说明请重试。任何输出和日志都不包含口令或令牌。
 
 机器令牌调用 `POST /api/v1/accounts` 并带 `role_ids: ["admin"]` 的路径仍然可用。库里只剩已停用的管理员时，引导命令仍退出 3，此时用机器令牌 `PATCH` 重新启用（S2b 之后）或 `POST /accounts` 新建管理员。
 
@@ -431,13 +437,83 @@ npm run dev
 - API：<http://127.0.0.1:8000/health>，说明页 <http://127.0.0.1:8000/docs>
 - 控制台：<http://127.0.0.1:5173>
 
-`console/vite.config.js` 把开发服务器绑在 `127.0.0.1:5173`，并把 `/api` 与 `/health` 代理到 `http://127.0.0.1:8000`。配置从进程环境变量和当前工作目录的 `.env` 读取，因此这条 uvicorn 命令需要在仓库根目录执行，才能读到根目录的 `.env`。
+`console/vite.config.js` 把开发服务器绑在 `127.0.0.1:5173`，并把 `/api`、`/health` 与 `/ready` 代理到 `http://127.0.0.1:8000`。配置从进程环境变量和当前工作目录的 `.env` 读取，因此这条 uvicorn 命令需要在仓库根目录执行，才能读到根目录的 `.env`。
 
 镜像构建和 CI 使用 `npm ci`。上面的 `npm install` 是 README 中的本机开发命令。
 
+## 备份与恢复
+
+这是实验室和 compose 的操作说明，不是新产品，也没有定时备份进程。执行的人需要 Docker 权限，能对当前 compose 项目执行 `docker compose exec` 和卷操作。转储和制品包写到宿主机上事先准备好的可写目录，不要写进容器可写层，也不要写进仓库树。示例只使用变量名，不写入真实口令、令牌或地址。
+
+平台数据有两块，缺一不可：
+
+- 库：服务 `postgres`，镜像 `postgres:16-alpine`，容器 `kiln-postgres`，卷键名 `kiln-postgres-data`。账号、RBAC、制品元数据、预约、skill、会话和迁移记录都在这里。项目名是 `kiln` 时，宿主机上的完整卷名通常是 `kiln_kiln-postgres-data`。
+- 字节：命名卷 `kiln-artifact-data`，容器内路径是 `/var/lib/kiln/artifacts`。项目名是 `kiln` 时，完整卷名通常是 `kiln_kiln-artifact-data`。先用 `docker volume ls` 核对，不要把这个通常名当成唯一名字。
+
+只备份库或只备份卷都不完整。`docker compose down -v` 会删掉尚未备份的 Postgres 数据目录和制品字节。`.env`、`KILN_API_TOKEN`、用户信息同步的客户端密钥和 Jenkins 令牌不在这两个卷里，必须另行保管，不要打进转储或制品包，也不要写进仓库。数据库转储含账号和口令哈希，转储文件本身要限制读取权限。
+
+先在宿主机准备目录，并让 `POSTGRES_USER`、`POSTGRES_DB` 与 `.env` 一致。未改过 compose 默认时，两者都是 `kiln`。不要在命令里写 `POSTGRES_PASSWORD`。
+
+```bash
+BACKUP_DIR="${BACKUP_DIR:-$HOME/kiln-backups}"
+mkdir -p "$BACKUP_DIR"
+chmod 700 "$BACKUP_DIR"
+export POSTGRES_USER="${POSTGRES_USER:-kiln}"
+export POSTGRES_DB="${POSTGRES_DB:-kiln}"
+docker compose exec -T postgres pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc \
+  > "$BACKUP_DIR/kiln.dump"
+```
+
+`pg_dump -Fc` 在运行中的库上执行，使用镜像里的 `pg_dump`。用户和库名与 `.env` / compose 默认 `kiln` 一致。
+
+制品卷先核对完整名称再打包。下面的 `KILN_ARTIFACT_VOLUME` 换成 `docker volume ls` 看到的名字：
+
+```bash
+docker volume ls
+export KILN_ARTIFACT_VOLUME="${KILN_ARTIFACT_VOLUME:?用 docker volume ls 核对制品卷的完整名称}"
+docker run --rm \
+  -v "$KILN_ARTIFACT_VOLUME:/var/lib/kiln/artifacts:ro" \
+  -v "$BACKUP_DIR:/backup" \
+  postgres:16-alpine \
+  tar -czf /backup/kiln-artifacts.tgz -C /var/lib/kiln/artifacts .
+```
+
+恢复时先停 API。把转储恢复到空库或重建后的库，再把制品包解回 `/var/lib/kiln/artifacts`，然后启动 API，让 lifespan 跑迁移。转储里若已有当前 `alembic_version`，迁移应为空操作。恢复使用同一镜像里的 `pg_restore`。
+
+```bash
+docker compose stop api
+docker compose exec -T postgres dropdb -U "$POSTGRES_USER" --if-exists --force "$POSTGRES_DB"
+docker compose exec -T postgres createdb -U "$POSTGRES_USER" -O "$POSTGRES_USER" "$POSTGRES_DB"
+docker compose exec -T postgres pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-owner --exit-on-error \
+  < "$BACKUP_DIR/kiln.dump"
+```
+
+若改用重建后的数据卷，Postgres 镜像会按 `POSTGRES_DB` 建出空库，此时跳过 `dropdb` / `createdb`，直接 `pg_restore` 进该空库。然后恢复制品字节到同一容器内路径：
+
+```bash
+docker run --rm \
+  -v "$KILN_ARTIFACT_VOLUME:/var/lib/kiln/artifacts" \
+  -v "$BACKUP_DIR:/backup:ro" \
+  postgres:16-alpine \
+  sh -c 'find /var/lib/kiln/artifacts -mindepth 1 -delete && tar -xzf /backup/kiln-artifacts.tgz -C /var/lib/kiln/artifacts && chown -R 10001:10001 /var/lib/kiln/artifacts'
+docker compose start api
+```
+
+API 进程以 uid `10001` 读取制品。入口只把 `/var/lib/kiln/artifacts` 目录本身交给该用户，不递归改文件，所以上面的解包命令把文件属主改回 `10001`。
+
+不把「停掉 Postgres 后复制数据目录」当作主路径。卷 `kiln-postgres-data` 在容器内挂在 `/var/lib/postgresql/data`。跨小版本，或库没有完全停止时，直接复制该目录都不安全。
+
+profile `lab` 的 Jenkins 卷 `kiln-jenkins-home` 和 Gitea 卷 `kiln-gitea-data` 可以另行保留，不属于平台恢复的必要步骤。
+
+恢复演练写在这里，CI 不启动 compose 栈。做完恢复并启动 API 之后：
+
+1. `curl -fsS http://127.0.0.1:8000/ready` 返回 200，正文里 `status` 为 `ok`。
+2. 用备份前已经存在的账号登录。
+3. 取回备份前已保存的制品字节。
+
 ## 停止
 
-停掉包含 lab 在内的容器，并删除本次创建的网络 `kiln-net`。命名卷默认保留：
+停掉包含 lab 在内的容器，并删除本次创建的网络 `kiln-net`。命名卷默认保留。还没做「备份与恢复」时，不要加 `-v`。
 
 ```bash
 docker compose --profile lab down
@@ -449,7 +525,7 @@ docker compose --profile lab down
 docker compose --profile lab down -v
 ```
 
-只停容器或只重建 API 时，Postgres 卷里的账号、制品元数据、预约和 skill 还在，制品字节卷里的文件也还在。加上 `-v` 才会删掉这些数据。
+只停容器或只重建 API 时，Postgres 卷里的账号、制品元数据、预约和 skill 还在，制品字节卷里的文件也还在。加上 `-v` 才会删掉这些数据。`down -v` 会删掉尚未备份的库和制品字节；要留下它们，先按「备份与恢复」做 `pg_dump` 和制品卷打包。`.env` 与令牌仍须另行保管。
 
 ## 常见失败
 
@@ -462,7 +538,7 @@ docker compose --profile lab down -v
 - **`openai` 缺少根路径。** `LLM_PROVIDER=openai` 且 `LLM_BASE_URL` 为空时，API 进程在启动阶段抛出配置错误，健康检查不会变为 healthy。把提供方改回 `off` 或 `mock`，或填上从该容器能访问的根路径。
 - **容器内的 `127.0.0.1`。** 见上文模型一节。宿主机上的模型端点不会因为写了回环地址就被容器访问到。
 - **控制台短暂不可用。** `kiln-console` 不等待 API 健康。nginx 反代的上游是 Docker DNS 名 `api`。API 尚未监听时，`http://127.0.0.1:8080/health` 会失败；直接看 `8000`，或等 `docker compose ps` 里的 API 变为 healthy。
-- **把 `/health` 当成全量依赖检查。** 返回 `ok` 只表示 API 进程在应答。它不重新探测 Postgres，也不代表模型端点可达。进程若从未变成 healthy，先看启动日志里的迁移或连接错误。
+- **把 `/health` 当成全量依赖检查。** `/health` 返回 `ok` 只表示 API 进程在应答。它不查询 Postgres，数据库断开时仍可能返回 `ok`，也不代表模型端点可达。要看现在能否连上库，用 `GET /ready`：成功时正文与 `/health` 相同；失败时 503，正文是「数据库不可用」。`/ready` 不检查模型、Jenkins、Nexus 或代码源。compose 健康检查仍打 `/health`，`docker compose ps` 里的 healthy 只说明进程在应答。进程若从未变成 healthy，先看启动日志里的迁移或连接错误。
 - **数据库未就绪或迁移失败。** API 启动时执行迁移。Postgres 未接受连接、口令不对或库不存在时，进程退出，健康检查不会变为 healthy。看 `docker compose logs api`。
 - **重启 API 后数据还在，删卷后才消失。** 账号、制品元数据、预约和 skill 在 Postgres 卷里。制品字节在 `kiln-artifact-data`。`docker compose restart api` 不会清掉它们。`docker compose down -v` 会。
 - **改了源码但容器行为不变。** 运行中的镜像在构建时复制代码。`backend/Dockerfile` 复制 `pyproject.toml` 和 `kiln/`，`console/Dockerfile` 复制控制台源码后执行 `npm run build`。需要 `docker compose up --build`。

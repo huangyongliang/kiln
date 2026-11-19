@@ -71,10 +71,11 @@ npm run dev
 ```
 
 - 健康检查：<http://127.0.0.1:8000/health>
+- 就绪检查：<http://127.0.0.1:8000/ready>
 - API 说明：<http://127.0.0.1:8000/docs>
 - 控制台：<http://127.0.0.1:5173>
 
-`/health` 本身不查询数据库，也不访问模型端点。进程若能完成启动，说明当时的迁移已经跑过。默认 `LLM_PROVIDER=off`。
+`/health` 本身不查询数据库，也不访问模型端点。进程若能完成启动，说明当时的迁移已经跑过。默认 `LLM_PROVIDER=off`。`/ready` 对数据库执行 `SELECT 1`（语句超时 2 秒）。库可用时返回与 `/health` 相同的正文；库不可用时返回 503，正文是「数据库不可用」。`/ready` 不访问模型端点，也不因 `LLM_PROVIDER=off`、Jenkins、代码源或 Nexus 未配置而失败。数据库和制品卷的备份与恢复见 [部署说明的备份与恢复](docs/DEPLOY.md#备份与恢复)。只备份其中一份都不完整，`.env` 与令牌要另行保管，`down -v` 会删掉尚未备份的数据。
 
 ### Docker Compose
 
@@ -84,7 +85,7 @@ npm run dev
 docker compose up --build
 ```
 
-- API：<http://127.0.0.1:8000/health>
+- API：<http://127.0.0.1:8000/health>，就绪检查 <http://127.0.0.1:8000/ready>
 - 控制台：<http://127.0.0.1:8080>
 - Postgres：`localhost:5432`，库名 `kiln`
 
@@ -150,7 +151,7 @@ docker compose --profile lab up
 
 ## API 大纲
 
-前缀 `/api/v1`。账号、RBAC 目录、制品、版本、下载预约、skill 和用户会话保存在 PostgreSQL，API 进程重启后仍然在。登录、退出、用户信息同步的开始与回调，以及「是否已配置」探测不需要事先持有令牌。其余路由接受会话 cookie、登录返回的 Bearer 令牌，或机器令牌 `KILN_API_TOKEN`。没有这些凭证时返回 401，不会改库。`/health` 和 `/docs` 不需要令牌；说明页本身不能绕过这道门去写入。已登录用户的写入会按现有权限目录校验。`POST /jobs` 需要 `executor.run`。`POST /builds` 需要 `executor.run` 与 `skill.use`。`POST /llm/chat` 需要 `agent.qa`。只读角色不能调用这三处写入。读取账号、制品和 skill 分别需要 `account.read`、`artifact.read` 和 `skill.read`。读取执行器状态、依赖代理、任务、产品构建及其日志需要 `executor.read`。读取代码源适配器、仓库列表并解析引用需要 `git.read`。只读角色可以查看账号、skill 与制品，不能查看任务、构建或代码源清单。`GET /llm/provider`、`GET /rbac/roles` 和 `GET /rbac/permissions` 仍只需会话或机器令牌。取包元数据 `GET /retrieve/{id}` 与取包字节都需要 `artifact.download`。权限不足时返回 403，正文是「没有权限」，并且先于未配置检查。`GET` / `PUT /llm/catalog` 缺少 `llm.manage` 时，detail 写明 `llm.manage`。机器令牌拥有目录中的全部权限。
+前缀 `/api/v1`。账号、RBAC 目录、制品、版本、下载预约、skill 和用户会话保存在 PostgreSQL，API 进程重启后仍然在。登录、退出、用户信息同步的开始与回调，以及「是否已配置」探测不需要事先持有令牌。其余路由接受会话 cookie、登录返回的 Bearer 令牌，或机器令牌 `KILN_API_TOKEN`。没有这些凭证时返回 401，不会改库。`/health`、`/ready` 和 `/docs` 不需要令牌，也不接受写入。`/health` 只说明进程在应答；`/ready` 只查询数据库。说明页本身不能绕过这道门去写入。已登录用户的写入会按现有权限目录校验。`POST /jobs` 需要 `executor.run`。`POST /builds` 需要 `executor.run` 与 `skill.use`。`POST /llm/chat` 需要 `agent.qa`。只读角色不能调用这三处写入。读取账号、制品和 skill 分别需要 `account.read`、`artifact.read` 和 `skill.read`。读取执行器状态、依赖代理、任务、产品构建及其日志需要 `executor.read`。读取代码源适配器、仓库列表并解析引用需要 `git.read`。只读角色可以查看账号、skill 与制品，不能查看任务、构建或代码源清单。`GET /llm/provider`、`GET /rbac/roles` 和 `GET /rbac/permissions` 仍只需会话或机器令牌。取包元数据 `GET /retrieve/{id}` 与取包字节都需要 `artifact.download`。权限不足时返回 403，正文是「没有权限」，并且先于未配置检查。`GET` / `PUT /llm/catalog` 缺少 `llm.manage` 时，detail 写明 `llm.manage`。机器令牌拥有目录中的全部权限。
 
 - 登录：`POST /auth/login` 校验本地口令，写入会话哈希，设置 httpOnly cookie，并返回 Bearer 令牌。`POST /auth/logout` 撤销会话。口令只以哈希保存，响应里不出现口令
 - 用户信息同步：`GET /auth/sync` 说明是否已配置。未配置时 `GET /auth/oidc/start` 与 `GET /auth/oidc/callback` 返回「用户信息同步未配置」。配置后使用授权码和 PKCE，按发行方与 subject 找到或创建 kiln 账号。新账号的默认角色是 `reader`，不设置口令，也不复制公司侧的组或角色。在职状态未通过或账号已停用时不建立会话
