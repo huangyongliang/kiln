@@ -13,7 +13,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from kiln.domain.artifacts import VERSION_PATTERN, PackageType
+from kiln.domain.artifacts import VERSION_PATTERN
 from kiln.domain.jobs import JobStatus
 from kiln.errors import BadRequest
 from kiln.git.refs import parse_repository
@@ -29,7 +29,7 @@ class ProductBuildCreate(BaseModel):
     ref: str = Field(min_length=1, max_length=255)
     artifact_name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{1,127}$")
     version: str = Field(pattern=VERSION_PATTERN)
-    package_type: PackageType
+    package_type: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
     name: str = Field(default="", pattern=r"^$|^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
@@ -48,7 +48,8 @@ class ProductBuild(BaseModel):
     build_number: int | None
     artifact_id: UUID
     version: str
-    package_type: PackageType
+    package_type: str
+    package_type_label: str
     content_available: bool
     content_conflict: ContentConflict | None = None
     created_at: datetime

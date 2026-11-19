@@ -25,6 +25,7 @@ from kiln.domain.builds import (
     repository_in_skill_scope,
 )
 from kiln.domain.jobs import TERMINAL_STATUSES, JobStatus
+from kiln.domain.package_types import TYPE_MISMATCH, node_probe_failed, node_unavailable
 from kiln.domain.skills import SkillStatus
 from kiln.errors import Conflict, NotFound, Unprocessable, UpstreamFailure
 from kiln.executor.jenkins import JenkinsClient
@@ -57,6 +58,17 @@ def create_product_build(
         raise Conflict("只有已发布的 Skill 可以发起构建")
     if not repository_in_skill_scope(payload.repository, skill.allowed_repositories):
         raise Unprocessable("仓库不在该 Skill 的允许范围内")
+    if payload.package_type != skill.build_package_type:
+        raise Unprocessable(TYPE_MISMATCH)
+    package_type = catalog.get_build_package_type(skill.build_package_type)
+    node = package_type.jenkins_label
+    if node:
+        try:
+            online = jenkins.has_online_node(node)
+        except (UpstreamFailure, NotFound) as exc:
+            raise Unprocessable(node_probe_failed(package_type.label, node)) from exc
+        if not online:
+            raise Unprocessable(node_unavailable(package_type.label, node))
     resolved = source.resolve_ref(owner, name, ref)
     if _SHA.fullmatch(resolved.sha) is None:
         raise UpstreamFailure("代码源返回的提交号无效")
@@ -83,7 +95,7 @@ def create_product_build(
         ref=ref,
         commit_sha=sha,
         version=payload.version,
-        package_type=payload.package_type.value,
+        package_type=payload.package_type,
         skill_id=skill.id,
         requested_by=requested_by,
     )
@@ -96,6 +108,7 @@ def create_product_build(
             git_user=username,
             git_token=settings.git_token_value(),
             declare_nexus_parameters=settings.nexus_configured,
+            assigned_node=node,
         )
         queue_url = jenkins.trigger_build(
             jenkins_job_name,

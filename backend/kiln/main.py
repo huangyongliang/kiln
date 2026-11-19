@@ -19,6 +19,7 @@ from kiln.api import (
     accounts,
     artifacts,
     auth,
+    build_package_types,
     builds,
     dependency_proxy,
     git,
@@ -266,6 +267,7 @@ def create_app(
     app.include_router(jobs.router, prefix=API_PREFIX)
     app.include_router(dependency_proxy.router, prefix=API_PREFIX)
     app.include_router(builds.router, prefix=API_PREFIX)
+    app.include_router(build_package_types.router, prefix=API_PREFIX)
     app.include_router(git.router, prefix=API_PREFIX)
     return app
 

@@ -14,8 +14,7 @@ from sqlalchemy.orm import Session
 
 from kiln import clock
 from kiln.db.models import ArtifactRow, ArtifactVersionRow, ProductBuildRow, SkillRow
-from kiln.db.store import _commit_unique
-from kiln.domain.artifacts import PackageType
+from kiln.db.store import _commit_unique, package_type_labels
 from kiln.domain.builds import ContentConflict, ProductBuild
 from kiln.domain.jobs import JobStatus
 from kiln.errors import Conflict, NotFound
@@ -34,6 +33,7 @@ class StoredBuild:
         artifact_id: UUID,
         version: str,
         package_type: str,
+        package_type_label: str,
         queue_url: str | None,
         build_number: int | None,
         status: JobStatus,
@@ -53,6 +53,7 @@ class StoredBuild:
         self.artifact_id = artifact_id
         self.version = version
         self.package_type = package_type
+        self.package_type_label = package_type_label
         self.queue_url = queue_url
         self.build_number = build_number
         self.status = status
@@ -82,7 +83,8 @@ class StoredBuild:
             build_number=self.build_number,
             artifact_id=self.artifact_id,
             version=self.version,
-            package_type=PackageType(self.package_type),
+            package_type=self.package_type,
+            package_type_label=self.package_type_label,
             content_available=content_available,
             content_conflict=content_conflict,
             created_at=self.created_at,
@@ -109,14 +111,15 @@ class BuildStore:
             rows = session.scalars(
                 select(ProductBuildRow).order_by(ProductBuildRow.created_at, ProductBuildRow.id)
             ).all()
-            return [_stored(session, row) for row in rows]
+            labels = package_type_labels(session)
+            return [_stored(session, row, labels) for row in rows]
 
     def get_build(self, build_id: UUID) -> StoredBuild:
         with self._session() as session:
             row = session.get(ProductBuildRow, build_id)
             if row is None:
                 raise NotFound("构建不存在")
-            return _stored(session, row)
+            return _stored(session, row, package_type_labels(session))
 
     def create_build(
         self,
@@ -344,7 +347,13 @@ def _skill_name(session: Session, skill_id: UUID | None) -> str | None:
     return session.scalar(select(SkillRow.name).where(SkillRow.id == skill_id))
 
 
-def _stored(session: Session, row: ProductBuildRow) -> StoredBuild:
+def _stored(
+    session: Session,
+    row: ProductBuildRow,
+    labels: dict[str, str] | None = None,
+) -> StoredBuild:
+    if labels is None:
+        labels = package_type_labels(session)
     return StoredBuild(
         id=row.id,
         name=row.name,
@@ -355,6 +364,7 @@ def _stored(session: Session, row: ProductBuildRow) -> StoredBuild:
         artifact_id=row.artifact_id,
         version=row.version,
         package_type=row.package_type,
+        package_type_label=labels.get(row.package_type, row.package_type),
         queue_url=row.queue_url,
         build_number=row.build_number,
         status=JobStatus(row.status),

@@ -9,6 +9,7 @@ import re
 from urllib.parse import quote, urlsplit, urlunsplit
 from xml.sax.saxutils import escape
 
+from kiln.domain.package_types import require_jenkins_label
 from kiln.errors import BadRequest
 from kiln.git.refs import parse_ref
 
@@ -150,16 +151,35 @@ def product_build_command(
     )
 
 
-def product_job_config(command: str, *, nexus_parameters: bool = False) -> str:
-    """Freestyle job XML. Unset Nexus leaves this byte-identical to the original.
+def product_job_config(
+    command: str,
+    *,
+    nexus_parameters: bool = False,
+    assigned_node: str | None = None,
+) -> str:
+    """Freestyle job XML. Unset Nexus and no node leave this byte-identical.
 
     When ``nexus_parameters`` is true the job declares four core parameters with
     empty defaults. The password value is not an argument of this function.
+    An empty ``assigned_node`` keeps ``<canRoam>true</canRoam>`` and omits
+    ``assignedNode``. A label or node name sets ``canRoam`` false and writes
+    one XML-escaped ``assignedNode``.
     """
 
     escaped = escape(command)
     archived = escape(WORKSPACE_ARTIFACT)
     properties = _NEXUS_PROPERTIES if nexus_parameters else "  <properties/>\n"
+    if assigned_node:
+        try:
+            node = require_jenkins_label(assigned_node)
+        except ValueError as exc:
+            raise BadRequest(str(exc)) from exc
+        placement = (
+            "  <canRoam>false</canRoam>\n"
+            f"  <assignedNode>{escape(node)}</assignedNode>\n"
+        )
+    else:
+        placement = "  <canRoam>true</canRoam>\n"
     return (
         "<?xml version='1.1' encoding='UTF-8'?>\n"
         "<project>\n"
@@ -167,7 +187,7 @@ def product_job_config(command: str, *, nexus_parameters: bool = False) -> str:
         "  <keepDependencies>false</keepDependencies>\n"
         f"{properties}"
         '  <scm class="hudson.scm.NullSCM"/>\n'
-        "  <canRoam>true</canRoam>\n"
+        f"{placement}"
         "  <disabled>false</disabled>\n"
         "  <blockBuildWhenDownstreamBuilding>false</blockBuildWhenDownstreamBuilding>\n"
         "  <blockBuildWhenUpstreamBuilding>false</blockBuildWhenUpstreamBuilding>\n"

@@ -6,6 +6,7 @@ import { getJson } from "../api";
 import {
   boundError,
   inputNameError,
+  runtimeSummary,
   scopeList,
   scopeListError,
   skillNameError,
@@ -49,6 +50,8 @@ const props = defineProps({
 const emit = defineEmits(["submit", "cancel"]);
 
 const errors = reactive({});
+const packageTypes = ref([]);
+const packageTypeNote = ref("");
 const repoMode = ref("loading");
 const repoNotice = ref("");
 const repoCatalog = ref([]);
@@ -56,12 +59,16 @@ const keptRepos = ref([]);
 const selectedRepos = ref([]);
 const repoManual = ref("");
 const repoChoices = computed(() => repositoryChecklist(repoCatalog.value, keptRepos.value));
+const selectedPackageType = computed(
+  () => packageTypes.value.find((item) => item.code === form.build_package_type) || null,
+);
 const form = reactive({
   name: "",
   version: "0.1.0",
   description: "",
   toolchain: "",
   environment: "",
+  build_package_type: "generic",
   output_spec: "",
   allowed_repositories: "",
   allowed_dependencies: "",
@@ -84,8 +91,42 @@ watch(() => props.initial, applyInitial, { immediate: true });
 watch(accessReady, (ready) => {
   if (ready) {
     loadRepositoryChoices();
+    loadPackageTypes();
   }
 }, { immediate: true });
+
+async function loadPackageTypes() {
+  if (!accessReady.value) {
+    return;
+  }
+  packageTypeNote.value = "";
+  try {
+    const body = await getJson("/api/v1/build-package-types");
+    packageTypes.value = Array.isArray(body?.items) ? body.items : [];
+    applyPackageType(props.initial);
+  } catch {
+    packageTypes.value = [];
+    packageTypeNote.value = "无法读取构建类型";
+  }
+}
+
+function applyPackageType(skill) {
+  const code = typeof skill?.build_package_type === "string" ? skill.build_package_type : "";
+  if (!packageTypes.value.length) {
+    form.build_package_type = code || "generic";
+    return;
+  }
+  if (code && packageTypes.value.some((item) => item.code === code)) {
+    form.build_package_type = code;
+    return;
+  }
+  if (!skill) {
+    const generic = packageTypes.value.find((item) => item.code === "generic");
+    form.build_package_type = generic?.code || "";
+    return;
+  }
+  form.build_package_type = "";
+}
 
 async function loadRepositoryChoices() {
   if (!accessReady.value) {
@@ -144,6 +185,7 @@ function applyInitial(skill) {
   form.description = skill?.description || "";
   form.toolchain = skill?.toolchain || "";
   form.environment = skill?.environment || "";
+  applyPackageType(skill);
   form.output_spec = skill?.output_spec || "";
   const repositories = (skill?.allowed_repositories || [])
     .map((item) => String(item ?? "").trim())
@@ -211,6 +253,9 @@ function validate() {
   if (repoMessage) errors.allowed_repositories = repoMessage;
   const dependencyMessage = scopeListError(form.allowed_dependencies);
   if (dependencyMessage) errors.allowed_dependencies = dependencyMessage;
+  if (!packageTypes.value.some((item) => item.code === form.build_package_type)) {
+    errors.build_package_type = "请选择已启用的构建类型";
+  }
   inputs.value.forEach((row, index) => {
     if (!row.name.trim() && !row.description.trim()) return;
     const inputMessage = inputNameError(row.name.trim());
@@ -242,6 +287,7 @@ function submit() {
       })),
     toolchain: form.toolchain.trim() || null,
     environment: form.environment.trim() || null,
+    build_package_type: form.build_package_type,
     allowed_repositories: repositoryPayload(),
     allowed_dependencies: scopeList(form.allowed_dependencies),
     steps: steps.value.map((row) => ({ kind: row.kind, description: row.description.trim() })),
@@ -254,7 +300,25 @@ function submit() {
   <form class="panel skill-form" @submit.prevent="submit">
     <PageIntro v-if="title" :title="title" :lead="lead" />
     <p v-else-if="lead" class="hint">{{ lead }}</p>
-    <div v-for="field in scalars" :key="field[0]" class="field">
+    <template v-for="field in scalars" :key="field[0]">
+    <div v-if="field[0] === 'toolchain'" class="field">
+      <label for="skill-package-type">构建类型</label>
+      <p class="field-note">构建类型由管理员维护，这里不能新增。</p>
+      <select id="skill-package-type" v-model="form.build_package_type">
+        <option value="">选择构建类型</option>
+        <option v-for="item in packageTypes" :key="item.code" :value="item.code">{{ item.label }}</option>
+      </select>
+      <p v-if="selectedPackageType" class="field-note">
+        运行时：{{ runtimeSummary(selectedPackageType.runtime_conditions) || "无" }}
+      </p>
+      <p v-if="selectedPackageType" class="field-note">
+        Jenkins 标签：{{ selectedPackageType.jenkins_label || "无" }}
+      </p>
+      <p v-if="fieldMessage('build_package_type') || packageTypeNote" class="field-error">
+        {{ fieldMessage("build_package_type") || packageTypeNote }}
+      </p>
+    </div>
+    <div class="field">
       <template v-if="field[0] === 'allowed_repositories'">
         <fieldset class="repo-field">
           <legend>允许仓库</legend>
@@ -304,6 +368,7 @@ function submit() {
       </template>
       <p v-if="fieldMessage(field[0])" class="field-error">{{ fieldMessage(field[0]) }}</p>
     </div>
+    </template>
     <div class="field">
       <label>输入</label>
       <div v-for="(row, index) in inputs" :key="index" class="repeat-row">

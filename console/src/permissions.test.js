@@ -17,6 +17,7 @@ const ROUTES = [
   "skill-new",
   "access",
   "models",
+  "build-types",
   "chat",
 ];
 
@@ -46,6 +47,7 @@ const ACTIONS = [
   "artifact.reserve",
   "retrieve.download",
   "llm.catalog.update",
+  "build.catalog.manage",
 ];
 
 test("unknown permissions show every route and action", () => {
@@ -144,6 +146,16 @@ test("model config needs llm.manage and is not opened by account.manage", () => 
   assert.equal(canDo("llm.catalog.update", new Set(["llm.manage"])), true);
   assert.equal(canDo("llm.catalog.update", new Set(["account.manage"])), false);
   assert.equal(canDo("llm.catalog.update", new Set(["agent.qa"])), false);
+});
+
+test("build type catalog needs build.catalog.manage and is not opened by llm.manage", () => {
+  assert.equal(requiredCode("build-types"), "build.catalog.manage");
+  assert.equal(canSee("build-types", new Set(["build.catalog.manage"])), true);
+  assert.equal(canSee("build-types", new Set(["llm.manage"])), false);
+  assert.equal(canSee("build-types", new Set(["skill.read"])), false);
+  assert.equal(canSee("build-types", new Set(["skill.publish"])), false);
+  assert.equal(canDo("build.catalog.manage", new Set(["build.catalog.manage"])), true);
+  assert.equal(canDo("build.catalog.manage", new Set(["llm.manage", "skill.publish"])), false);
 });
 
 test("chat nav, route, and send need agent.qa", () => {

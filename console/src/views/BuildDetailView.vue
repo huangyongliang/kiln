@@ -169,7 +169,7 @@ async function refresh() {
           <dt>版本</dt>
           <dd class="mono">{{ build.version }}</dd>
           <dt>类型</dt>
-          <dd>{{ packageLabel(build.package_type) }}</dd>
+          <dd>{{ build.package_type_label || packageLabel(build.package_type) }}</dd>
           <dt>制品</dt>
           <dd>
             <RouterLink class="linkish" :to="{ name: 'artifact', params: { id: build.artifact_id } }">查看制品</RouterLink>

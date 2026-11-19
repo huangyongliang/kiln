@@ -10,7 +10,7 @@ import SkillDraftForm from "../components/SkillDraftForm.vue";
 import StatePanel from "../components/StatePanel.vue";
 import StatusTag from "../components/StatusTag.vue";
 import { pageCrumb } from "../crumb";
-import { codePointLength, fieldErrors, rejectReasonError } from "../forms";
+import { codePointLength, fieldErrors, rejectReasonError, runtimeSummary } from "../forms";
 import { formatTime, stepLabel } from "../format";
 import { apiPath, isUuid } from "../paths";
 import { canDo, canSee } from "../permissions";
@@ -336,6 +336,13 @@ async function submitReject() {
             <h2>范围</h2>
           </div>
           <dl class="kv">
+            <dt>构建类型</dt>
+            <dd>
+              {{ skill.build_package_type_label || "—" }}
+              <span v-if="runtimeSummary(skill.build_runtime_conditions)" class="muted">
+                · {{ runtimeSummary(skill.build_runtime_conditions) }}
+              </span>
+            </dd>
             <dt>工具链</dt>
             <dd>{{ skill.toolchain || "—" }}</dd>
             <dt>环境</dt>

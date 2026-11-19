@@ -111,6 +111,19 @@ const props = defineProps({
     <circle cx="17.5" cy="17" r="1.7" />
   </svg>
   <svg
+    v-else-if="name === 'catalog'"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.75"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    aria-hidden="true"
+  >
+    <rect x="4" y="4" width="16" height="16" rx="2" />
+    <path d="M8 9h8M8 12h8M8 15h5" />
+  </svg>
+  <svg
     v-else-if="name === 'chat'"
     viewBox="0 0 24 24"
     fill="none"

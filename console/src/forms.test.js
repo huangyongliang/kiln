@@ -17,6 +17,7 @@ import {
   branchLoadMessage,
   buildNameError,
   buildRepositoryChoices,
+  buildSubmitErrorTarget,
   catalogBranchError,
   catalogRepositoryError,
   checksumError,
@@ -30,6 +31,7 @@ import {
   inputNameError,
   packageTypeError,
   passwordError,
+  runtimeSummary,
   preferredBranch,
   refError,
   rejectReasonError,
@@ -288,8 +290,32 @@ test("optional build name, package type, and step kind", () => {
   assert.equal(buildNameError(""), "");
   assert.equal(buildNameError("nightly"), "");
   assert.equal(buildNameError("有空格"), "任务名格式不正确");
-  assert.equal(packageTypeError("maven"), "");
-  assert.equal(packageTypeError("deb"), "类型不正确");
+  const catalog = ["maven", "python", "generic", "frontend"];
+  assert.equal(packageTypeError("maven", catalog), "");
+  assert.equal(packageTypeError("deb", catalog), "类型不正确");
+  assert.equal(packageTypeError("generic", []), "类型不正确");
+  assert.equal(packageTypeError("node", [{ code: "node", label: "Node" }]), "");
+  assert.equal(runtimeSummary([]), "");
+  assert.equal(
+    runtimeSummary([
+      { tool: "jdk", version: "17" },
+      { tool: "node", version: "20" },
+    ]),
+    "JDK 17，Node 20",
+  );
+  assert.equal(buildSubmitErrorTarget("仓库不在该 Skill 的允许范围内"), "repository");
+  assert.equal(
+    buildSubmitErrorTarget("构建类型必须与该 Skill 的构建类型一致"),
+    "package_type",
+  );
+  assert.equal(
+    buildSubmitErrorTarget("没有可用的 Jenkins 节点可以运行该构建类型（类型：Node，标签：linux）"),
+    "form",
+  );
+  assert.equal(
+    buildSubmitErrorTarget("无法确认是否有 Jenkins 节点可以运行该构建类型（类型：Node，标签：linux）"),
+    "form",
+  );
   assert.equal(stepKindError("checkout"), "");
   assert.equal(stepKindError("shell"), "步骤类型不正确");
 });

@@ -313,7 +313,7 @@ def test_product_build_skill_migration_round_trip(client: TestClient) -> None:
     """skill_id appears at head and is gone at 0006_skill_rejection."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0012_account_lifecycle"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0013_build_package_types"]
     engine = client.app.state.engine
     try:
         command.downgrade(cfg, "0006_skill_rejection")
@@ -340,7 +340,7 @@ def test_skill_rejection_migration_round_trip(client: TestClient) -> None:
     """Drop the rejection columns at 0005_local_login, then restore them at head."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0012_account_lifecycle"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0013_build_package_types"]
     engine = client.app.state.engine
     try:
         command.downgrade(cfg, "0005_local_login")
@@ -355,7 +355,7 @@ def test_skill_created_by_migration_round_trip(client: TestClient) -> None:
     """created_by appears at head and is gone at 0007_product_build_skill."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0012_account_lifecycle"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0013_build_package_types"]
     engine = client.app.state.engine
     try:
         _assert_created_by_schema(engine)
@@ -383,7 +383,7 @@ def test_llm_catalog_migration_round_trip(client: TestClient) -> None:
     """Downgrade drops a saved catalog. Upgrade again is back to env behavior."""
 
     cfg = _alembic_config(postgres_url())
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0012_account_lifecycle"]
+    assert ScriptDirectory.from_config(cfg).get_heads() == ["0013_build_package_types"]
     engine = client.app.state.engine
     try:
         _assert_llm_catalog_tables(engine, present=True)
@@ -423,7 +423,7 @@ def test_actor_attribution_migration_on_empty_and_existing_databases(client: Tes
 
     cfg = _alembic_config(postgres_url())
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == ["0012_account_lifecycle"]
+    assert script.get_heads() == ["0013_build_package_types"]
     revision = script.get_revision("0010_actor_attribution")
     assert revision is not None
     assert revision.down_revision == "0009_llm_catalog"
@@ -468,7 +468,7 @@ def test_actor_index_migration_on_empty_and_populated_databases(client: TestClie
 
     cfg = _alembic_config(postgres_url())
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == ["0012_account_lifecycle"]
+    assert script.get_heads() == ["0013_build_package_types"]
     revision = script.get_revision("0011_actor_indexes")
     assert revision is not None
     assert revision.down_revision == "0010_actor_attribution"
@@ -557,7 +557,7 @@ def _assert_actor_indexes_on_empty_database() -> None:
         command.upgrade(_alembic_config(url), "head")
         _assert_actor_indexes(empty, present=True)
         assert ScriptDirectory.from_config(_alembic_config(url)).get_heads() == [
-            "0012_account_lifecycle"
+            "0013_build_package_types"
         ]
     finally:
         if empty is not None:
@@ -792,7 +792,7 @@ def _assert_actor_columns_on_empty_database() -> None:
         assert versions == 0
         upgrade_database(url)
         assert ScriptDirectory.from_config(_alembic_config(url)).get_heads() == [
-            "0012_account_lifecycle"
+            "0013_build_package_types"
         ]
     finally:
         if empty is not None:

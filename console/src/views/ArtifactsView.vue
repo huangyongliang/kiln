@@ -15,13 +15,6 @@ import { canDo, canSee } from "../permissions";
 const note =
   "平台自管目录、不可变版本和制品字节。字节保存在平台本地存储，不发布、不同步到 Nexus。版本入库后可以取回这些字节。";
 
-const PACKAGE_OPTIONS = [
-  ["maven", "Maven"],
-  ["python", "Python"],
-  ["generic", "通用包"],
-  ["frontend", "前端构建包"],
-];
-
 const router = useRouter();
 const items = ref([]);
 const mode = ref("loading");
@@ -35,7 +28,9 @@ const createError = ref("");
 const createErrors = ref({});
 const name = ref("");
 const group = ref("");
-const packageType = ref("generic");
+const packageType = ref("");
+const packageTypes = ref([]);
+const catalogError = ref("");
 const description = ref("");
 
 const types = computed(() => {
@@ -77,6 +72,7 @@ async function load() {
   try {
     const body = await getJson("/api/v1/artifacts");
     items.value = body.items || [];
+    await loadPackageTypes();
     mode.value = "ready";
   } catch (caught) {
     if (isForbidden(caught)) {
@@ -88,10 +84,28 @@ async function load() {
   }
 }
 
+async function loadPackageTypes() {
+  catalogError.value = "";
+  try {
+    const body = await getJson("/api/v1/build-package-types");
+    packageTypes.value = body.items || [];
+  } catch (caught) {
+    packageTypes.value = [];
+    catalogError.value = errorText(caught, "无法读取构建类型");
+  }
+}
+
+function defaultPackageType() {
+  if (packageTypes.value.some((item) => item.code === "generic")) {
+    return "generic";
+  }
+  return packageTypes.value[0]?.code || "";
+}
+
 function openCreate() {
   name.value = "";
   group.value = "";
-  packageType.value = "generic";
+  packageType.value = defaultPackageType();
   description.value = "";
   createError.value = "";
   createErrors.value = {};
@@ -111,7 +125,7 @@ async function submitArtifact() {
   if (groupMessage) {
     local.group = groupMessage;
   }
-  const typeMessage = packageTypeError(packageType.value);
+  const typeMessage = packageTypeError(packageType.value, packageTypes.value);
   if (typeMessage) {
     local.package_type = typeMessage;
   }
@@ -249,8 +263,10 @@ function byteStatus(artifact) {
       <div class="field">
         <label for="artifact-type">类型</label>
         <select id="artifact-type" v-model="packageType">
-          <option v-for="item in PACKAGE_OPTIONS" :key="item[0]" :value="item[0]">{{ item[1] }}</option>
+          <option value="">选择类型</option>
+          <option v-for="item in packageTypes" :key="item.code" :value="item.code">{{ item.label }}</option>
         </select>
+        <p v-if="catalogError" class="field-error">{{ catalogError }}</p>
         <p v-if="createErrors.package_type" class="field-error">{{ createErrors.package_type }}</p>
       </div>
       <div class="field">

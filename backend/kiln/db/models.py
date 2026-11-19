@@ -152,17 +152,20 @@ class ArtifactRow(Base):
             unique=True,
             postgresql_nulls_not_distinct=True,
         ),
-        CheckConstraint(
-            "package_type IN ('maven', 'python', 'generic', 'frontend')",
-            name="ck_artifacts_package_type",
-        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     group_name: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str] = mapped_column(Text, nullable=False)
-    package_type: Mapped[str] = mapped_column(Text, nullable=False)
+    package_type: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey(
+            "build_package_types.code",
+            name="fk_artifacts_package_type_build_package_types",
+        ),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     versions: Mapped[list[ArtifactVersionRow]] = relationship(
         back_populates="artifact",
@@ -228,10 +231,6 @@ class ReservationRow(Base):
             ondelete="CASCADE",
         ),
         CheckConstraint(
-            "package_type IN ('maven', 'python', 'generic', 'frontend')",
-            name="ck_download_reservations_package_type",
-        ),
-        CheckConstraint(
             "checksum_algorithm IN ('sha256', 'sha512')",
             name="ck_download_reservations_algorithm",
         ),
@@ -241,7 +240,14 @@ class ReservationRow(Base):
     artifact_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     artifact_name: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[str] = mapped_column(Text, nullable=False)
-    package_type: Mapped[str] = mapped_column(Text, nullable=False)
+    package_type: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey(
+            "build_package_types.code",
+            name="fk_download_reservations_package_type_build_package_types",
+        ),
+        nullable=False,
+    )
     checksum_algorithm: Mapped[str] = mapped_column(Text, nullable=False)
     checksum_value: Mapped[str] = mapped_column(Text, nullable=False)
     requester: Mapped[str] = mapped_column(Text, nullable=False)
@@ -281,6 +287,14 @@ class SkillRow(Base):
     toolchain: Mapped[str | None] = mapped_column(Text)
     environment: Mapped[str | None] = mapped_column(Text)
     output_spec: Mapped[str | None] = mapped_column(Text)
+    build_package_type: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey(
+            "build_package_types.code",
+            name="fk_skills_build_package_type_build_package_types",
+        ),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     review_note: Mapped[str | None] = mapped_column(Text)
@@ -321,6 +335,7 @@ class SkillRow(Base):
         order_by="SkillDependencyRow.position",
         cascade="all, delete-orphan",
     )
+    catalog_entry: Mapped[BuildPackageTypeRow] = relationship()
 
 
 class SkillInputRow(Base):
@@ -410,10 +425,6 @@ class ProductBuildRow(Base):
             "build_number IS NULL OR build_number >= 1",
             name="ck_product_builds_build_number",
         ),
-        CheckConstraint(
-            "package_type IN ('maven', 'python', 'generic', 'frontend')",
-            name="ck_product_builds_package_type",
-        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
@@ -428,7 +439,14 @@ class ProductBuildRow(Base):
         index=True,
     )
     version: Mapped[str] = mapped_column(Text, nullable=False)
-    package_type: Mapped[str] = mapped_column(Text, nullable=False)
+    package_type: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey(
+            "build_package_types.code",
+            name="fk_product_builds_package_type_build_package_types",
+        ),
+        nullable=False,
+    )
     queue_url: Mapped[str | None] = mapped_column(Text)
     build_number: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(Text, nullable=False)
@@ -562,3 +580,84 @@ class LlmRoleModelRow(Base):
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class BuildPackageTypeRow(Base):
+    """One build package type. ``code`` is the stable id shared with old rows.
+
+    Referenced rows are not deleted. ``jenkins_label`` empty means the product
+    job keeps roaming. Runtime conditions live in the child table.
+    """
+
+    __tablename__ = "build_package_types"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(code) BETWEEN 1 AND 32",
+            name="ck_build_package_types_code_len",
+        ),
+        CheckConstraint(
+            "char_length(label) BETWEEN 1 AND 40",
+            name="ck_build_package_types_label",
+        ),
+        CheckConstraint(
+            "char_length(description) <= 500",
+            name="ck_build_package_types_description",
+        ),
+        CheckConstraint(
+            "jenkins_label IS NULL OR char_length(jenkins_label) BETWEEN 1 AND 128",
+            name="ck_build_package_types_jenkins_label",
+        ),
+        CheckConstraint("position >= 0", name="ck_build_package_types_position"),
+    )
+
+    code: Mapped[str] = mapped_column(Text, primary_key=True)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    jenkins_label: Mapped[str | None] = mapped_column(Text)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    conditions: Mapped[list[BuildPackageTypeConditionRow]] = relationship(
+        back_populates="package_type",
+        order_by="BuildPackageTypeConditionRow.position",
+        cascade="all, delete-orphan",
+    )
+
+
+class BuildPackageTypeConditionRow(Base):
+    """One closed tool and version on a package type. Empty lists are allowed."""
+
+    __tablename__ = "build_package_type_conditions"
+    __table_args__ = (
+        CheckConstraint(
+            "position >= 0",
+            name="ck_build_package_type_conditions_position",
+        ),
+        CheckConstraint(
+            "tool IN ('jdk', 'maven', 'node', 'python')",
+            name="ck_build_package_type_conditions_tool",
+        ),
+        CheckConstraint(
+            "char_length(version) BETWEEN 1 AND 32",
+            name="ck_build_package_type_conditions_version",
+        ),
+        UniqueConstraint(
+            "package_type_code",
+            "tool",
+            name="uq_build_package_type_conditions_tool",
+        ),
+    )
+
+    package_type_code: Mapped[str] = mapped_column(
+        ForeignKey(
+            "build_package_types.code",
+            name="fk_build_package_type_conditions_package_type_code",
+            ondelete="CASCADE",
+        ),
+        primary_key=True,
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tool: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    package_type: Mapped[BuildPackageTypeRow] = relationship(back_populates="conditions")

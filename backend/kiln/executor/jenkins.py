@@ -16,6 +16,8 @@ from kiln.errors import BadRequest, NotFound, PayloadTooLarge, UpstreamFailure
 from kiln.executor.script import product_build_command, product_job_config
 
 _MARKER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+# Core ComputerSet tree. See JenkinsClient.has_online_node.
+_COMPUTER_TREE = "computer[displayName,offline,assignedLabels[name]]"
 _LOG_LIMIT = 200_000
 _RESULT = {
     "SUCCESS": "success",
@@ -64,6 +66,7 @@ class JenkinsClient:
         git_user: str,
         git_token: str,
         declare_nexus_parameters: bool = False,
+        assigned_node: str | None = None,
     ) -> None:
         command = product_build_command(
             clone_url=clone_url,
@@ -79,6 +82,7 @@ class JenkinsClient:
             content=product_job_config(
                 command,
                 nexus_parameters=declare_nexus_parameters,
+                assigned_node=assigned_node,
             ).encode("utf-8"),
             headers={"Content-Type": "application/xml; charset=utf-8"},
         )
@@ -156,6 +160,38 @@ class JenkinsClient:
         if number is None:
             return "queued", None
         return self._build_status(job_name, number), number
+
+    def has_online_node(self, label: str) -> bool:
+        """Read-only check that one online computer carries ``label``.
+
+        ``GET /computer/api/json`` with
+        ``tree=computer[displayName,offline,assignedLabels[name]]``.
+        Pinned to the core Remote API of ``jenkins/jenkins:2.580.2-lts-alpine``.
+        The same JSON shape is what ``jenkins/jenkins:lts-jdk17`` serves.
+        ``offline`` false means the agent is connected and not temporarily
+        offline (``Computer.isOffline``). A label or node name matches
+        ``displayName`` or ``assignedLabels[].name``. Non-200, transport
+        errors, and unexpected JSON raise ``UpstreamFailure``. An empty or
+        non-matching computer list returns false. This does not create an
+        agent and does not use a plugin.
+        """
+
+        response = self._request(
+            "GET",
+            "/computer/api/json",
+            params={"tree": _COMPUTER_TREE},
+            headers={"Accept": "application/json"},
+        )
+        if response.status_code != 200:
+            raise UpstreamFailure(_failure(response, self._netloc))
+        body = _object(response, self._netloc)
+        computers = body.get("computer")
+        if not isinstance(computers, list):
+            raise UpstreamFailure(f"Jenkins 返回的节点列表无法解析（{self._netloc}）")
+        for item in computers:
+            if _computer_matches(item, label, self._netloc):
+                return True
+        return False
 
     def read_log(self, job_name: str, build_number: int) -> tuple[str, bool]:
         response = self._request(
@@ -325,6 +361,28 @@ class JenkinsClient:
         if not isinstance(field, str) or not isinstance(crumb, str) or not field or not crumb:
             raise UpstreamFailure(f"Jenkins crumb 无效（{self._netloc}）")
         return {field: crumb}
+
+
+def _computer_matches(item: object, label: str, netloc: str) -> bool:
+    if not isinstance(item, dict):
+        raise UpstreamFailure(f"Jenkins 返回的节点列表无法解析（{netloc}）")
+    offline = item.get("offline")
+    display_name = item.get("displayName")
+    assigned = item.get("assignedLabels")
+    if not isinstance(offline, bool) or not isinstance(display_name, str):
+        raise UpstreamFailure(f"Jenkins 返回的节点列表无法解析（{netloc}）")
+    if not isinstance(assigned, list):
+        raise UpstreamFailure(f"Jenkins 返回的节点列表无法解析（{netloc}）")
+    if offline:
+        return False
+    if display_name == label:
+        return True
+    for entry in assigned:
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+            raise UpstreamFailure(f"Jenkins 返回的节点列表无法解析（{netloc}）")
+        if entry["name"] == label:
+            return True
+    return False
 
 
 def _require_marker(marker: str) -> None:
