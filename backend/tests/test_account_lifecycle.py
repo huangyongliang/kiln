@@ -421,6 +421,31 @@ def test_password_validation_errors_do_not_echo_the_secret(
     assert secret[:6] not in changed.text
     assert current not in caplog.text
     assert secret[:6] not in caplog.text
+    confirm = "confirm-plaintext-should-not-echo"
+    reset = admin["session"].post(
+        f"/api/v1/accounts/{admin['account']['id']}/password",
+        json={"password": "long-enough-reset", "confirm_password": confirm},
+    )
+    _assert_confirm_is_not_echoed(reset, confirm, caplog)
+    changed_extra = admin["session"].post(
+        "/api/v1/auth/password",
+        json={
+            "current_password": "current-ok",
+            "new_password": "long-enough-new",
+            "confirm_password": confirm,
+        },
+    )
+    _assert_confirm_is_not_echoed(changed_extra, confirm, caplog)
+    folded = "Folded-Password-plaintext"
+    folded_change = admin["session"].post(
+        "/api/v1/auth/password",
+        json={
+            "current_password": "current-ok",
+            "new_password": "long-enough-new",
+            "Confirm_Password": folded,
+        },
+    )
+    _assert_confirm_is_not_echoed(folded_change, folded, caplog)
     empty = admin["session"].patch(f"/api/v1/accounts/{admin['account']['id']}", json={})
     assert empty.status_code == 422
     unknown = admin["session"].patch(
@@ -428,6 +453,26 @@ def test_password_validation_errors_do_not_echo_the_secret(
         json={"role_ids": []},
     )
     assert unknown.status_code == 422
+
+
+def _assert_confirm_is_not_echoed(response, secret: str, caplog: pytest.LogCaptureFixture) -> None:
+    assert response.status_code == 422, response.text
+    assert secret not in response.text
+    assert secret not in caplog.text
+    detail = response.json()["detail"]
+    names = [
+        name
+        for item in detail
+        if isinstance(item.get("loc"), list)
+        for name in item["loc"]
+        if isinstance(name, str)
+    ]
+    assert any("password" in name.casefold() for name in names)
+    for item in detail:
+        if "input" not in item:
+            continue
+        assert item["input"] != secret
+        assert secret not in str(item["input"])
 
 
 def test_disable_between_password_check_and_session_insert(client: TestClient) -> None:

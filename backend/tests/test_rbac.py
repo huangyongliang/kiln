@@ -29,7 +29,7 @@ _BUILD = {
 _CHAT = {"messages": [{"role": "user", "content": "你好"}]}
 _MISSING = "00000000-0000-0000-0000-000000000001"
 _EXECUTOR_READ = "查看兼容执行器状态、任务与产品构建及其日志"
-_GIT_READ = "查看代码源适配器、仓库列表并解析引用"
+_GIT_READ = "查看代码源适配器、仓库列表、分支并解析引用"
 
 _GATED_GETS = (
     "/api/v1/accounts",
@@ -48,6 +48,7 @@ _GATED_GETS = (
     f"/api/v1/builds/{_MISSING}/log",
     "/api/v1/git/source",
     "/api/v1/git/repositories",
+    "/api/v1/git/branches?repository=ada/demo",
     "/api/v1/git/commits?repository=ada/demo&ref=main",
 )
 _EXECUTOR_GETS = (
@@ -63,6 +64,7 @@ _EXECUTOR_GETS = (
 _GIT_GETS = (
     "/api/v1/git/source",
     "/api/v1/git/repositories",
+    "/api/v1/git/branches?repository=ada/demo",
     "/api/v1/git/commits?repository=ada/demo&ref=main",
 )
 _UNCONFIGURED_GETS = (
@@ -73,6 +75,7 @@ _UNCONFIGURED_GETS = (
     f"/api/v1/builds/{_MISSING}",
     f"/api/v1/builds/{_MISSING}/log",
     "/api/v1/git/repositories",
+    "/api/v1/git/branches?repository=ada/demo",
     "/api/v1/git/commits?repository=ada/demo&ref=main",
 )
 
@@ -335,6 +338,7 @@ def test_privileged_reads_are_503_until_configured_then_200(
             f"/api/v1/builds/{build_id}/log",
             "/api/v1/git/source",
             "/api/v1/git/repositories",
+            "/api/v1/git/branches?repository=ada/demo",
             "/api/v1/git/commits?repository=ada/demo&ref=main",
         )
         for role_id, session in configured.items():
@@ -350,6 +354,10 @@ def test_privileged_reads_are_503_until_configured_then_200(
             commit = session.get("/api/v1/git/commits?repository=ada/demo&ref=main").json()
             assert commit["sha"] == "a" * 40
             assert commit["provider"] == "gitea"
+            branches = session.get("/api/v1/git/branches?repository=ada/demo").json()
+            assert branches["provider"] == "gitea"
+            assert branches["role"] == "lab"
+            assert branches["items"] == []
 
 
 def test_reader_keeps_catalog_reads_and_retrieve_metadata_needs_download(
@@ -516,6 +524,9 @@ class _QuietGit:
     role = "lab"
 
     def list_repositories(self) -> list[object]:
+        return []
+
+    def list_branches(self, owner: str, name: str) -> list[object]:
         return []
 
     def resolve_ref(self, owner: str, name: str, ref: str) -> ResolvedCommit:

@@ -10,15 +10,17 @@ import StatePanel from "../components/StatePanel.vue";
 import StatusTag from "../components/StatusTag.vue";
 import {
   artifactNameError,
+  branchLoadMessage,
   buildNameError,
+  catalogBranchError,
+  catalogRepositoryError,
   fieldErrors,
   packageTypeError,
-  refError,
-  repositoryError,
+  preferredBranch,
   versionError,
 } from "../forms";
 import { formatTime, shortSha } from "../format";
-import { apiPath, isUuid } from "../paths";
+import { apiPath, gitBranchesPath, isUuid } from "../paths";
 import { canDo, canSee } from "../permissions";
 
 const note =
@@ -59,6 +61,9 @@ const buildBusy = ref(false);
 const buildError = ref("");
 const buildErrors = ref({});
 const repository = ref("");
+const branches = ref([]);
+const branchesError = ref("");
+const branchesLoading = ref(false);
 const publishedSkills = ref([]);
 const skillsReady = ref(false);
 const skillLoadError = ref("");
@@ -70,6 +75,7 @@ const buildVersion = ref("");
 const packageType = ref("generic");
 const taskName = ref("");
 let timer = 0;
+let branchTicket = 0;
 
 const showSource = computed(() => perms.value == null || canDo("git.read", perms.value));
 const canStartBuild = computed(
@@ -120,10 +126,7 @@ watch(accessReady, (ready) => {
   }
 });
 watch(repository, (value) => {
-  const match = repositories.value.find((item) => item.full_name === value.trim());
-  if (match?.default_branch) {
-    refName.value = match.default_branch;
-  }
+  loadBranches(value);
 });
 
 function matchesStatus(status, filter) {
@@ -315,8 +318,12 @@ function openBuild(id) {
 
 function openBuildForm() {
   const requested = querySkill();
+  branchTicket += 1;
   repository.value = "";
   refName.value = "";
+  branches.value = [];
+  branchesError.value = "";
+  branchesLoading.value = false;
   artifactName.value = "";
   buildVersion.value = "";
   packageType.value = "generic";
@@ -361,11 +368,11 @@ async function submitBuild() {
   ) {
     local.skill_id = "请选择已发布的 Skill";
   }
-  const repositoryMessage = repositoryError(repository.value);
+  const repositoryMessage = catalogRepositoryError(repository.value, repositories.value);
   if (repositoryMessage) {
     local.repository = repositoryMessage;
   }
-  const refMessage = refError(refName.value);
+  const refMessage = catalogBranchError(refName.value, branches.value);
   if (refMessage) {
     local.ref = refMessage;
   }
@@ -435,6 +442,52 @@ async function submitBuild() {
     buildError.value = errorText(caught, "无法发起构建");
   } finally {
     buildBusy.value = false;
+  }
+}
+
+async function loadBranches(value) {
+  const ticket = ++branchTicket;
+  branches.value = [];
+  refName.value = "";
+  branchesError.value = "";
+  branchesLoading.value = false;
+  const fullName = String(value ?? "").trim();
+  const selected = repositories.value.find((item) => item.full_name === fullName);
+  if (!selected || !showSource.value) {
+    return;
+  }
+  branchesLoading.value = true;
+  try {
+    const body = await getJson(gitBranchesPath(fullName));
+    if (ticket !== branchTicket || String(repository.value ?? "").trim() !== fullName) {
+      return;
+    }
+    const items = Array.isArray(body?.items) ? body.items : null;
+    if (!items) {
+      branches.value = [];
+      refName.value = "";
+      branchesError.value = branchLoadMessage();
+      return;
+    }
+    const current = repositories.value.find((item) => item.full_name === fullName);
+    if (!current) {
+      branches.value = [];
+      refName.value = "";
+      return;
+    }
+    branches.value = items.filter((item) => item && typeof item.name === "string" && item.name);
+    refName.value = preferredBranch(current.default_branch, branches.value);
+  } catch (caught) {
+    if (ticket !== branchTicket) {
+      return;
+    }
+    branches.value = [];
+    refName.value = "";
+    branchesError.value = branchLoadMessage(caught?.status);
+  } finally {
+    if (ticket === branchTicket) {
+      branchesLoading.value = false;
+    }
   }
 }
 </script>
@@ -660,22 +713,27 @@ async function submitBuild() {
       </div>
       <div class="field">
         <label for="build-repository">仓库</label>
-        <input
-          id="build-repository"
-          v-model="repository"
-          type="text"
-          autocomplete="off"
-          placeholder="owner/name"
-          :list="repositories.length ? 'build-repos' : undefined"
-        />
-        <datalist v-if="showSource && repositories.length" id="build-repos">
-          <option v-for="item in repositories" :key="item.full_name" :value="item.full_name" />
-        </datalist>
+        <select id="build-repository" v-model="repository">
+          <option value="">选择仓库</option>
+          <option v-for="item in repositories" :key="item.full_name" :value="item.full_name">
+            {{ item.full_name }}
+          </option>
+        </select>
+        <p v-if="perms != null && !canDo('git.read', perms)" class="hint">
+          {{ actionDeniedText("git.read") }}
+        </p>
         <p v-if="buildErrors.repository" class="field-error">{{ buildErrors.repository }}</p>
       </div>
       <div class="field">
-        <label for="build-ref">引用</label>
-        <input id="build-ref" v-model="refName" type="text" autocomplete="off" />
+        <label for="build-ref">分支</label>
+        <select id="build-ref" v-model="refName">
+          <option value="">选择分支</option>
+          <option v-for="item in branches" :key="item.name" :value="item.name">
+            {{ item.name }}
+          </option>
+        </select>
+        <p v-if="branchesLoading" class="hint">正在读取分支</p>
+        <p v-if="branchesError" class="field-error">{{ branchesError }}</p>
         <p v-if="buildErrors.ref" class="field-error">{{ buildErrors.ref }}</p>
       </div>
       <div class="field">

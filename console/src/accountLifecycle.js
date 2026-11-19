@@ -43,18 +43,32 @@ export function showOwnPassword(account) {
   return Boolean(account && account.id);
 }
 
-export function passwordChangeErrors(current, nextPassword) {
+export function passwordChangeErrors(current, nextPassword, confirmPassword) {
   const errors = {};
   if (!String(current ?? "")) {
     errors.current_password = "请填写当前口令";
   }
-  const length = [...String(nextPassword ?? "")].length;
+  const next = String(nextPassword ?? "");
+  const length = [...next].length;
   if (length < 8) {
     errors.new_password = "口令至少 8 个字符";
   } else if (length > 128) {
     errors.new_password = "口令过长";
   }
+  const confirm = String(confirmPassword ?? "");
+  if (!confirm) {
+    errors.confirm_password = "请再次输入新口令";
+  } else if (confirm !== next) {
+    errors.confirm_password = "两次输入的新口令不一致";
+  }
   return errors;
+}
+
+export function passwordChangeBody(current, nextPassword) {
+  return {
+    current_password: current,
+    new_password: nextPassword,
+  };
 }
 
 export function resetPasswordError(password) {

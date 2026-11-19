@@ -10,7 +10,7 @@ from typing import Protocol
 import httpx
 
 from kiln.config import Settings
-from kiln.domain.git import GitRepository, GitRole, ResolvedCommit
+from kiln.domain.git import GitBranch, GitRepository, GitRole, ResolvedCommit
 from kiln.git.gitea import GiteaSource
 from kiln.git.gitlab import GitLabSource
 
@@ -23,6 +23,8 @@ class GitSource(Protocol):
     role: str
 
     def list_repositories(self) -> list[GitRepository]: ...
+
+    def list_branches(self, owner: str, name: str) -> list[GitBranch]: ...
 
     def resolve_ref(self, owner: str, name: str, ref: str) -> ResolvedCommit: ...
 

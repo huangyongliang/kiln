@@ -1,8 +1,8 @@
 """Git source HTTP API.
 
-Listing repositories and resolving a ref require `git.read`. The adapter is
-selected by GIT_PROVIDER: gitea for the lab, gitlab for production. The base
-URL is not hard-coded.
+Listing repositories, listing branches, and resolving a ref require `git.read`.
+The adapter is selected by GIT_PROVIDER: gitea for the lab, gitlab for
+production. The base URL is not hard-coded.
 """
 
 from fastapi import APIRouter, Depends, Query
@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Query
 from kiln.api.deps import get_git_source, get_settings
 from kiln.auth import require_auth, require_permission
 from kiln.config import Settings
-from kiln.domain.git import GitRepositoryList, GitSourceInfo, ResolvedCommit
+from kiln.domain.git import GitBranchList, GitRepositoryList, GitSourceInfo, ResolvedCommit
 from kiln.errors import BadRequest
 from kiln.git.refs import parse_ref, parse_repository
 from kiln.git.source import GitSource, role_for_provider
@@ -46,6 +46,24 @@ def list_repositories(source: GitSource = Depends(get_git_source)) -> GitReposit
         provider=_provider(source),
         role=_role(source),
         items=source.list_repositories(),
+    )
+
+
+@router.get(
+    "/branches",
+    response_model=GitBranchList,
+    summary="列出仓库分支",
+    dependencies=[Depends(require_permission("git.read"))],
+)
+def list_branches(
+    repository: str = Query(min_length=3, max_length=400),
+    source: GitSource = Depends(get_git_source),
+) -> GitBranchList:
+    owner, name = parse_repository(repository)
+    return GitBranchList(
+        provider=_provider(source),
+        role=_role(source),
+        items=source.list_branches(owner, name),
     )
 
 

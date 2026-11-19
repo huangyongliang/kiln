@@ -211,6 +211,73 @@ export function refError(value) {
   return "";
 }
 
+function rawNames(items, key) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+  const names = [];
+  for (const item of items) {
+    if (typeof item === "string") {
+      names.push(item);
+      continue;
+    }
+    if (item && typeof item === "object" && typeof item[key] === "string") {
+      names.push(item[key]);
+    }
+  }
+  return names;
+}
+
+function trimmedNames(items, key) {
+  return rawNames(items, key)
+    .map((name) => name.trim())
+    .filter(Boolean);
+}
+
+export function catalogRepositoryError(value, catalog) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return "请选择仓库";
+  }
+  if (!trimmedNames(catalog, "full_name").includes(text)) {
+    return "请从目录中选择仓库";
+  }
+  return repositoryError(text);
+}
+
+export function catalogBranchError(value, branches) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return "请选择分支";
+  }
+  const format = refError(text);
+  if (format) {
+    return format;
+  }
+  if (!trimmedNames(branches, "name").includes(text)) {
+    return "请从列表中选择分支";
+  }
+  return "";
+}
+
+export function preferredBranch(defaultBranch, branches) {
+  const name = String(defaultBranch ?? "");
+  if (!name || !rawNames(branches, "name").includes(name)) {
+    return "";
+  }
+  return name;
+}
+
+export function branchLoadMessage(status) {
+  if (status === 403) {
+    return "没有权限";
+  }
+  if (status === 503) {
+    return "代码源未配置";
+  }
+  return "无法读取分支";
+}
+
 export function buildNameError(value) {
   const text = String(value ?? "").trim();
   if (!text) {

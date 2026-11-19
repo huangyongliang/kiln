@@ -4,8 +4,15 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from kiln.domain.git import GitRepository, ResolvedCommit
-from kiln.git.http import as_list, as_object, read_json, require_sha, require_username
+from kiln.domain.git import GitBranch, GitRepository, ResolvedCommit
+from kiln.git.http import (
+    as_branch_list,
+    as_list,
+    as_object,
+    read_json,
+    require_sha,
+    require_username,
+)
 
 
 class GiteaSource:
@@ -35,6 +42,24 @@ class GiteaSource:
             rows = as_list(payload, self._netloc)
             for item in rows:
                 mapped = _repository(item)
+                if mapped is not None:
+                    found.append(mapped)
+            if len(rows) < 50:
+                break
+        return found
+
+    def list_branches(self, owner: str, name: str) -> list[GitBranch]:
+        found: list[GitBranch] = []
+        for page in range(1, 6):
+            payload = read_json(
+                self._client,
+                f"{self._base}{branches_path(owner, name)}",
+                self._headers,
+                params={"limit": 50, "page": page},
+            )
+            rows = as_branch_list(payload, self._netloc)
+            for item in rows:
+                mapped = _branch(item)
                 if mapped is not None:
                     found.append(mapped)
             if len(rows) < 50:
@@ -75,6 +100,21 @@ def commit_path(owner: str, name: str, ref: str) -> str:
         f"/api/v1/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
         f"/git/commits/{quote(ref, safe='')}"
     )
+
+
+def branches_path(owner: str, name: str) -> str:
+    """Gitea branch-list path. Items are branch names, not commits."""
+
+    return f"/api/v1/repos/{quote(owner, safe='')}/{quote(name, safe='')}/branches"
+
+
+def _branch(item: object) -> GitBranch | None:
+    if not isinstance(item, dict):
+        return None
+    name = item.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    return GitBranch(name=name)
 
 
 def _repository(item: object) -> GitRepository | None:
