@@ -83,7 +83,7 @@ cp .env.example .env
 | 变量 | 示例值 | 谁读取 |
 | --- | --- | --- |
 | `KILN_ENV` | `local` | API 进程的配置对象。容器命令不使用它，compose 也没有把它传进容器 |
-| `KILN_HTTP_HOST` | `0.0.0.0` | 仅 `kiln.main:run`（入口脚本 `kiln-api`）。容器的 `CMD` 写死 `--host 0.0.0.0 --port 8000` |
+| `KILN_HTTP_HOST` | `0.0.0.0` | 仅 `kiln.main:run`（入口脚本 `kiln-api`）。该入口关闭代理头。容器的 `CMD` 写死 `--host 0.0.0.0 --port 8000 --no-proxy-headers` |
 | `KILN_HTTP_PORT` | `8000` | 同上。改这个值不会改变 compose 发布的 `127.0.0.1:8000:8000` |
 | `KILN_CORS_ORIGINS` | `http://localhost:5173,http://localhost:8080` | 进程直接运行时生效。compose 给容器写死了同一组来源，不读取 `.env` 里的这一行 |
 | `DATABASE_URL` | `postgresql://kiln:kiln@localhost:5432/kiln` | 进程直接运行时进入配置。容器内的值由 compose 拼成 `postgresql://…@postgres:5432/kiln`，主机名是服务名 `postgres` |
@@ -284,7 +284,7 @@ kiln-admin bootstrap-admin --username ada --display-name Ada
 
 ## 账号
 
-`POST /api/v1/auth/login` 对本地口令失败做进程内滑动窗口限速，其它入口不计入。不限制用户信息同步的开始和回调、机器令牌、`POST /api/v1/auth/password`、管理员 `POST /api/v1/accounts/{id}/password`，以及 `kiln-admin bootstrap-admin`。用户名键是请求体用户名去掉首尾空白并做大小写折叠；规范化后为空则跳过用户名键，不把空字符串当成共享键。IP 键只用 TCP 对端，不读 `X-Forwarded-For` 或 `X-Real-IP`。对端缺失时跳过 IP 键。默认 900 秒内同一用户名 5 次、同一对端 30 次。任一键达到上限，本次返回 429，正文是 `{"detail":"尝试次数过多，请稍后再试"}`。`Retry-After` 是该键最老一次计入失败掉出窗口的剩余整秒，至少为 1。已超限的请求不再校验口令，因此不会再用 401 区分「账号已停用」和「用户名或口令不正确」，也不会签发会话。成功登录清除该用户名的失败计数，不清除 IP 计数。限速不修改 `accounts.status`，不撤销已有会话；已经签发的会话仍可调用 `/api/v1/auth/me`。停用和会话撤销仍是独立机制，管理员仍可用 `account.manage` 停用账号。经控制台登录时，多位用户共享控制台的对端地址，IP 键是同一条。直接访问 `127.0.0.1:8000` 时按各自 TCP 对端计数。重启 API 进程会清空进程内计数。当前镜像是单个 uvicorn 进程；多 worker 或多副本不共享这份计数。
+`POST /api/v1/auth/login` 对本地口令失败做进程内滑动窗口限速，其它入口不计入。不限制用户信息同步的开始和回调、机器令牌、`POST /api/v1/auth/password`、管理员 `POST /api/v1/accounts/{id}/password`，以及 `kiln-admin bootstrap-admin`。用户名键是请求体用户名去掉首尾空白并做大小写折叠；规范化后为空则跳过用户名键，不把空字符串当成共享键。IP 键是真实 TCP 对端。应用和 ASGI 服务器都不采用 `X-Forwarded-For` 或 `X-Real-IP`，包括直接访问 `127.0.0.1:8000` 时。`uvicorn` 命令带 `--no-proxy-headers`，`kiln-api`（`kiln.main:run`）关闭代理头，容器 `CMD` 同样带 `--no-proxy-headers`。不设置可信代理名单。对端缺失时跳过 IP 键。默认 900 秒内同一用户名 5 次、同一对端 30 次。任一键达到上限，本次返回 429，正文是 `{"detail":"尝试次数过多，请稍后再试"}`。`Retry-After` 是该键最老一次计入失败掉出窗口的剩余整秒，至少为 1。已超限的请求不再校验口令，因此不会再用 401 区分「账号已停用」和「用户名或口令不正确」，也不会签发会话。成功登录清除该用户名的失败计数，不清除 IP 计数。限速不修改 `accounts.status`，不撤销已有会话；已经签发的会话仍可调用 `/api/v1/auth/me`。停用和会话撤销仍是独立机制，管理员仍可用 `account.manage` 停用账号。经控制台登录时，多位用户共享控制台的对端地址，IP 键是同一条。直接访问 `127.0.0.1:8000` 时按各自 TCP 对端计数。重启 API 进程会清空进程内计数。当前镜像是单个 uvicorn 进程；多 worker 或多副本不共享这份计数。
 
 控制台有登录页。创建账号时可以设置口令，库里只保存哈希。会话写在 Postgres，退出时撤销。未配置公司用户系统时使用本地口令。配置 `KILN_OIDC_*` 之后，用户信息同步按发行方和 subject 找到或创建 kiln 账号，新账号默认角色是 `reader`，不复制公司侧的组或角色。在职状态未通过或账号已停用时不建立会话。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的。可选对接之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。`KILN_API_TOKEN` 仍是机器和开发用的访问令牌，拥有目录中的全部权限。侧栏里的令牌输入不再是主要入口。控制台「账号与权限」在 API 尚未创建账号时显示「还没有账号」，并列出角色目录：`reader`（只读）、`builder`（构建者）、`publisher`（发布者）、`admin`（管理员）。这些角色参与写入鉴权。没有对应权限时返回 403。发起任务和产品构建需要 `executor.run`，对话需要 `agent.qa`。只读角色没有这两项，调用 `POST /api/v1/jobs`、`POST /api/v1/builds` 或 `POST /api/v1/llm/chat` 会返回 403。列出和查看账号、制品、skill 分别需要 `account.read`、`artifact.read`、`skill.read`，只读角色已有这三项。构建者可以提交 skill 审核（`skill.submit`），只读角色不能。发布仍由发布者和管理员负责（`skill.publish`）。退回草稿同样需要 `skill.publish`，须填写原因。查看执行器状态、任务、产品构建及其日志需要 `executor.read`，查看代码源适配器、仓库列表并解析引用需要 `git.read`。这两项授给构建者、发布者和管理员，不授给只读角色。
 
@@ -422,7 +422,7 @@ source .venv/bin/activate
 python -m pip install -e "./backend[dev]"
 # KILN_API_TOKEN 必填。缺失、空、kiln-local、以 kiln-test- 开头或少于 32 个字符时拒绝启动。
 export KILN_API_TOKEN="$(python -c 'import secrets; print(secrets.token_hex(32))')"
-uvicorn kiln.main:create_app --factory --host 127.0.0.1 --port 8000
+uvicorn kiln.main:create_app --factory --host 127.0.0.1 --port 8000 --no-proxy-headers
 ```
 
 在同一个虚拟环境里创建第一个管理员。口令从终端输入两次，或从标准输入读第一行，不接受命令行参数或环境变量：

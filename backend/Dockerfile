@@ -22,5 +22,7 @@ EXPOSE 8000
 
 # The entrypoint may start as root to chown KILN_ARTIFACT_ROOT, then the API
 # process continues as uid 10001.
+# --no-proxy-headers keeps the login IP key on the TCP peer. Forwarded
+# headers are not trusted, and there is no allowlist.
 ENTRYPOINT ["python", "/usr/local/bin/kiln-entrypoint"]
-CMD ["uvicorn", "kiln.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "kiln.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]

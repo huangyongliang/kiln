@@ -4,20 +4,34 @@ The OIDC cases always run. They do not read KILN_SKIP_EXTERNAL_TESTS.
 """
 
 import logging
+import os
+import socket
+import subprocess
+import sys
+import tempfile
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import BinaryIO
 from urllib.parse import urlsplit
 
 import httpx
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from kiln.db.engine import create_db_engine
 from kiln.domain.rbac import PERMISSIONS, permissions_for
 from kiln.login_limit import LoginLimiter, normalize_username, peer_host
 from kiln.main import create_app
 from tests.oidc_double import OidcDouble
-from tests.support import PROCESS_API_TOKEN, app_settings, auth_headers, truncate_domain
+from tests.support import (
+    PROCESS_API_TOKEN,
+    app_settings,
+    auth_headers,
+    postgres_url,
+    truncate_domain,
+)
 
 LOCAL_PASSWORD = "correct-horse-1"
 
@@ -916,6 +930,104 @@ def test_login_limit_docs_and_env_keys() -> None:
     assert "self.lock = threading.Lock()" in source
     assert "asyncio.Lock()" not in source
     assert "import asyncio" not in source
+    documented = (
+        "uvicorn kiln.main:create_app --factory --host 127.0.0.1 --port 8000 --no-proxy-headers"
+    )
+    assert documented in readme
+    assert documented in deploy
+    dockerfile = (root / "backend" / "Dockerfile").read_text(encoding="utf-8")
+    assert (
+        'CMD ["uvicorn", "kiln.main:create_app", "--factory", "--host", "0.0.0.0", '
+        '"--port", "8000", "--no-proxy-headers"]'
+    ) in dockerfile
+    main = (root / "backend" / "kiln" / "main.py").read_text(encoding="utf-8")
+    assert "proxy_headers=False" in main
+    api = compose.split("\n  api:\n", 1)[1].split("\n  console:\n", 1)[0]
+    assert "command:" not in api
+    assert "--no-proxy-headers" in api
+
+
+def test_live_uvicorn_keeps_the_tcp_peer_when_forwarded_headers_are_sent(tmp_path: Path) -> None:
+    """A real uvicorn on 127.0.0.1 must ignore X-Forwarded-For and X-Real-IP."""
+
+    engine = create_db_engine(postgres_url())
+    try:
+        truncate_domain(engine)
+    finally:
+        engine.dispose()
+    port = _free_port()
+    log = tempfile.TemporaryFile()
+    documented = (
+        "uvicorn kiln.main:create_app --factory --host 127.0.0.1 "
+        "--port 8000 --no-proxy-headers"
+    )
+    readme = Path(__file__).resolve().parents[2].joinpath("README.md").read_text(encoding="utf-8")
+    assert documented in readme
+    argv = [sys.executable, "-m", *documented.replace("--port 8000", f"--port {port}").split()]
+    env = os.environ.copy()
+    env.update(
+        {
+            "DATABASE_URL": postgres_url(),
+            "KILN_API_TOKEN": PROCESS_API_TOKEN,
+            "KILN_ARTIFACT_ROOT": str(tmp_path / "artifacts"),
+            "KILN_LOGIN_WINDOW_SECONDS": "900",
+            "KILN_LOGIN_USERNAME_MAX_FAILURES": "100",
+            "KILN_LOGIN_IP_MAX_FAILURES": "5",
+            "LLM_PROVIDER": "off",
+            "PYTHONUNBUFFERED": "1",
+        }
+    )
+    proc = subprocess.Popen(
+        argv,
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        base = _wait_until_healthy(proc, log, port)
+        with httpx.Client(base_url=base, trust_env=False, timeout=10) as http:
+            created = http.post(
+                "/api/v1/accounts",
+                headers=auth_headers(),
+                json={
+                    "username": "ada_peer",
+                    "display_name": "对端",
+                    "password": LOCAL_PASSWORD,
+                    "role_ids": ["reader"],
+                },
+            )
+            assert created.status_code == 201, created.text
+            for index in range(4):
+                failed = _live_login(http, f"miss{index}", "not-the-password")
+                assert failed.status_code == 401, failed.text
+            capped = _live_login(http, "miss4", "not-the-password")
+            _assert_limited(capped)
+            spoofed = _live_login(
+                http,
+                "miss_spoof",
+                "not-the-password",
+                {"X-Forwarded-For": "203.0.113.50", "X-Real-IP": "203.0.113.50"},
+            )
+            _assert_limited(spoofed)
+            issued = _live_login(
+                http,
+                "ada_peer",
+                LOCAL_PASSWORD,
+                {"X-Forwarded-For": "203.0.113.51", "X-Real-IP": "203.0.113.51"},
+            )
+            _assert_limited(issued)
+            assert "token" not in issued.text
+            still = _live_login(http, "miss_bare", "not-the-password")
+            _assert_limited(still)
+        log.seek(0)
+        recorded = log.read().decode()
+        assert "203.0.113.50" not in recorded
+        assert "203.0.113.51" not in recorded
+        assert f"Uvicorn running on http://127.0.0.1:{port}" in recorded
+    finally:
+        _stop_process(proc)
+        log.close()
 
 
 def _limited_app(
@@ -975,6 +1087,54 @@ def _assert_limited(response, retry_after: str | None = None) -> None:
     if retry_after is not None:
         assert response.headers["retry-after"] == retry_after
     assert "set-cookie" not in response.headers
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _wait_until_healthy(proc: subprocess.Popen[bytes], log: BinaryIO, port: int) -> str:
+    base = f"http://127.0.0.1:{port}"
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            log.seek(0)
+            raise AssertionError(log.read().decode())
+        try:
+            response = httpx.get(f"{base}/health", timeout=0.5, trust_env=False)
+        except httpx.HTTPError:
+            time.sleep(0.1)
+            continue
+        if response.status_code == 200:
+            return base
+        time.sleep(0.1)
+    log.seek(0)
+    raise AssertionError(log.read().decode())
+
+
+def _stop_process(proc: subprocess.Popen[bytes]) -> None:
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def _live_login(
+    http: httpx.Client,
+    username: str,
+    password: str,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    return http.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": password},
+        headers=headers,
+    )
 
 
 def connection_status(engine, username: str) -> str:

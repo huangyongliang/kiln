@@ -53,7 +53,7 @@ source .venv/bin/activate
 python -m pip install -e "./backend[dev]"
 # KILN_API_TOKEN 必填。缺失、空、kiln-local、以 kiln-test- 开头或少于 32 个字符时拒绝启动。
 export KILN_API_TOKEN="$(python -c 'import secrets; print(secrets.token_hex(32))')"
-uvicorn kiln.main:create_app --factory --host 127.0.0.1 --port 8000
+uvicorn kiln.main:create_app --factory --host 127.0.0.1 --port 8000 --no-proxy-headers
 ```
 
 空库创建第一个管理员（口令从终端输入，不经过参数或环境变量）：
@@ -156,7 +156,7 @@ docker compose --profile lab up
 
 前缀 `/api/v1`。账号、RBAC 目录、制品、版本、下载预约、skill 和用户会话保存在 PostgreSQL，API 进程重启后仍然在。登录、退出、用户信息同步的开始与回调，以及「是否已配置」探测不需要事先持有令牌。其余路由接受会话 cookie、登录返回的 Bearer 令牌，或机器令牌 `KILN_API_TOKEN`。没有这些凭证时返回 401，不会改库。`/health`、`/ready` 和 `/docs` 不需要令牌，也不接受写入。`/health` 只说明进程在应答；`/ready` 只查询数据库。说明页本身不能绕过这道门去写入。已登录用户的写入会按现有权限目录校验。`POST /jobs` 需要 `executor.run`。`POST /builds` 需要 `executor.run` 与 `skill.use`。`POST /llm/chat` 需要 `agent.qa`。只读角色不能调用这三处写入。读取账号、制品和 skill 分别需要 `account.read`、`artifact.read` 和 `skill.read`。读取执行器状态、依赖代理、任务、产品构建及其日志需要 `executor.read`。读取代码源适配器、仓库列表并解析引用需要 `git.read`。只读角色可以查看账号、skill 与制品，不能查看任务、构建或代码源清单。`GET /llm/provider`、`GET /rbac/roles` 和 `GET /rbac/permissions` 仍只需会话或机器令牌。取包元数据 `GET /retrieve/{id}` 与取包字节都需要 `artifact.download`。权限不足时返回 403，正文是「没有权限」，并且先于未配置检查。`GET` / `PUT /llm/catalog` 缺少 `llm.manage` 时，detail 写明 `llm.manage`。机器令牌拥有目录中的全部权限。
 
-- 登录：`POST /auth/login` 校验本地口令，写入会话哈希，设置 httpOnly cookie，并返回 Bearer 令牌。`POST /auth/logout` 撤销会话。口令只以哈希保存，响应里不出现口令。只对这一条本地口令登录做失败限速：进程内滑动窗口，默认 900 秒内同一用户名 5 次、同一 TCP 对端 30 次。用户名去掉首尾空白并做大小写折叠；对端只用连接上的地址，不读 `X-Forwarded-For` 或 `X-Real-IP`。达到上限返回 429，正文是「尝试次数过多，请稍后再试」，`Retry-After` 是最老一次计入失败掉出窗口的剩余整秒，至少为 1。已超限的请求不再校验口令，也不签发会话。成功登录会清除该用户名的失败计数，不清除 IP 计数。不自动停用账号，不撤销已有会话；停用和会话撤销仍按原规则单独生效。用户信息同步、机器令牌、已登录改密、管理员重置和引导命令不受这道限制。经控制台登录时，多位用户共享控制台的对端地址，IP 键是同一条。重启 API 进程会清空进程内计数。当前进程是单个 uvicorn 进程，多 worker 或多副本不共享这份计数
+- 登录：`POST /auth/login` 校验本地口令，写入会话哈希，设置 httpOnly cookie，并返回 Bearer 令牌。`POST /auth/logout` 撤销会话。口令只以哈希保存，响应里不出现口令。只对这一条本地口令登录做失败限速：进程内滑动窗口，默认 900 秒内同一用户名 5 次、同一 TCP 对端 30 次。用户名去掉首尾空白并做大小写折叠；IP 键是真实 TCP 对端。应用和 ASGI 服务器都不采用 `X-Forwarded-For` 或 `X-Real-IP`，包括直接访问 `127.0.0.1:8000` 时。`uvicorn` 启动带 `--no-proxy-headers`，`kiln-api` 关闭代理头，不设置可信代理名单。达到上限返回 429，正文是「尝试次数过多，请稍后再试」，`Retry-After` 是最老一次计入失败掉出窗口的剩余整秒，至少为 1。已超限的请求不再校验口令，也不签发会话。成功登录会清除该用户名的失败计数，不清除 IP 计数。不自动停用账号，不撤销已有会话；停用和会话撤销仍按原规则单独生效。用户信息同步、机器令牌、已登录改密、管理员重置和引导命令不受这道限制。经控制台登录时，多位用户共享控制台的对端地址，IP 键是同一条。重启 API 进程会清空进程内计数。当前进程是单个 uvicorn 进程，多 worker 或多副本不共享这份计数
 - 用户信息同步：`GET /auth/sync` 说明是否已配置。未配置时 `GET /auth/oidc/start` 与 `GET /auth/oidc/callback` 返回「用户信息同步未配置」。配置后使用授权码和 PKCE，按发行方与 subject 找到或创建 kiln 账号。新账号的默认角色是 `reader`，不设置口令，也不复制公司侧的组或角色。在职状态未通过或账号已停用时不建立会话
 - 本地账号：`GET/POST /accounts`，`GET /accounts/{id}`，`PATCH /accounts/{id}`，`POST /accounts/{id}/password`。列出和查看需要 `account.read`。创建、修改状态或角色、重置口令需要 `account.manage`。`PATCH` 只接受 `status`（`active` 或 `disabled`）和 `role_ids`（至少 1 个已知角色）。响应带只读 `updated_at` 与 `updated_by`：`updated_by` 是最后一次改动的账号 id，机器令牌为 null。停用会撤销该账号的全部会话，重新启用不会恢复旧会话，并会拒绝口令登录、已有会话和用户信息同步登录。改角色不撤销会话，权限从下一次请求起按新角色计算。管理员重置口令撤销目标的全部会话；重置本人时保留当前会话。`source=sync` 的账号两个口令接口都返回 409「该账号没有本地口令」。不能停用或降级最后一个启用的管理员，机器令牌也一样，返回 409「不能停用或降级最后一个管理员」。会话调用方不能停用自己或移除自己的管理员角色，返回 409「不能停用自己或移除自己的管理员角色」。本人修改口令是 `POST /auth/password`，撤销其他会话并保留当前会话；机器令牌返回 403「机器令牌没有账号」。账号带 `source`：`local` 本地、`sync` 用户信息同步
 - RBAC 目录：`GET /rbac/roles`，`GET /rbac/permissions`

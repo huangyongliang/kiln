@@ -26,6 +26,7 @@ services:
       retries: 20
 
   api:
+    # 不覆盖镜像 CMD。CMD 含 --no-proxy-headers，登录 IP 键保持 TCP 对端。
     build:
       context: ./backend
     image: kiln-api:local
