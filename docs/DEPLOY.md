@@ -87,7 +87,7 @@ cp .env.example .env
 | `KILN_HTTP_PORT` | `8000` | 同上。改这个值不会改变 compose 发布的 `127.0.0.1:8000:8000` |
 | `KILN_CORS_ORIGINS` | `http://localhost:5173,http://localhost:8080` | 进程直接运行时生效。compose 给容器写死了同一组来源，不读取 `.env` 里的这一行 |
 | `DATABASE_URL` | `postgresql://kiln:kiln@localhost:5432/kiln` | 进程直接运行时进入配置。容器内的值由 compose 拼成 `postgresql://…@postgres:5432/kiln`，主机名是服务名 `postgres` |
-| `KILN_API_TOKEN` | 无 | 必填；缺失、空、`kiln-local` 或少于 32 个字符时拒绝启动。`/api/v1` 的 Bearer 令牌。compose 使用 `${KILN_API_TOKEN:?…}`，未设置时在插值阶段失败。生成：python -c "import secrets; print(secrets.token_hex(32))" |
+| `KILN_API_TOKEN` | 无 | 必填；缺失、空、`kiln-local` 或少于 32 个字符时拒绝启动。以 `kiln-test-` 开头的值也会拒绝。`/api/v1` 的 Bearer 令牌。compose 使用 `${KILN_API_TOKEN:?…}`，未设置时在插值阶段失败。生成：python -c "import secrets; print(secrets.token_hex(32))" |
 | `POSTGRES_USER` | `kiln` | 只由 compose 插值，传给 Postgres 容器，并用来拼接容器内的 `DATABASE_URL` |
 | `POSTGRES_PASSWORD` | `kiln` | 同上 |
 | `POSTGRES_DB` | `kiln` | 同上 |
@@ -260,7 +260,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/v1/accounts
 docker compose exec api kiln-admin bootstrap-admin --username ada --display-name Ada
 ```
 
-可以加 `--email`。退出码：`0` 输出「已创建管理员 <username>」；`3` 输出「已存在管理员，未做改动」（库里已有持有 admin 角色的账号，不论启用还是停用）；`2` 参数或口令不合规；`4` 输出「用户名已存在」（用户名已被非管理员占用）。任何输出和日志都不包含口令或令牌。
+可以加 `--email`。退出码：`0` 输出「已创建管理员 <username>」；`3` 输出「已存在管理员，未做改动」（库里已有持有 admin 角色的账号，不论启用还是停用）；`2` 参数或口令不合规，或 `KILN_API_TOKEN` / 其他配置不合格，失败说明写到标准错误并指出不合规的规则；`4` 输出「用户名已存在」（用户名已被非管理员占用）；`5` 输出「无法连接数据库。请确认 PostgreSQL 已启动，并且 DATABASE_URL 正确」。同时执行两次引导时，迁移或角色目录的竞争会重试；落败的一次退出码 3，不会打印堆栈。重试仍失败时退出码 1，标准错误只说明请重试。任何输出和日志都不包含口令或令牌。
 
 机器令牌调用 `POST /api/v1/accounts` 并带 `role_ids: ["admin"]` 的路径仍然可用。库里只剩已停用的管理员时，引导命令仍退出 3，此时用机器令牌 `PATCH` 重新启用（S2b 之后）或 `POST /accounts` 新建管理员。
 
@@ -269,6 +269,10 @@ docker compose exec api kiln-admin bootstrap-admin --username ada --display-name
 控制台有登录页。创建账号时可以设置口令，库里只保存哈希。会话写在 Postgres，退出时撤销。未配置公司用户系统时使用本地口令。配置 `KILN_OIDC_*` 之后，用户信息同步按发行方和 subject 找到或创建 kiln 账号，新账号默认角色是 `reader`，不复制公司侧的组或角色。在职状态未通过或账号已停用时不建立会话。平台自身具备完整的账号与权限能力。公司用户系统的对接是可选的。可选对接之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。`KILN_API_TOKEN` 仍是机器和开发用的访问令牌，拥有目录中的全部权限。侧栏里的令牌输入不再是主要入口。控制台「账号与权限」在 API 尚未创建账号时显示「还没有账号」，并列出角色目录：`reader`（只读）、`builder`（构建者）、`publisher`（发布者）、`admin`（管理员）。这些角色参与写入鉴权。没有对应权限时返回 403。发起任务和产品构建需要 `executor.run`，对话需要 `agent.qa`。只读角色没有这两项，调用 `POST /api/v1/jobs`、`POST /api/v1/builds` 或 `POST /api/v1/llm/chat` 会返回 403。列出和查看账号、制品、skill 分别需要 `account.read`、`artifact.read`、`skill.read`，只读角色已有这三项。构建者可以提交 skill 审核（`skill.submit`），只读角色不能。发布仍由发布者和管理员负责（`skill.publish`）。退回草稿同样需要 `skill.publish`，须填写原因。查看执行器状态、任务、产品构建及其日志需要 `executor.read`，查看代码源适配器、仓库列表并解析引用需要 `git.read`。这两项授给构建者、发布者和管理员，不授给只读角色。
 
 需要一条账号时，可以向 API 登记。用户名须匹配 `^[a-z][a-z0-9_-]{2,31}$`。记录写在 Postgres 里，只重启 API 进程不会消失。上文 Postgres 一节有一组创建后重启再读取的命令。账号带 `source`：`local` 本地、`sync` 用户信息同步。
+
+`PATCH /api/v1/accounts/{id}` 需要 `account.manage`，只改 `status`（`active` 或 `disabled`）和 `role_ids`（至少 1 个已知角色）。响应增加只读 `updated_at` 和 `updated_by`。`updated_by` 是最后一次改动的账号 id；机器令牌写入 null。停用会撤销该账号的全部会话，重新启用不会恢复旧会话。停用后会拒绝口令登录、已有会话和用户信息同步登录。改角色不撤销会话，权限从下一次请求起按新角色计算。不能停用或降级最后一个启用的管理员，机器令牌也一样，返回 409「不能停用或降级最后一个管理员」。会话调用方不能停用自己或移除自己的管理员角色，返回 409「不能停用自己或移除自己的管理员角色」。
+
+`POST /api/v1/accounts/{id}/password` 需要 `account.manage`，正文 `{"password":"…"}`（8–128 个字符），成功返回 204。它撤销目标账号的全部会话；如果目标就是调用方本人，保留当前会话。`POST /api/v1/auth/password` 供已登录用户修改自己的口令，正文 `{"current_password","new_password"}`。当前口令不正确返回 400「当前口令不正确」。成功返回 204，并撤销其他会话、保留当前会话。机器令牌调用返回 403「机器令牌没有账号」。`source=sync` 的账号两个口令接口都返回 409「该账号没有本地口令」，不会为它新开本地登录。口令明文不出现在响应或日志里。控制台账号页在持有 `account.manage` 时可以停用或启用、修改角色、重置口令；已登录用户在侧栏可以修改自己的口令。
 
 ## 可选：模型端点
 
@@ -396,7 +400,15 @@ GitHub Actions 不使用上面的容器名和端口。`scripts/ci-external-servi
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e "./backend[dev]"
+# KILN_API_TOKEN 必填。缺失、空、kiln-local、以 kiln-test- 开头或少于 32 个字符时拒绝启动。
+export KILN_API_TOKEN="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 uvicorn kiln.main:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+在同一个虚拟环境里创建第一个管理员。口令从终端输入两次，或从标准输入读第一行，不接受命令行参数或环境变量：
+
+```bash
+kiln-admin bootstrap-admin --username ada --display-name Ada
 ```
 
 另一个终端：
@@ -434,6 +446,7 @@ docker compose --profile lab down -v
 
 这些情况都来自当前 compose 和配置代码。
 
+- **机器令牌不合格。** 未设置 `KILN_API_TOKEN`、值为空、等于 `kiln-local`、以 `kiln-test-` 开头，或去掉首尾空白后少于 32 个字符时，API 拒绝启动。标准错误只有中文说明：`kiln-local` 是被拒绝的示例值，并给出生成命令 `python -c "import secrets; print(secrets.token_hex(32))"`。不会打印令牌本身，也不会打印配置框架的堆栈。`KILN_BUILD_PENDING_TIMEOUT_SECONDS` 超出 60–86400 时，同样只打印中文范围说明。
 - **端口已被占用。** 默认栈在 `127.0.0.1` 上需要 `5432`、`8000`、`8080`，lab 另需 `18080`、`13000`。这些端口不向其他机器发布。Docker 无法绑定宿主机端口时，对应容器起不来。API 设置了 `depends_on.postgres.condition: service_healthy`，Postgres 起不来时 API 会一直等待。
 - **容器名冲突。** `container_name` 是全局的。守护进程里已经有 `kiln-postgres`、`kiln-api`、`kiln-console`、`kiln-jenkins` 或 `kiln-gitea` 时，新的 `up` 会被拒绝。换一个 compose 项目名也不能绕过这些固定名字。
 - **网络名冲突。** 网络固定叫 `kiln-net`。若同名网络已由别的来源创建且设置不兼容，compose 创建网络会失败。

@@ -2,7 +2,13 @@
 import { computed, onMounted, ref, watch } from "vue";
 
 import { accessReady, actionDeniedText, permissionDescription, perms, roles as catalogRoles } from "../access";
-import { errorText, getJson, isForbidden, postJson } from "../api";
+import {
+  DISABLE_CONFIRM_TEXT,
+  conflictText,
+  resetPasswordError,
+  rowActionLabels,
+} from "../accountLifecycle";
+import { errorText, getJson, isForbidden, patchJson, postJson } from "../api";
 import FormDialog from "../components/FormDialog.vue";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
@@ -37,6 +43,19 @@ const displayName = ref("");
 const email = ref("");
 const password = ref("");
 const roleIds = ref(["reader"]);
+const actionAccount = ref(null);
+const statusOpen = ref(false);
+const statusError = ref("");
+const statusBusy = ref(false);
+const rolesOpen = ref(false);
+const rolesError = ref("");
+const rolesBusy = ref(false);
+const roleChoice = ref([]);
+const resetOpen = ref(false);
+const resetError = ref("");
+const resetBusy = ref(false);
+const resetPassword = ref("");
+const resetFieldError = ref("");
 
 const roleNames = computed(() => {
   const names = new Map(catalogRoles.value.map((role) => [role.id, role.name]));
@@ -185,6 +204,107 @@ async function submitAccount() {
     createBusy.value = false;
   }
 }
+
+function startAction(item, action) {
+  actionAccount.value = item;
+  if (action.id === "status") {
+    statusError.value = "";
+    if (action.needsConfirm) {
+      statusOpen.value = true;
+      return;
+    }
+    submitStatus(action.body);
+    return;
+  }
+  if (action.id === "roles") {
+    roleChoice.value = [...(item.role_ids || [])];
+    rolesError.value = "";
+    rolesOpen.value = true;
+    return;
+  }
+  resetPassword.value = "";
+  resetError.value = "";
+  resetFieldError.value = "";
+  resetOpen.value = true;
+}
+
+async function submitStatus(body) {
+  const item = actionAccount.value;
+  if (!item || statusBusy.value) {
+    return;
+  }
+  statusBusy.value = true;
+  statusError.value = "";
+  try {
+    await patchJson(`/api/v1/accounts/${item.id}`, body);
+    statusOpen.value = false;
+    await load();
+  } catch (caught) {
+    const verbatim = conflictText(caught);
+    statusError.value = verbatim || errorText(caught, "无法更新账号");
+    statusOpen.value = true;
+    if (verbatim) {
+      await load();
+    }
+  } finally {
+    statusBusy.value = false;
+  }
+}
+
+async function submitRoles() {
+  const item = actionAccount.value;
+  if (!item || rolesBusy.value) {
+    return;
+  }
+  if (roleChoice.value.length === 0) {
+    rolesError.value = "请选择角色";
+    return;
+  }
+  rolesBusy.value = true;
+  rolesError.value = "";
+  try {
+    await patchJson(`/api/v1/accounts/${item.id}`, { role_ids: [...roleChoice.value] });
+    rolesOpen.value = false;
+    await load();
+  } catch (caught) {
+    const verbatim = conflictText(caught);
+    rolesError.value = verbatim || errorText(caught, "无法修改角色");
+    if (verbatim) {
+      await load();
+    }
+  } finally {
+    rolesBusy.value = false;
+  }
+}
+
+async function submitReset() {
+  const item = actionAccount.value;
+  if (!item || resetBusy.value) {
+    return;
+  }
+  const message = resetPasswordError(resetPassword.value);
+  resetFieldError.value = message;
+  resetError.value = "";
+  if (message) {
+    return;
+  }
+  const secret = resetPassword.value;
+  resetPassword.value = "";
+  resetBusy.value = true;
+  try {
+    await postJson(`/api/v1/accounts/${item.id}/password`, { password: secret });
+    resetOpen.value = false;
+    await load();
+  } catch (caught) {
+    const verbatim = conflictText(caught);
+    resetError.value = verbatim || errorText(caught, "无法重置口令");
+    if (verbatim) {
+      await load();
+    }
+  } finally {
+    resetBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -222,6 +342,7 @@ async function submitAccount() {
                 <th v-if="showSource">来源</th>
                 <th>状态</th>
                 <th>创建时间</th>
+                <th v-if="canDo('account.manage', perms)">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -238,6 +359,17 @@ async function submitAccount() {
                   <StatusTag :status="item.status" :label="item.status === 'active' ? '启用' : '停用'" />
                 </td>
                 <td class="nowrap">{{ formatTime(item.created_at) }}</td>
+                <td v-if="canDo('account.manage', perms)" class="nowrap">
+                  <button
+                    v-for="action in rowActionLabels(item, perms)"
+                    :key="action.id"
+                    type="button"
+                    class="btn btn-ghost"
+                    @click="startAction(item, action)"
+                  >
+                    {{ action.label }}
+                  </button>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -335,6 +467,49 @@ async function submitAccount() {
           </label>
         </div>
         <p v-if="createErrors.role_ids" class="field-error">{{ createErrors.role_ids }}</p>
+      </div>
+    </FormDialog>
+    <FormDialog
+      v-if="statusOpen"
+      title="停用账号"
+      :busy="statusBusy"
+      :error="statusError"
+      @close="statusOpen = false"
+      @submit="submitStatus({ status: 'disabled' })"
+    >
+      <p>{{ DISABLE_CONFIRM_TEXT }}</p>
+      <p v-if="actionAccount" class="mono">{{ actionAccount.username }}</p>
+    </FormDialog>
+    <FormDialog
+      v-if="rolesOpen"
+      title="修改角色"
+      :busy="rolesBusy"
+      :error="rolesError"
+      @close="rolesOpen = false"
+      @submit="submitRoles"
+    >
+      <div class="field">
+        <label>角色</label>
+        <div class="checks">
+          <label v-for="role in catalogRoles" :key="role.id" class="check">
+            <input v-model="roleChoice" type="checkbox" :value="role.id" />
+            {{ role.name }}
+          </label>
+        </div>
+      </div>
+    </FormDialog>
+    <FormDialog
+      v-if="resetOpen"
+      title="重置口令"
+      :busy="resetBusy"
+      :error="resetError"
+      @close="resetOpen = false"
+      @submit="submitReset"
+    >
+      <div class="field">
+        <label for="reset-password">新口令</label>
+        <input id="reset-password" v-model="resetPassword" type="password" autocomplete="new-password" />
+        <p v-if="resetFieldError" class="field-error">{{ resetFieldError }}</p>
       </div>
     </FormDialog>
   </template>

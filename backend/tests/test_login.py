@@ -14,7 +14,7 @@ from sqlalchemy import text
 from kiln.domain.rbac import PERMISSIONS, permissions_for
 from kiln.main import create_app
 from tests.oidc_double import OidcDouble
-from tests.support import TEST_API_TOKEN, app_settings, auth_headers, truncate_domain
+from tests.support import PROCESS_API_TOKEN, app_settings, auth_headers, truncate_domain
 
 LOCAL_PASSWORD = "correct-horse-1"
 
@@ -400,7 +400,7 @@ def test_auth_me_returns_the_principal_and_hides_secrets(client: TestClient) -> 
     assert machine.status_code == 200
     assert machine.headers["cache-control"] == "no-store"
     assert machine.json() == {"kind": "machine", "account": None, "permissions": catalog}
-    assert TEST_API_TOKEN not in machine.text
+    assert PROCESS_API_TOKEN not in machine.text
     assert "password" not in machine.text
     assert "expires_at" not in machine.text
     assert "token_hash" not in machine.text

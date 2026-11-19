@@ -2,9 +2,8 @@
 
 Login, logout, the OIDC callback, and the sync probe are outside the
 auth gate. They do not write domain rows except sessions and the account
-created or updated for an external subject. `GET /auth/me` is the only
-route on this router that requires a session or the machine token, and it
-only reads the current principal.
+created or updated for an external subject. `GET /auth/me` reads the current
+principal. `POST /auth/password` changes the signed-in user's local password.
 """
 
 import base64
@@ -23,10 +22,10 @@ from kiln.api.deps import get_oidc_http, get_settings, get_store
 from kiln.auth import SESSION_COOKIE, Principal, digest_token, require_auth, token_matches
 from kiln.config import Settings
 from kiln.db.store import PostgresStore
-from kiln.domain.accounts import Account
+from kiln.domain.accounts import Account, PasswordChange
 from kiln.domain.auth import LoginRequest, SessionLogin, SessionPrincipal, SyncStatus
 from kiln.domain.rbac import PERMISSIONS
-from kiln.errors import NotConfigured, Unauthorized, UpstreamFailure
+from kiln.errors import Forbidden, NotConfigured, Unauthorized, UpstreamFailure
 from kiln.oidc import OidcFlowError, begin_authorization, finish_authorization
 
 router = APIRouter(prefix="/auth", tags=["登录"])
@@ -167,7 +166,10 @@ def oidc_callback(
     if link.account is None:
         detail = "账号已停用" if link.denial == "disabled" else "在职状态未通过"
         return _deny_callback(settings, detail)
-    body, token = _issue_session(store, settings, link.account)
+    try:
+        body, token = _issue_session(store, settings, link.account)
+    except Unauthorized as exc:
+        return _deny_callback(settings, exc.detail)
     if "text/html" in request.headers.get("accept", "").lower():
         response: Response = RedirectResponse("/", status_code=303)
     else:
@@ -175,6 +177,23 @@ def oidc_callback(
     _remember_session(response, settings, token)
     _forget_oidc(response, settings)
     return response
+
+
+@router.post("/password", status_code=204, summary="修改自己的口令")
+def change_password(
+    payload: PasswordChange,
+    principal: Principal = Depends(require_auth),
+    store: PostgresStore = Depends(get_store),
+) -> Response:
+    if principal.kind != "user" or principal.account is None:
+        raise Forbidden("机器令牌没有账号")
+    store.change_password(
+        principal.account.id,
+        current_password=payload.current_password,
+        new_password=payload.new_password,
+        keep_hash=principal.session_hash,
+    )
+    return Response(status_code=204)
 
 
 def _issue_session(
@@ -188,6 +207,8 @@ def _issue_session(
         digest_token(token),
         settings.kiln_session_ttl_seconds,
     )
+    if expires_at is None:
+        raise Unauthorized("账号已停用")
     return SessionLogin(token=token, expires_at=expires_at, account=account), token
 
 

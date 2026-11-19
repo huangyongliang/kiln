@@ -8,19 +8,24 @@ from pydantic import ValidationError
 
 from kiln.config import (
     API_TOKEN_ERROR,
+    BUILD_PENDING_TIMEOUT_ERROR,
+    REJECTED_API_TOKEN_PREFIX,
     REJECTED_API_TOKENS,
     Settings,
     get_settings,
 )
 from kiln.domain.builds import ProductBuild
 from kiln.main import create_app, run
-from tests.support import TEST_API_TOKEN, app_settings, auth_headers
+from tests.support import PROCESS_API_TOKEN, TEST_API_TOKEN, app_settings, auth_headers
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
 
 
-def test_missing_api_token_refuses_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_api_token_refuses_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """Acceptance 1. Unset KILN_API_TOKEN fails in Settings and create_app."""
 
     monkeypatch.delenv("KILN_API_TOKEN", raising=False)
@@ -28,9 +33,18 @@ def test_missing_api_token_refuses_startup(monkeypatch: pytest.MonkeyPatch) -> N
     with pytest.raises(ValidationError, match="必须设置 KILN_API_TOKEN") as caught:
         Settings(_env_file=None)
     assert "kiln-local" not in str(caught.value)
+    assert "input_value" not in str(caught.value)
     get_settings.cache_clear()
-    with pytest.raises(ValidationError, match="必须设置 KILN_API_TOKEN"):
+    with pytest.raises(SystemExit) as created:
         create_app()
+    assert created.value.code == 2
+    created_err = capsys.readouterr().err
+    assert API_TOKEN_ERROR in created_err
+    assert "kiln-local 是被拒绝的示例值" in created_err
+    assert "secrets.token_hex" in created_err
+    assert "Traceback" not in created_err
+    assert "input_value" not in created_err
+    assert "ValidationError" not in created_err
     listened = {"called": False}
 
     def fail_if_called(*_args: object, **_kwargs: object) -> None:
@@ -39,9 +53,13 @@ def test_missing_api_token_refuses_startup(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr("kiln.main.uvicorn.run", fail_if_called)
     get_settings.cache_clear()
-    with pytest.raises(ValidationError, match="必须设置 KILN_API_TOKEN"):
+    with pytest.raises(SystemExit) as ran:
         run()
+    assert ran.value.code == 2
     assert listened["called"] is False
+    ran_err = capsys.readouterr().err
+    assert API_TOKEN_ERROR in ran_err
+    assert "Traceback" not in ran_err
 
 
 def test_rejected_and_short_tokens_do_not_echo_the_value() -> None:
@@ -79,27 +97,55 @@ def test_rejected_and_short_tokens_do_not_echo_the_value() -> None:
     trailing = Settings(kiln_api_token=f"{'x' * 32} ", _env_file=None)
     assert trailing.api_token_value() == "x" * 32
     assert REJECTED_API_TOKENS == {"kiln-local"}
-    assert "ALLOW_INSECURE" not in (BACKEND / "kiln" / "config.py").read_text(encoding="utf-8")
-    assert "kiln_allow_insecure" not in (BACKEND / "kiln" / "config.py").read_text(encoding="utf-8")
+    assert REJECTED_API_TOKEN_PREFIX == "kiln-test-"
+    rejected_tokens = (
+        TEST_API_TOKEN,
+        f"  {TEST_API_TOKEN}  ",
+        "kiln-test-ci-compose-config-placeholder",
+    )
+    for rejected_token in rejected_tokens:
+        with pytest.raises(ValidationError, match="必须设置 KILN_API_TOKEN") as caught:
+            Settings(kiln_api_token=rejected_token, _env_file=None)
+        rendered = str(caught.value)
+        assert "input_value" not in rendered
+        assert rejected_token.strip() not in rendered
+    config = (BACKEND / "kiln" / "config.py").read_text(encoding="utf-8")
+    assert "ALLOW_INSECURE" not in config
+    assert "kiln_allow_insecure" not in config
 
 
-def test_pending_timeout_bounds_refuse_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pending_timeout_bounds_refuse_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """Acceptance 7, bounds. 60 and 86400 start; outside that range does not."""
 
     for value in (60, 1800, 86400):
         settings = Settings(kiln_build_pending_timeout_seconds=value, _env_file=None)
         assert settings.kiln_build_pending_timeout_seconds == value
-    for value in (59, 86401):
-        with pytest.raises(ValidationError):
+    for value in (59, 86401, "59", "86401"):
+        with pytest.raises(ValidationError, match="60") as caught:
             Settings(kiln_build_pending_timeout_seconds=value, _env_file=None)
+        rendered = str(caught.value)
+        assert "86400" in rendered
+        assert BUILD_PENDING_TIMEOUT_ERROR in rendered
+        assert "input_value" not in rendered
+        assert str(value).strip() not in rendered
     monkeypatch.setenv("KILN_BUILD_PENDING_TIMEOUT_SECONDS", "59")
     get_settings.cache_clear()
-    with pytest.raises(ValidationError):
+    with pytest.raises(SystemExit) as low:
         create_app()
+    assert low.value.code == 2
+    low_err = capsys.readouterr().err
+    assert BUILD_PENDING_TIMEOUT_ERROR in low_err
+    assert API_TOKEN_ERROR not in low_err
+    assert "Traceback" not in low_err
+    assert "59" not in low_err
     monkeypatch.setenv("KILN_BUILD_PENDING_TIMEOUT_SECONDS", "86401")
     get_settings.cache_clear()
-    with pytest.raises(ValidationError):
+    with pytest.raises(SystemExit) as high:
         create_app()
+    assert high.value.code == 2
 
 
 def test_compose_requires_a_generated_token_and_keeps_loopback_ports() -> None:
@@ -118,9 +164,10 @@ def test_compose_requires_a_generated_token_and_keeps_loopback_ports() -> None:
     assert all(item.startswith("127.0.0.1:") for item in bindings)
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "不是密钥，只供 compose 插值" in workflow
-    placeholder = "ci-compose-config-placeholder-0000000000"
+    placeholder = "kiln-test-ci-compose-config-placeholder"
     assert placeholder in workflow
-    assert len(placeholder) >= 32
+    assert placeholder.startswith("kiln-test-")
+    assert len(placeholder) >= 1
     example = (ROOT / ".env.example").read_text(encoding="utf-8")
     assert 'python -c "import secrets; print(secrets.token_hex(32))"' in example
     assert re.search(r"^KILN_API_TOKEN=\s*$", example, re.MULTILINE)
@@ -145,8 +192,11 @@ def test_docs_reject_the_old_token_fallback_without_banning_the_explanation() ->
     assert phrase in readme
     assert phrase in deploy
     assert "kiln-local" not in compose
-    assert config.count("kiln-local") == 1
+    assert config.count("kiln-local") == 2
     assert 'REJECTED_API_TOKENS = {"kiln-local"}' in config
+    assert 'REJECTED_API_TOKEN_PREFIX = "kiln-test-"' in config
+    assert "kiln-local 是被拒绝的示例值" in config
+    assert "secrets.token_hex(32)" in config
     assert "SecretStr(LOCAL_API_TOKEN)" not in config
     assert "Bearer kiln-local" not in readme
     assert "Bearer kiln-local" not in deploy
@@ -170,6 +220,17 @@ def test_docs_reject_the_old_token_fallback_without_banning_the_explanation() ->
     assert "Jenkins 长期繁忙时调大这个值" in deploy
     assert "not_built" in readme
     assert "not_built" in deploy
+    readme_nodocker = readme.split("### 不使用 Docker", 1)[1].split("### ", 1)[0]
+    deploy_nodocker = deploy.split("## 不使用 Docker", 1)[1].split("## ", 1)[0]
+    assert "KILN_API_TOKEN" in readme_nodocker
+    assert "kiln-admin bootstrap-admin" in readme_nodocker
+    assert "KILN_API_TOKEN" in deploy_nodocker
+    assert "kiln-admin bootstrap-admin" in deploy_nodocker
+    failures = deploy.split("## 常见失败", 1)[1]
+    assert "KILN_API_TOKEN" in failures
+    assert "kiln-local" in failures
+    assert "32" in failures
+    assert "kiln-test-" in failures
 
 
 def test_runtime_flag_wording_and_test_token_stay_in_bounds() -> None:
@@ -177,10 +238,25 @@ def test_runtime_flag_wording_and_test_token_stay_in_bounds() -> None:
 
     assert ProductBuild.model_fields["deploys_to_runtime"].default is False
     assert len(TEST_API_TOKEN) >= 32
+    assert TEST_API_TOKEN.startswith("kiln-test-")
     assert "test" in TEST_API_TOKEN
     assert "not-a-secret" in TEST_API_TOKEN
-    assert auth_headers()["Authorization"] == f"Bearer {TEST_API_TOKEN}"
-    assert app_settings().api_token_value() == TEST_API_TOKEN
+    assert auth_headers()["Authorization"] == f"Bearer {PROCESS_API_TOKEN}"
+    assert app_settings().api_token_value() == PROCESS_API_TOKEN
+    assert not PROCESS_API_TOKEN.startswith("kiln-test-")
+
+
+def test_placeholders_are_rejected_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The test and CI placeholders are not accepted just because they are in the environment."""
+
+    for value in (TEST_API_TOKEN, "kiln-test-ci-compose-config-placeholder"):
+        monkeypatch.setenv("KILN_API_TOKEN", value)
+        get_settings.cache_clear()
+        with pytest.raises(ValidationError, match="必须设置 KILN_API_TOKEN") as caught:
+            Settings(_env_file=None)
+        assert value not in str(caught.value)
+        assert "input_value" not in str(caught.value)
+    assert app_settings().api_token_value() == PROCESS_API_TOKEN
     checked = [
         ROOT / "README.md",
         ROOT / "docs" / "DEPLOY.md",

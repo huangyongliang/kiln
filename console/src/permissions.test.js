@@ -209,6 +209,14 @@ test("creating an account needs account.manage", () => {
   assert.equal(canDo("account.create", new Set(["account.read"])), false);
 });
 
+test("disabling, changing roles, and resetting a password need account.manage", () => {
+  for (const action of ["account.disable", "account.roles", "account.resetPassword"]) {
+    assert.equal(canDo(action, new Set(["account.manage"])), true, action);
+    assert.equal(canDo(action, new Set(["account.read"])), false, action);
+    assert.equal(canDo(action, new Set(["skill.publish"])), false, action);
+  }
+});
+
 test("creating a skill needs skill.use", () => {
   assert.equal(canDo("skill.create", new Set(["skill.use"])), true);
   assert.equal(canDo("skill.create", new Set(["skill.read", "skill.submit"])), false);

@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
 from psycopg.errors import UniqueViolation
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -146,6 +146,8 @@ class PostgresStore:
             status="active",
             password_hash=password_hash,
             created_at=created_at,
+            updated_at=created_at,
+            updated_by=None,
         )
         row.roles = [
             AccountRoleRow(role_id=role_id, position=index)
@@ -183,6 +185,8 @@ class PostgresStore:
             status="active",
             password_hash=hash_password(payload.password),
             created_at=created_at,
+            updated_at=created_at,
+            updated_by=None,
         )
         row.roles = [AccountRoleRow(role_id="admin", position=0)]
         with self._session() as session:
@@ -256,6 +260,7 @@ class PostgresStore:
             if row is None:
                 if not employment_active:
                     return SyncLink(account=None, denial="employment")
+                created_at = clock.utcnow()
                 row = AccountRow(
                     id=uuid4(),
                     username=_unique_username(session, username_seed),
@@ -266,7 +271,9 @@ class PostgresStore:
                     idp_issuer=issuer,
                     idp_subject=subject,
                     employment_status=employment_status,
-                    created_at=clock.utcnow(),
+                    created_at=created_at,
+                    updated_at=created_at,
+                    updated_by=None,
                 )
                 row.roles = [AccountRoleRow(role_id="reader", position=0)]
                 session.add(row)
@@ -282,20 +289,151 @@ class PostgresStore:
                 return SyncLink(account=None, denial="employment")
             return SyncLink(account=_account(row))
 
-    def create_session(self, account_id: UUID, token_hash: str, ttl_seconds: int) -> datetime:
+    def create_session(
+        self,
+        account_id: UUID,
+        token_hash: str,
+        ttl_seconds: int,
+    ) -> datetime | None:
+        """Insert a session when the account is active in this same transaction.
+
+        The status read takes ``FOR SHARE``. PostgreSQL ``FOR KEY SHARE`` only
+        conflicts with ``FOR UPDATE`` and with updates of a key column, so a
+        plain ``UPDATE`` of ``status`` (which takes ``FOR NO KEY UPDATE``)
+        would not wait. ``FOR SHARE`` conflicts with both ``FOR NO KEY UPDATE``
+        and ``FOR UPDATE``, and still allows other ``FOR SHARE`` readers, so
+        concurrent logins for one account do not block each other. The foreign
+        key check on ``sessions.account_id`` only takes ``KEY SHARE`` and does
+        not close this window. Callers that change the account take
+        ``SELECT … FOR UPDATE`` on the account row first, then touch
+        ``sessions``, which is the same lock order as this insert.
+        """
+
         created_at = clock.utcnow()
         expires_at = created_at + timedelta(seconds=ttl_seconds)
-        row = SessionRow(
-            id=uuid4(),
-            token_hash=token_hash,
-            account_id=account_id,
-            created_at=created_at,
-            expires_at=expires_at,
-        )
         with self._session() as session:
-            session.add(row)
+            status = session.scalar(
+                select(AccountRow.status)
+                .where(AccountRow.id == account_id)
+                .with_for_update(read=True)
+            )
+            if status != "active":
+                return None
+            session.add(
+                SessionRow(
+                    id=uuid4(),
+                    token_hash=token_hash,
+                    account_id=account_id,
+                    created_at=created_at,
+                    expires_at=expires_at,
+                )
+            )
             session.commit()
         return expires_at
+
+    def update_account(
+        self,
+        account_id: UUID,
+        *,
+        status: str | None,
+        role_ids: list[str] | None,
+        actor_id: UUID | None,
+        self_edit: bool,
+    ) -> Account:
+        """Change status and/or roles under the admin-role lock.
+
+        Lock order is the ``admin`` role row, then the account row
+        ``FOR UPDATE``, then session revocation. Disabling revokes every
+        session for the account. A role change does not.
+        """
+
+        with self._session() as session:
+            locked = session.scalar(select(RoleRow).where(RoleRow.id == "admin").with_for_update())
+            if locked is None:
+                raise RuntimeError("admin role is missing from rbac_roles")
+            row = session.scalars(
+                select(AccountRow).where(AccountRow.id == account_id).with_for_update()
+            ).first()
+            if row is None:
+                raise NotFound("账号不存在")
+            previous_status = row.status
+            had_admin = any(item.role_id == "admin" for item in row.roles)
+            was_active_admin = had_admin and previous_status == "active"
+            disabling_self = self_edit and status == "disabled"
+            removing_own_admin = (
+                self_edit and role_ids is not None and had_admin and "admin" not in role_ids
+            )
+            if status is not None:
+                row.status = status
+            if role_ids is not None:
+                row.roles.clear()
+                session.flush()
+                for index, role_id in enumerate(role_ids):
+                    row.roles.append(AccountRoleRow(role_id=role_id, position=index))
+            session.flush()
+            active_admins = session.scalar(
+                select(func.count(func.distinct(AccountRow.id)))
+                .select_from(AccountRow)
+                .join(AccountRoleRow, AccountRoleRow.account_id == AccountRow.id)
+                .where(AccountRow.status == "active", AccountRoleRow.role_id == "admin")
+            )
+            if not active_admins and was_active_admin:
+                raise Conflict("不能停用或降级最后一个管理员")
+            if disabling_self or removing_own_admin:
+                raise Conflict("不能停用自己或移除自己的管理员角色")
+            row.updated_at = clock.utcnow()
+            row.updated_by = actor_id
+            if status == "disabled":
+                _revoke_account_sessions(session, row.id, None)
+            session.commit()
+            return _account(row)
+
+    def reset_password(
+        self,
+        account_id: UUID,
+        password: str,
+        *,
+        actor_id: UUID | None,
+        keep_hash: str | None,
+    ) -> None:
+        """Replace a local password and revoke sessions, keeping one hash."""
+
+        with self._session() as session:
+            row = _lock_account(session, account_id)
+            if row.idp_subject is not None:
+                raise Conflict("该账号没有本地口令")
+            row.password_hash = hash_password(password)
+            row.updated_at = clock.utcnow()
+            row.updated_by = actor_id
+            _revoke_account_sessions(session, row.id, keep_hash)
+            session.commit()
+
+    def change_password(
+        self,
+        account_id: UUID,
+        *,
+        current_password: str,
+        new_password: str,
+        keep_hash: str | None,
+    ) -> None:
+        """Change the caller's local password and revoke their other sessions."""
+
+        with self._session() as session:
+            row = _lock_account(session, account_id)
+            if row.idp_subject is not None:
+                raise Conflict("该账号没有本地口令")
+            if not row.password_hash or not verify_password(current_password, row.password_hash):
+                raise BadRequest("当前口令不正确")
+            row.password_hash = hash_password(new_password)
+            row.updated_at = clock.utcnow()
+            row.updated_by = account_id
+            _revoke_account_sessions(session, row.id, keep_hash)
+            session.commit()
+
+    def revoke_account_sessions(self, account_id: UUID, keep_hash: str | None = None) -> None:
+        with self._session() as session:
+            _revoke_account_sessions(session, account_id, keep_hash)
+            session.commit()
 
     def account_for_session_hash(self, token_hash: str) -> Account | None:
         now = clock.utcnow()
@@ -803,6 +941,27 @@ def _unique_username(session: Session, seed: str) -> str:
     raise Conflict("用户名已存在")
 
 
+def _lock_account(session: Session, account_id: UUID) -> AccountRow:
+    row = session.scalars(
+        select(AccountRow).where(AccountRow.id == account_id).with_for_update()
+    ).first()
+    if row is None:
+        raise NotFound("账号不存在")
+    return row
+
+
+def _revoke_account_sessions(session: Session, account_id: UUID, keep_hash: str | None) -> None:
+    statement = (
+        update(SessionRow)
+        .where(SessionRow.account_id == account_id)
+        .where(SessionRow.revoked_at.is_(None))
+        .values(revoked_at=clock.utcnow())
+    )
+    if keep_hash is not None:
+        statement = statement.where(SessionRow.token_hash != keep_hash)
+    session.execute(statement)
+
+
 def _commit_unique(session: Session, message: str) -> None:
     try:
         session.commit()
@@ -845,6 +1004,8 @@ def _account(row: AccountRow) -> Account:
         source="sync" if row.idp_subject is not None else "local",
         role_ids=[item.role_id for item in roles],
         created_at=row.created_at,
+        updated_at=row.updated_at,
+        updated_by=row.updated_by,
     )
 
 

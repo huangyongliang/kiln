@@ -44,6 +44,8 @@ def test_create_and_read_local_account(client: TestClient) -> None:
         "source",
         "role_ids",
         "created_at",
+        "updated_at",
+        "updated_by",
     }
 
     listed = client.get("/api/v1/accounts")

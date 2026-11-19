@@ -37,6 +37,9 @@ export const ACTION_GATES = {
   "skill.read": ["skill.read"],
   "account.read": ["account.read"],
   "account.create": ["account.manage"],
+  "account.disable": ["account.manage"],
+  "account.roles": ["account.manage"],
+  "account.resetPassword": ["account.manage"],
   "overview.builds": ["executor.read"],
   "overview.skills": ["skill.read"],
   "overview.artifacts": ["artifact.read"],
@@ -50,6 +53,9 @@ export const ACTION_GATES = {
 
 export const GATE_DOCS = [
   { action: "account.create", label: "新建账号", codes: ["account.manage"] },
+  { action: "account.disable", label: "停用或启用账号", codes: ["account.manage"] },
+  { action: "account.roles", label: "修改角色", codes: ["account.manage"] },
+  { action: "account.resetPassword", label: "重置口令", codes: ["account.manage"] },
   { action: "skill.create", label: "起草 Skill", codes: ["skill.use"] },
   { action: "skill.submit", label: "提交审核", codes: ["skill.submit", "skill.publish"] },
   { action: "skill.publish", label: "发布", codes: ["skill.publish"] },

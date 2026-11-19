@@ -51,7 +51,15 @@
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e "./backend[dev]"
+# KILN_API_TOKEN 必填。缺失、空、kiln-local、以 kiln-test- 开头或少于 32 个字符时拒绝启动。
+export KILN_API_TOKEN="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 uvicorn kiln.main:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+空库创建第一个管理员（口令从终端输入，不经过参数或环境变量）：
+
+```bash
+kiln-admin bootstrap-admin --username ada --display-name Ada
 ```
 
 另开一个终端：
@@ -101,7 +109,7 @@ docker compose --profile lab up
 | `KILN_HTTP_PORT` | `8000` | API 监听端口 |
 | `KILN_CORS_ORIGINS` | 本地控制台来源 | 逗号分隔 |
 | `DATABASE_URL` | 本地 Postgres | 元数据连接串。API 启动时连接并迁移 |
-| `KILN_API_TOKEN` | 无 | 必填；缺失、空、`kiln-local` 或少于 32 个字符时拒绝启动。`/api/v1` 的 Bearer 令牌。生成：python -c "import secrets; print(secrets.token_hex(32))" |
+| `KILN_API_TOKEN` | 无 | 必填；缺失、空、`kiln-local` 或少于 32 个字符时拒绝启动。以 `kiln-test-` 开头的值也会拒绝。`/api/v1` 的 Bearer 令牌。生成：python -c "import secrets; print(secrets.token_hex(32))" |
 | `LLM_PROVIDER` | `off` | `openai`、`mock` 或 `off`。`none` 和 `disabled` 视为 `off` |
 | `LLM_BASE_URL` | 空 | OpenAI 兼容根路径，例如 `http://127.0.0.1:11434/v1`。`openai` 时必填 |
 | `LLM_API_KEY` | 空 | 仅从环境读取。无鉴权的本地端点可以留空 |
@@ -146,7 +154,7 @@ docker compose --profile lab up
 
 - 登录：`POST /auth/login` 校验本地口令，写入会话哈希，设置 httpOnly cookie，并返回 Bearer 令牌。`POST /auth/logout` 撤销会话。口令只以哈希保存，响应里不出现口令
 - 用户信息同步：`GET /auth/sync` 说明是否已配置。未配置时 `GET /auth/oidc/start` 与 `GET /auth/oidc/callback` 返回「用户信息同步未配置」。配置后使用授权码和 PKCE，按发行方与 subject 找到或创建 kiln 账号。新账号的默认角色是 `reader`，不设置口令，也不复制公司侧的组或角色。在职状态未通过或账号已停用时不建立会话
-- 本地账号：`GET/POST /accounts`，`GET /accounts/{id}`。列出和查看需要 `account.read`。创建账号可以带口令，调用方需要 `account.manage`。账号带 `source`：`local` 本地、`sync` 用户信息同步
+- 本地账号：`GET/POST /accounts`，`GET /accounts/{id}`，`PATCH /accounts/{id}`，`POST /accounts/{id}/password`。列出和查看需要 `account.read`。创建、修改状态或角色、重置口令需要 `account.manage`。`PATCH` 只接受 `status`（`active` 或 `disabled`）和 `role_ids`（至少 1 个已知角色）。响应带只读 `updated_at` 与 `updated_by`：`updated_by` 是最后一次改动的账号 id，机器令牌为 null。停用会撤销该账号的全部会话，重新启用不会恢复旧会话，并会拒绝口令登录、已有会话和用户信息同步登录。改角色不撤销会话，权限从下一次请求起按新角色计算。管理员重置口令撤销目标的全部会话；重置本人时保留当前会话。`source=sync` 的账号两个口令接口都返回 409「该账号没有本地口令」。不能停用或降级最后一个启用的管理员，机器令牌也一样，返回 409「不能停用或降级最后一个管理员」。会话调用方不能停用自己或移除自己的管理员角色，返回 409「不能停用自己或移除自己的管理员角色」。本人修改口令是 `POST /auth/password`，撤销其他会话并保留当前会话；机器令牌返回 403「机器令牌没有账号」。账号带 `source`：`local` 本地、`sync` 用户信息同步
 - RBAC 目录：`GET /rbac/roles`，`GET /rbac/permissions`
 - 制品：`GET /artifacts` 与 `GET /artifacts/{id}` 需要 `artifact.read`，`POST /artifacts` 登记制品。响应带 `build_owned`：该制品被任一产品构建引用时为 true。`POST /artifacts/{id}/versions` 登记尚无字节的版本。来源由平台决定：`source` 默认且只接受 `upload`，传入 `build` 返回 422。版本响应带只读 `created_by`（账号 id；机器令牌或历史行为 null）
 - 保存字节：`PUT /artifacts/{id}/versions/{version}/content`，请求体是原始字节，并用 `X-Kiln-Checksum-Algorithm`、`X-Kiln-Checksum` 声明校验和。成功后该版本的 `content_available` 为 true，`source` 为 `upload`。这条 PUT 的请求头 `X-Kiln-Source` 被忽略，不决定来源。登录会话超过 1048576 字节返回 413；机器令牌仍用 `KILN_ARTIFACT_MAX_BYTES`。构建收集不受这道会话上限影响。已被产品构建引用的制品，登记版本和上传字节都返回 409，正文是「该制品由产品构建产出，不接受手工登记或上传」，机器令牌也不例外。历史上 `source` 为 `build` 且还没有字节的版本，手工补传返回 409，正文是「该版本登记为构建来源，不接受手工补传」。进程内的构建收集不经过这条手工路径。本切片之前入库的版本，`source` 可能由调用方声明，平台不回填

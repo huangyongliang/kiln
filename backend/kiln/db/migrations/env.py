@@ -17,7 +17,12 @@ def run_migrations_online() -> None:
     url = config.get_main_option("sqlalchemy.url")
     if not url:
         raise RuntimeError("sqlalchemy.url is not configured")
-    connectable = create_engine(url, poolclass=pool.NullPool)
+    # Bound catalog lock waits so two kiln-admin processes retry instead of hanging.
+    connectable = create_engine(
+        url,
+        poolclass=pool.NullPool,
+        connect_args={"options": "-c lock_timeout=5000"},
+    )
     try:
         with connectable.connect() as connection:
             context.configure(connection=connection)

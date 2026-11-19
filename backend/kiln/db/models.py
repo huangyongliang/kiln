@@ -74,6 +74,7 @@ class AccountRow(Base):
             "(idp_issuer IS NOT NULL AND idp_subject IS NOT NULL)",
             name="ck_accounts_idp_pair",
         ),
+        Index("ix_accounts_updated_by", "updated_by"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
@@ -86,6 +87,20 @@ class AccountRow(Base):
     idp_subject: Mapped[str | None] = mapped_column(Text)
     employment_status: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+    updated_by: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "accounts.id",
+            name="fk_accounts_updated_by_accounts",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
     roles: Mapped[list[AccountRoleRow]] = relationship(
         back_populates="account",
         order_by="AccountRoleRow.position",
@@ -113,6 +128,7 @@ class SessionRow(Base):
     __table_args__ = (
         UniqueConstraint("token_hash", name="uq_sessions_token_hash"),
         CheckConstraint("expires_at > created_at", name="ck_sessions_expiry"),
+        Index("ix_sessions_account_id", "account_id"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)

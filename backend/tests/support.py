@@ -13,8 +13,13 @@ from sqlalchemy.engine import Engine
 from kiln.config import Settings
 from kiln.db.engine import create_db_engine
 
-# Fixed test credential. Obviously not a secret. At least 32 characters.
+# Fixed placeholder. It starts with kiln-test-, so Settings rejects it.
+# Tests do not start the API with this value.
 TEST_API_TOKEN = "kiln-test-api-token-not-a-secret-32ch"
+
+# Credential constructed for this test process and passed to Settings explicitly.
+# It does not use the rejected kiln-test- prefix.
+PROCESS_API_TOKEN = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 _DEFAULT_DATABASE_URL = "postgresql://kiln:kiln@127.0.0.1:5432/kiln"
 _IDENT = re.compile(r"^[a-z_]+$")
@@ -48,7 +53,7 @@ def redact_database_url(database_url: str) -> str:
     return re.sub(r"://([^:@/]+):([^@/]+)@", r"://\1:***@", database_url)
 
 
-def auth_headers(token: str = TEST_API_TOKEN) -> dict[str, str]:
+def auth_headers(token: str = PROCESS_API_TOKEN) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -56,7 +61,7 @@ def app_settings(**overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "database_url": postgres_url(),
         "kiln_artifact_root": str(_TEST_ARTIFACT_ROOT),
-        "kiln_api_token": TEST_API_TOKEN,
+        "kiln_api_token": PROCESS_API_TOKEN,
         "_env_file": None,
     }
     values.update(overrides)

@@ -33,6 +33,7 @@ class Principal:
     kind: Literal["machine", "user"]
     permissions: frozenset[str]
     account: Account | None = None
+    session_hash: str | None = None
 
 
 def token_matches(provided: str, expected: str) -> bool:
@@ -80,14 +81,16 @@ def _resolve_principal(
     store = request.app.state.store
     cookie = request.cookies.get(SESSION_COOKIE, "")
     if cookie:
-        account = store.account_for_session_hash(digest_token(cookie))
+        cookie_hash = digest_token(cookie)
+        account = store.account_for_session_hash(cookie_hash)
         if account is not None:
-            return _user_principal(account)
+            return _user_principal(account, cookie_hash)
     bearer = _bearer_value(credentials)
     if bearer:
-        account = store.account_for_session_hash(digest_token(bearer))
+        bearer_hash = digest_token(bearer)
+        account = store.account_for_session_hash(bearer_hash)
         if account is not None:
-            return _user_principal(account)
+            return _user_principal(account, bearer_hash)
         if token_matches(bearer, settings.api_token_value()):
             return Principal(kind="machine", permissions=ALL_PERMISSIONS)
     raise Unauthorized()
@@ -99,11 +102,12 @@ def account_id(principal: Principal) -> UUID | None:
     return principal.account.id
 
 
-def _user_principal(account: Account) -> Principal:
+def _user_principal(account: Account, session_hash: str) -> Principal:
     return Principal(
         kind="user",
         permissions=permissions_for(account.role_ids),
         account=account,
+        session_hash=session_hash,
     )
 
 

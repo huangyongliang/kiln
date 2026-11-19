@@ -3,7 +3,7 @@ from pydantic import ValidationError
 
 from kiln.config import Settings, get_settings
 from kiln.main import create_app
-from tests.support import TEST_API_TOKEN
+from tests.support import PROCESS_API_TOKEN
 
 
 def test_defaults_leave_the_model_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -11,14 +11,15 @@ def test_defaults_leave_the_model_off(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.llm_provider == "off"
     assert settings.llm_api_key_value() == ""
     assert settings.database_url.startswith("postgresql://")
-    assert settings.api_token_value() == TEST_API_TOKEN
+    assert settings.api_token_value() == PROCESS_API_TOKEN
     assert settings.kiln_build_pending_timeout_seconds == 1800
     monkeypatch.delenv("KILN_API_TOKEN", raising=False)
     get_settings.cache_clear()
     with pytest.raises(ValidationError, match="必须设置 KILN_API_TOKEN"):
         Settings(_env_file=None)
-    with pytest.raises(ValidationError, match="必须设置 KILN_API_TOKEN"):
+    with pytest.raises(SystemExit) as exited:
         create_app()
+    assert exited.value.code == 2
 
 
 def test_generic_port_variables_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -149,7 +150,7 @@ def test_oidc_is_unset_until_every_required_value_is_present() -> None:
     assert configured.oidc_configured is True
     assert configured.oidc_scopes() == "openid profile email"
     assert configured.oidc_employment_active_values() == {"active", "employed"}
-    assert configured.api_token_value() == TEST_API_TOKEN
+    assert configured.api_token_value() == PROCESS_API_TOKEN
 
 
 def test_openai_accepts_a_configured_endpoint() -> None:
