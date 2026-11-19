@@ -268,6 +268,113 @@ export function preferredBranch(defaultBranch, branches) {
   return name;
 }
 
+function repositoryName(item) {
+  if (typeof item === "string") {
+    return item;
+  }
+  if (item && typeof item === "object" && typeof item.full_name === "string") {
+    return item.full_name;
+  }
+  return "";
+}
+
+function normalizedRepository(value) {
+  const text = value == null ? "" : String(value).trim();
+  const parts = text.split("/");
+  if (parts.length < 2 || parts.some((part) => !REPO_SEGMENT.test(part))) {
+    return null;
+  }
+  const name = parts[parts.length - 1];
+  const owner = parts.slice(0, -1).join("/");
+  return `${owner}/${name}`;
+}
+
+/**
+ * Same rule as kiln.domain.builds.repository_in_skill_scope.
+ * An empty allow list permits any repository. Otherwise compare normalized
+ * owner/name, case-sensitively. An allow-list entry that does not parse
+ * matches the trimmed repository or that normalized owner/name exactly.
+ */
+export function repositoryInSkillScope(repository, allowed) {
+  if (!Array.isArray(allowed) || allowed.length === 0) {
+    return true;
+  }
+  const raw = repository == null ? "" : String(repository).trim();
+  const normalized = normalizedRepository(raw);
+  for (const entry of allowed) {
+    if (typeof entry !== "string") {
+      continue;
+    }
+    const item = entry.trim();
+    const entryNormalized = normalizedRepository(item);
+    if (entryNormalized == null) {
+      if (item === raw || (normalized != null && item === normalized)) {
+        return true;
+      }
+      continue;
+    }
+    if (normalized != null && entryNormalized === normalized) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Repositories the start-build select may offer.
+ * No skill: none. Empty allow list: the whole loaded catalog.
+ * Otherwise catalog rows whose full_name is inside the skill allow list.
+ */
+export function buildRepositoryChoices(skill, catalog) {
+  const items = Array.isArray(catalog) ? catalog : [];
+  if (!skill || typeof skill !== "object") {
+    return [];
+  }
+  const allowed = Array.isArray(skill.allowed_repositories) ? skill.allowed_repositories : [];
+  if (allowed.length === 0) {
+    return items.slice();
+  }
+  return items.filter((item) => {
+    const name = repositoryName(item);
+    if (!name.trim()) {
+      return false;
+    }
+    return repositoryInSkillScope(name, allowed);
+  });
+}
+
+/**
+ * Keep the current repository when it is still one of the offered choices.
+ * Otherwise return an empty string so the form does not pick a replacement.
+ */
+export function repositoryKeptForSkill(current, choices) {
+  const text = current == null ? "" : String(current).trim();
+  if (!text || !Array.isArray(choices)) {
+    return "";
+  }
+  for (const item of choices) {
+    const name = repositoryName(item);
+    if (name.trim() === text) {
+      return name;
+    }
+  }
+  return "";
+}
+
+export function skillAllowlistCatalogHint(skill, choices) {
+  if (!skill || typeof skill !== "object") {
+    return "";
+  }
+  const allowed = skill.allowed_repositories;
+  if (!Array.isArray(allowed) || allowed.length === 0) {
+    return "";
+  }
+  if (Array.isArray(choices) && choices.length > 0) {
+    return "";
+  }
+  return "该 Skill 的允许仓库不在当前代码源目录中";
+}
+
 export function branchLoadMessage(status) {
   if (status === 403) {
     return "没有权限";
