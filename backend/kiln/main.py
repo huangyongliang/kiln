@@ -270,7 +270,8 @@ def create_app(
     return app
 
 
-_SECRET_FIELDS = frozenset({"password", "current_password", "new_password"})
+def _is_password_field(name: object) -> bool:
+    return isinstance(name, str) and "password" in name.casefold()
 
 
 def _redact_password(detail: object) -> object:
@@ -284,12 +285,12 @@ def _redact_encoded(detail: object) -> object:
     if isinstance(detail, dict):
         cleaned = {key: _redact_encoded(value) for key, value in detail.items()}
         loc = cleaned.get("loc")
-        if isinstance(loc, list) and any(name in _SECRET_FIELDS for name in loc):
+        if isinstance(loc, list) and any(_is_password_field(name) for name in loc):
             cleaned.pop("input", None)
         hidden = cleaned.get("input")
-        if isinstance(hidden, dict) and any(name in hidden for name in _SECRET_FIELDS):
+        if isinstance(hidden, dict) and any(_is_password_field(name) for name in hidden):
             cleaned["input"] = {
-                key: value for key, value in hidden.items() if key not in _SECRET_FIELDS
+                key: value for key, value in hidden.items() if not _is_password_field(key)
             }
         return cleaned
     return detail
