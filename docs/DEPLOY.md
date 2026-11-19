@@ -465,7 +465,9 @@ docker exec kiln-own-jenkins cat /var/jenkins_home/secrets/initialAdminPassword
 
 推荐使用上面的用户和 API 令牌。产品也接受该用户的口令，只建议用于一次性环境。CI 的一次性实例把管理员口令当作令牌。
 
-该用户要能创建、读取、删除任务，触发构建，读取日志，并下载归档制品。kiln 的调用是 `POST /createItem`、`POST /job/.../build`、`POST /job/.../buildWithParameters`、`POST /job/.../doDelete`、任务和队列的 `GET .../api/json`、`GET .../consoleText`、`GET .../artifact/...`，以及 `GET /crumbIssuer/api/json`。把这些调用对照官方 Jenkins 的授权说明自行映射。本文不写仓库里没有出现的矩阵权限标识，也不写插件名。
+该用户要能创建、读取、删除任务，触发构建，读取日志，并下载归档制品。kiln 的调用是 `POST /createItem`、`POST /job/.../build`、`POST /job/.../buildWithParameters`、`POST /job/.../doDelete`、任务和队列的 `GET .../api/json`、`GET .../consoleText`、`GET .../artifact/...`、`GET /crumbIssuer/api/json`，以及只读的 `GET /computer/api/json`（查询参数 `tree=computer[displayName,offline,assignedLabels[name]]`，用来确认已填写的标签或节点名是否有 `offline` 为 false 的节点）。该只读调用对照 CI 镜像 `jenkins/jenkins:2.580.2-lts-alpine`，与占位标签 `jenkins/jenkins:lts-jdk17` 的 Remote API 兼容。把这些调用对照官方 Jenkins 的授权说明自行映射。本文不写仓库里没有出现的矩阵权限标识，也不写插件名。
+
+迁移 `0013_build_package_types` 增加构建类型目录，并把已有 skill 绑到种子码 `generic`。降级时，只有制品、下载预约、产品构建和 skill 绑定的类型码仍全部是 `maven`、`python`、`generic`、`frontend`，才会恢复原来的三条检查约束。若已经使用了新的类型码，降级失败并说明原因，不会删掉这些行。
 
 CI 一次性实例使用 `FullControlOnceLoggedInAuthorizationStrategy`，并禁止匿名读取。那是一次性环境的宽松策略，不是生产环境的最小权限。对应脚本是 `scripts/jenkins/init.groovy.d/basic-security.groovy`，只给 CI 的一次性容器使用。
 

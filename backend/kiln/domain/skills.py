@@ -12,6 +12,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
+from kiln.domain.package_types import CODE_INVALID, GENERIC_CODE, RuntimeCondition, clean_code
 from kiln.domain.text import has_invisible_control
 
 
@@ -59,6 +60,7 @@ class SkillCreate(BaseModel):
     inputs: list[SkillInput] = Field(default_factory=list, max_length=32)
     toolchain: str | None = Field(default=None, max_length=200)
     environment: str | None = Field(default=None, max_length=200)
+    build_package_type: str = GENERIC_CODE
     allowed_repositories: list[str] = Field(default_factory=list, max_length=50)
     allowed_dependencies: list[str] = Field(default_factory=list, max_length=50)
     steps: list[SkillStep] = Field(default_factory=list, max_length=20)
@@ -73,6 +75,18 @@ class SkillCreate(BaseModel):
         if any(ord(char) < 32 for char in text) or has_invisible_control(text):
             raise ValueError("名称含有非法字符")
         return text
+
+    @field_validator("build_package_type", mode="before")
+    @classmethod
+    def default_package_type(cls, value: object) -> str:
+        if value is None:
+            return GENERIC_CODE
+        if not isinstance(value, str):
+            raise ValueError(CODE_INVALID)
+        text = value.strip()
+        if not text:
+            return GENERIC_CODE
+        return clean_code(text)
 
     @field_validator("toolchain", "environment", "output_spec")
     @classmethod
@@ -124,6 +138,9 @@ class Skill(BaseModel):
     inputs: list[SkillInput]
     toolchain: str | None
     environment: str | None
+    build_package_type: str
+    build_package_type_label: str
+    build_runtime_conditions: list[RuntimeCondition] = Field(default_factory=list)
     allowed_repositories: list[str]
     allowed_dependencies: list[str]
     steps: list[SkillStep]

@@ -705,11 +705,11 @@ def test_session_issued_first_is_revoked_by_a_later_disable(client: TestClient) 
 
 
 def test_migration_0012_backfills_and_round_trips(client: TestClient) -> None:
-    """Acceptance 20. Head is 0012. Backfill, default, indexes, and downgrade."""
+    """Acceptance 20. Head is 0013. 0012 backfill, default, indexes, and downgrade."""
 
     cfg = _alembic_config(postgres_url())
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == ["0012_account_lifecycle"]
+    assert script.get_heads() == ["0013_build_package_types"]
     revision = script.get_revision("0012_account_lifecycle")
     assert revision is not None
     assert revision.down_revision == "0011_actor_indexes"
@@ -997,7 +997,7 @@ def _assert_lifecycle_on_empty_database() -> None:
         command.upgrade(_alembic_config(url), "head")
         _assert_lifecycle_schema(empty)
         assert ScriptDirectory.from_config(_alembic_config(url)).get_heads() == [
-            "0012_account_lifecycle"
+            "0013_build_package_types"
         ]
     finally:
         if empty is not None:

@@ -1,9 +1,10 @@
 """Local RBAC catalog.
 
 The catalog is who may manage accounts, use, submit, or publish skills, upload
-or download artifacts, read executor, job, build, and git-source state, and
-start a job or product build on a compat executor, plus which in-platform
-agent abilities can be granted. Routes that match one of these codes check
+or download artifacts, read executor, job, build, and git-source state,
+start a job or product build on a compat executor, and manage the build type
+catalog, plus which in-platform agent abilities can be granted. Routes that
+match one of these codes check
 the signed-in user's roles. `KILN_API_TOKEN` is a machine credential and has
 every code. Optional company user-system sync does not copy groups or roles
 into this catalog.
@@ -77,6 +78,7 @@ PERMISSIONS: tuple[Permission, ...] = (
     Permission(code="executor.run", description="在兼容执行器上发起任务或产品构建"),
     Permission(code="git.read", description="查看代码源适配器、仓库列表、分支并解析引用"),
     Permission(code="llm.manage", description="管理模型目录及角色可用模型"),
+    Permission(code="build.catalog.manage", description="管理构建类型与运行时目录"),
 )
 
 _PERMISSION_CODES = {item.code for item in PERMISSIONS}

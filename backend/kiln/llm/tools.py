@@ -235,7 +235,7 @@ _TOOLS: tuple[_Tool, ...] = (
         name="draft_skill",
         description=(
             "创建一条 skill 草稿。参数与创建草稿相同，包含名称、版本、输入、步骤和范围。"
-            "只保存草稿，不提交审核，不发布，不执行步骤。"
+            "build_package_type 省略时使用 generic。只保存草稿，不提交审核，不发布，不执行步骤。"
             "成功后告诉用户到 Skill 页提交审核。"
         ),
         permissions=frozenset({"agent.draft_skill", "skill.use"}),
@@ -246,6 +246,7 @@ _TOOLS: tuple[_Tool, ...] = (
         name="update_skill",
         description=(
             "完整替换一条草稿的可变字段。参数与创建草稿相同，并额外需要 id。"
+            "省略 build_package_type 时按 generic 保存。"
             "只更新草稿，不改变状态，不清空退回记录，不提交审核，不发布，不执行步骤。"
             "审核中或已发布不能改。成功后告诉用户到 Skill 页提交审核。"
         ),
@@ -258,6 +259,7 @@ _TOOLS: tuple[_Tool, ...] = (
         description=(
             "发起与 POST /builds 相同的产品构建。"
             "必须提供已发布 skill 的 skill_id，以及仓库、引用、制品名、版本、包类型和可选名称。"
+            "package_type 必须等于该 skill 绑定的构建类型。"
             "仓库须落在该 skill 的允许列表内；列表为空时允许代码源能解析的仓库。"
             "只开始构建，不等待结束，不下载或保存制品字节，不执行 skill 步骤。"
         ),

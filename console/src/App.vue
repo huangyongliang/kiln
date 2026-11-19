@@ -38,6 +38,7 @@ const links = [
   { to: "/skills", route: "skills", label: "Skill", sub: "构建流程", icon: "skills" },
   { to: "/access", route: "access", label: "账号与权限", icon: "access" },
   { to: "/models", route: "models", label: "模型配置", icon: "models" },
+  { to: "/build-types", route: "build-types", label: "构建类型", icon: "catalog" },
   { to: "/chat", route: "chat", label: "对话", icon: "chat" },
 ];
 
@@ -52,6 +53,7 @@ const baseCrumbs = {
   "skill-new": "Skill",
   access: "账号与权限",
   models: "模型配置",
+  "build-types": "构建类型",
   chat: "对话",
 };
 

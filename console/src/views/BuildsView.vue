@@ -13,12 +13,14 @@ import {
   branchLoadMessage,
   buildNameError,
   buildRepositoryChoices,
+  buildSubmitErrorTarget,
   catalogBranchError,
   catalogRepositoryError,
   fieldErrors,
   packageTypeError,
   preferredBranch,
   repositoryKeptForSkill,
+  runtimeSummary,
   skillAllowlistCatalogHint,
   versionError,
 } from "../forms";
@@ -75,7 +77,7 @@ const openedQuery = ref("");
 const refName = ref("");
 const artifactName = ref("");
 const buildVersion = ref("");
-const packageType = ref("generic");
+const packageType = ref("");
 const taskName = ref("");
 let timer = 0;
 let branchTicket = 0;
@@ -87,12 +89,6 @@ const canStartBuild = computed(
 const canCreateBuild = computed(
   () => Boolean(executor.value?.configured) && canStartBuild.value,
 );
-const PACKAGE_OPTIONS = [
-  ["maven", "Maven"],
-  ["python", "Python"],
-  ["generic", "通用包"],
-  ["frontend", "前端构建包"],
-];
 const showJobForm = computed(
   () => Boolean(executor.value?.configured) && canDo("job.create", perms.value),
 );
@@ -105,6 +101,20 @@ const buildRepositories = computed(() =>
 const skillRepositoryGap = computed(() =>
   skillAllowlistCatalogHint(selectedPublishedSkill.value, buildRepositories.value),
 );
+const boundTypeLabel = computed(() => {
+  const skill = selectedPublishedSkill.value;
+  if (!skill) {
+    return "";
+  }
+  return skill.build_package_type_label || skill.build_package_type || "";
+});
+const boundRuntime = computed(() => {
+  const skill = selectedPublishedSkill.value;
+  if (!skill) {
+    return "";
+  }
+  return runtimeSummary(skill.build_runtime_conditions) || "无运行时条件";
+});
 
 const filteredBuilds = computed(() => {
   const needle = query.value.trim().toLowerCase();
@@ -140,18 +150,27 @@ watch(accessReady, (ready) => {
 watch(repository, (value) => {
   loadBranches(value);
 });
+watch([skillId, publishedSkills], syncBoundPackageType);
 watch(skillId, () => {
   const kept = repositoryKeptForSkill(repository.value, buildRepositories.value);
   if (kept !== repository.value) {
     repository.value = kept;
   }
-  if (!Object.prototype.hasOwnProperty.call(buildErrors.value, "repository")) {
+  if (
+    !Object.prototype.hasOwnProperty.call(buildErrors.value, "repository") &&
+    !Object.prototype.hasOwnProperty.call(buildErrors.value, "package_type")
+  ) {
     return;
   }
   const next = { ...buildErrors.value };
   delete next.repository;
+  delete next.package_type;
   buildErrors.value = next;
 });
+
+function syncBoundPackageType() {
+  packageType.value = selectedPublishedSkill.value?.build_package_type || "";
+}
 
 function matchesStatus(status, filter) {
   if (filter === "all") {
@@ -350,9 +369,9 @@ function openBuildForm() {
   branchesLoading.value = false;
   artifactName.value = "";
   buildVersion.value = "";
-  packageType.value = "generic";
   taskName.value = "";
   skillId.value = isUuid(requested) ? requested : "";
+  syncBoundPackageType();
   buildError.value = "";
   buildErrors.value = {};
   if (
@@ -408,9 +427,13 @@ async function submitBuild() {
   if (versionMessage) {
     local.version = versionMessage;
   }
-  const typeMessage = packageTypeError(packageType.value);
-  if (typeMessage) {
-    local.package_type = typeMessage;
+  if (selectedPublishedSkill.value) {
+    const typeMessage = packageTypeError(packageType.value, [
+      selectedPublishedSkill.value.build_package_type,
+    ]);
+    if (typeMessage) {
+      local.package_type = typeMessage;
+    }
   }
   const taskMessage = buildNameError(taskName.value);
   if (taskMessage) {
@@ -457,7 +480,12 @@ async function submitBuild() {
       }
     }
     if (caught?.status === 422 && typeof caught.detail === "string") {
-      mapped.repository = caught.message;
+      const target = buildSubmitErrorTarget(caught.detail);
+      if (target === "form") {
+        buildError.value = caught.message;
+        return;
+      }
+      mapped[target] = caught.message;
     }
     if (Object.keys(mapped).length) {
       buildErrors.value = mapped;
@@ -773,9 +801,8 @@ async function loadBranches(value) {
       </div>
       <div class="field">
         <label for="build-type">类型</label>
-        <select id="build-type" v-model="packageType">
-          <option v-for="item in PACKAGE_OPTIONS" :key="item[0]" :value="item[0]">{{ item[1] }}</option>
-        </select>
+        <input id="build-type" :value="boundTypeLabel" type="text" readonly />
+        <p v-if="selectedPublishedSkill" class="hint">{{ boundRuntime }}</p>
         <p v-if="buildErrors.package_type" class="field-error">{{ buildErrors.package_type }}</p>
       </div>
       <div class="field">

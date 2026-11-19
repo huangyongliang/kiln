@@ -21,6 +21,8 @@ from kiln.db.models import (
     AccountRow,
     ArtifactRow,
     ArtifactVersionRow,
+    BuildPackageTypeConditionRow,
+    BuildPackageTypeRow,
     PermissionRow,
     ProductBuildRow,
     ReservationRow,
@@ -37,7 +39,6 @@ from kiln.domain.artifacts import (
     BUILD_OWNED_WRITE_DETAIL,
     BUILD_SOURCE_FILL_DETAIL,
     FOREIGN_BUILD_VERSION_DETAIL,
-    PACKAGE_LABELS,
     VERSION_PATTERN,
     Artifact,
     ArtifactCreate,
@@ -46,10 +47,20 @@ from kiln.domain.artifacts import (
     ArtifactVersionCreate,
     Checksum,
     DownloadReservationCreate,
-    PackageType,
     Reservation,
     RetrievedBytes,
     RetrieveResult,
+)
+from kiln.domain.package_types import (
+    TYPE_DISABLED,
+    TYPE_DISABLED_DRAFT,
+    TYPE_EXISTS,
+    TYPE_MISSING,
+    TYPE_REFERENCED,
+    BuildPackageType,
+    BuildPackageTypeCreate,
+    BuildPackageTypeUpdate,
+    RuntimeCondition,
 )
 from kiln.domain.rbac import Permission, Role
 from kiln.domain.skills import (
@@ -60,7 +71,7 @@ from kiln.domain.skills import (
     SkillStatus,
     SkillStep,
 )
-from kiln.errors import BadRequest, Conflict, Gone, NotFound, StorageError
+from kiln.errors import BadRequest, Conflict, Gone, NotFound, StorageError, Unprocessable
 from kiln.passwords import hash_password, verify_password
 from kiln.paths import retrieve_content_path, retrieve_path
 from kiln.storage.local import LocalBlobStore
@@ -76,6 +87,7 @@ _SKILL_LOAD = (
     selectinload(SkillRow.steps),
     selectinload(SkillRow.allowed_repositories),
     selectinload(SkillRow.allowed_dependencies),
+    selectinload(SkillRow.catalog_entry).selectinload(BuildPackageTypeRow.conditions),
 )
 
 
@@ -471,7 +483,8 @@ class PostgresStore:
                 .options(selectinload(ArtifactRow.versions))
             ).all()
             owned = _build_owned_ids(session)
-            return [_artifact(row, build_owned=row.id in owned) for row in rows]
+            labels = package_type_labels(session)
+            return [_artifact(row, build_owned=row.id in owned, labels=labels) for row in rows]
 
     def get_artifact(self, artifact_id: UUID) -> Artifact:
         with self._session() as session:
@@ -482,7 +495,11 @@ class PostgresStore:
             ).first()
             if row is None:
                 raise NotFound("制品不存在")
-            return _artifact(row, build_owned=_artifact_is_build_owned(session, artifact_id))
+            return _artifact(
+                row,
+                build_owned=_artifact_is_build_owned(session, artifact_id),
+                labels=package_type_labels(session),
+            )
 
     def create_artifact(self, payload: ArtifactCreate) -> Artifact:
         artifact_id = uuid4()
@@ -492,10 +509,12 @@ class PostgresStore:
             name=payload.name,
             group_name=payload.group,
             description=payload.description,
-            package_type=payload.package_type.value,
+            package_type=payload.package_type,
             created_at=created_at,
         )
         with self._session() as session:
+            entry = _require_enabled_package_type(session, payload.package_type, draft=False)
+            row.package_type = entry.code
             existing = session.scalar(
                 select(ArtifactRow.id).where(
                     ArtifactRow.name == payload.name,
@@ -506,7 +525,11 @@ class PostgresStore:
                 raise Conflict("同组内制品名称已存在")
             session.add(row)
             _commit_unique(session, "同组内制品名称已存在")
-            return _artifact(row, build_owned=False)
+            return _artifact(
+                row,
+                build_owned=False,
+                labels=package_type_labels(session),
+            )
 
     def add_version(
         self,
@@ -569,7 +592,7 @@ class PostgresStore:
             created_at = clock.utcnow()
             reservation_id = uuid4()
             expires_at = created_at + timedelta(seconds=payload.ttl_seconds)
-            package_type = PackageType(artifact.package_type)
+            labels = package_type_labels(session)
             row = ReservationRow(
                 id=reservation_id,
                 artifact_id=artifact.id,
@@ -590,8 +613,8 @@ class PostgresStore:
                 artifact_id=artifact.id,
                 artifact_name=artifact.name,
                 version=matched.version,
-                package_type=package_type,
-                package_type_label=PACKAGE_LABELS[package_type],
+                package_type=artifact.package_type,
+                package_type_label=_label(labels, artifact.package_type),
                 checksum=Checksum(
                     algorithm=matched.checksum_algorithm,
                     value=matched.checksum_value,
@@ -678,7 +701,7 @@ class PostgresStore:
             row = _load_reservation(session, reservation_id)
             version = session.get(ArtifactVersionRow, (row.artifact_id, row.version))
             available = bool(version is not None and version.content_available and version.blob_key)
-            package_type = PackageType(row.package_type)
+            labels = package_type_labels(session)
             source = ArtifactSource(version.source) if version is not None else None
             foreign = (
                 version is not None
@@ -696,8 +719,8 @@ class PostgresStore:
                 artifact_id=row.artifact_id,
                 name=row.artifact_name,
                 version=row.version,
-                package_type=package_type,
-                package_type_label=PACKAGE_LABELS[package_type],
+                package_type=row.package_type,
+                package_type_label=_label(labels, row.package_type),
                 checksum=Checksum(
                     algorithm=row.checksum_algorithm,
                     value=row.checksum_value,
@@ -798,6 +821,8 @@ class PostgresStore:
             )
             if existing is not None:
                 raise Conflict("同名同版本的 skill 已存在")
+            entry = _require_enabled_package_type(session, payload.build_package_type, draft=True)
+            row.build_package_type = entry.code
             session.add(row)
             _commit_unique(session, "同名同版本的 skill 已存在")
             return _skill(row)
@@ -813,6 +838,7 @@ class PostgresStore:
             row = _load_skill(session, skill_id, lock=True)
             if row.status != SkillStatus.draft.value:
                 raise Conflict("只有草稿可以修改")
+            entry = _require_enabled_package_type(session, payload.build_package_type, draft=True)
             taken = session.scalar(
                 select(SkillRow.id).where(
                     SkillRow.name == payload.name,
@@ -827,6 +853,7 @@ class PostgresStore:
             row.description = payload.description
             row.toolchain = payload.toolchain
             row.environment = payload.environment
+            row.build_package_type = entry.code
             row.output_spec = payload.output_spec
             row.updated_at = clock.utcnow()
             row.inputs.clear()
@@ -857,6 +884,75 @@ class PostgresStore:
             ]
             _commit_unique(session, "同名同版本的 skill 已存在")
             return _skill(row)
+
+    def list_build_package_types(self, *, enabled_only: bool) -> list[BuildPackageType]:
+        with self._session() as session:
+            stmt = (
+                select(BuildPackageTypeRow)
+                .options(selectinload(BuildPackageTypeRow.conditions))
+                .order_by(BuildPackageTypeRow.position, BuildPackageTypeRow.code)
+            )
+            if enabled_only:
+                stmt = stmt.where(BuildPackageTypeRow.enabled.is_(True))
+            return [_package_type(row) for row in session.scalars(stmt).all()]
+
+    def get_build_package_type(self, code: str) -> BuildPackageType:
+        with self._session() as session:
+            row = _load_package_type(session, code, lock=False)
+            if row is None:
+                raise Unprocessable(TYPE_MISSING)
+            return _package_type(row)
+
+    def create_build_package_type(self, payload: BuildPackageTypeCreate) -> BuildPackageType:
+        now = clock.utcnow()
+        with self._session() as session:
+            if session.get(BuildPackageTypeRow, payload.code) is not None:
+                raise Conflict(TYPE_EXISTS)
+            position = session.scalar(select(func.max(BuildPackageTypeRow.position)))
+            row = BuildPackageTypeRow(
+                code=payload.code,
+                label=payload.label,
+                description=payload.description,
+                enabled=payload.enabled,
+                jenkins_label=payload.jenkins_label,
+                position=0 if position is None else position + 1,
+                created_at=now,
+                updated_at=now,
+            )
+            row.conditions = _condition_rows(payload.runtime_conditions)
+            session.add(row)
+            _commit_unique(session, TYPE_EXISTS)
+            return _package_type(row)
+
+    def update_build_package_type(
+        self,
+        code: str,
+        payload: BuildPackageTypeUpdate,
+    ) -> BuildPackageType:
+        with self._session() as session:
+            row = _load_package_type(session, code, lock=True)
+            if row is None:
+                raise NotFound(TYPE_MISSING)
+            row.label = payload.label
+            row.description = payload.description
+            row.enabled = payload.enabled
+            row.jenkins_label = payload.jenkins_label
+            row.updated_at = clock.utcnow()
+            row.conditions.clear()
+            session.flush()
+            row.conditions = _condition_rows(payload.runtime_conditions)
+            session.commit()
+            return _package_type(row)
+
+    def delete_build_package_type(self, code: str) -> None:
+        with self._session() as session:
+            row = _load_package_type(session, code, lock=True)
+            if row is None:
+                raise NotFound(TYPE_MISSING)
+            if _package_type_referenced(session, code):
+                raise Conflict(TYPE_REFERENCED)
+            session.delete(row)
+            session.commit()
 
     def submit_skill_review(self, skill_id: UUID) -> Skill:
         return self._transition(
@@ -1021,16 +1117,20 @@ def _version(row: ArtifactVersionRow) -> ArtifactVersion:
     )
 
 
-def _artifact(row: ArtifactRow, *, build_owned: bool) -> Artifact:
-    package_type = PackageType(row.package_type)
+def _artifact(
+    row: ArtifactRow,
+    *,
+    build_owned: bool,
+    labels: dict[str, str],
+) -> Artifact:
     versions = sorted(row.versions, key=lambda item: (item.created_at, item.version))
     return Artifact(
         id=row.id,
         name=row.name,
         group=row.group_name,
         description=row.description,
-        package_type=package_type,
-        package_type_label=PACKAGE_LABELS[package_type],
+        package_type=row.package_type,
+        package_type_label=_label(labels, row.package_type),
         versions=[_version(item) for item in versions],
         build_owned=build_owned,
         created_at=row.created_at,
@@ -1053,6 +1153,16 @@ def _skill(row: SkillRow) -> Skill:
     steps = sorted(row.steps, key=lambda item: item.position)
     repositories = sorted(row.allowed_repositories, key=lambda item: item.position)
     dependencies = sorted(row.allowed_dependencies, key=lambda item: item.position)
+    entry = row.catalog_entry
+    label = entry.label if entry is not None else row.build_package_type
+    conditions = (
+        [
+            RuntimeCondition(tool=item.tool, version=item.version)
+            for item in sorted(entry.conditions, key=lambda item: item.position)
+        ]
+        if entry is not None
+        else []
+    )
     return Skill(
         id=row.id,
         name=row.name,
@@ -1069,6 +1179,9 @@ def _skill(row: SkillRow) -> Skill:
         allowed_dependencies=[item.value for item in dependencies],
         steps=[SkillStep(kind=item.kind, description=item.description) for item in steps],
         output_spec=row.output_spec,
+        build_package_type=row.build_package_type,
+        build_package_type_label=label,
+        build_runtime_conditions=conditions,
         created_at=row.created_at,
         updated_at=row.updated_at,
         created_by=row.created_by,
@@ -1076,3 +1189,77 @@ def _skill(row: SkillRow) -> Skill:
         rejected_at=row.rejected_at,
         rejected_by=row.rejected_by,
     )
+
+
+def package_type_labels(session: Session) -> dict[str, str]:
+    rows = session.execute(select(BuildPackageTypeRow.code, BuildPackageTypeRow.label)).all()
+    return {code: label for code, label in rows}
+
+
+def _label(labels: dict[str, str], code: str) -> str:
+    return labels.get(code, code)
+
+
+def _require_enabled_package_type(
+    session: Session,
+    code: str,
+    *,
+    draft: bool,
+) -> BuildPackageTypeRow:
+    row = session.get(BuildPackageTypeRow, code)
+    if row is None:
+        raise Unprocessable(TYPE_MISSING)
+    if not row.enabled:
+        raise Unprocessable(TYPE_DISABLED_DRAFT if draft else TYPE_DISABLED)
+    return row
+
+
+def _load_package_type(
+    session: Session,
+    code: str,
+    *,
+    lock: bool,
+) -> BuildPackageTypeRow | None:
+    stmt = (
+        select(BuildPackageTypeRow)
+        .where(BuildPackageTypeRow.code == code)
+        .options(selectinload(BuildPackageTypeRow.conditions))
+    )
+    if lock:
+        stmt = stmt.with_for_update()
+    return session.scalars(stmt).first()
+
+
+def _condition_rows(
+    conditions: list[RuntimeCondition],
+) -> list[BuildPackageTypeConditionRow]:
+    return [
+        BuildPackageTypeConditionRow(position=index, tool=item.tool, version=item.version)
+        for index, item in enumerate(conditions)
+    ]
+
+
+def _package_type(row: BuildPackageTypeRow) -> BuildPackageType:
+    conditions = sorted(row.conditions, key=lambda item: item.position)
+    return BuildPackageType(
+        code=row.code,
+        label=row.label,
+        description=row.description,
+        enabled=row.enabled,
+        runtime_conditions=[
+            RuntimeCondition(tool=item.tool, version=item.version) for item in conditions
+        ],
+        jenkins_label=row.jenkins_label,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _package_type_referenced(session: Session, code: str) -> bool:
+    statements = (
+        select(SkillRow.id).where(SkillRow.build_package_type == code),
+        select(ArtifactRow.id).where(ArtifactRow.package_type == code),
+        select(ReservationRow.id).where(ReservationRow.package_type == code),
+        select(ProductBuildRow.id).where(ProductBuildRow.package_type == code),
+    )
+    return any(session.scalar(statement.limit(1)) is not None for statement in statements)

@@ -12,8 +12,8 @@ const INPUT_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const BUILD_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const REPO_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
-const PACKAGE_TYPES = new Set(["maven", "python", "generic", "frontend"]);
 const STEP_KINDS = new Set(["checkout", "compile", "package", "archive"]);
+const TOOL_LABELS = { jdk: "JDK", maven: "Maven", node: "Node", python: "Python" };
 
 const TYPE_TEXT = {
   missing: "必填",
@@ -396,11 +396,56 @@ export function buildNameError(value) {
   return "";
 }
 
-export function packageTypeError(value) {
-  if (!PACKAGE_TYPES.has(value)) {
+export function packageTypeCodes(catalog) {
+  const codes = new Set();
+  if (!Array.isArray(catalog)) {
+    return codes;
+  }
+  for (const item of catalog) {
+    if (typeof item === "string" && item) {
+      codes.add(item);
+    } else if (item && typeof item === "object" && typeof item.code === "string" && item.code) {
+      codes.add(item.code);
+    }
+  }
+  return codes;
+}
+
+export function packageTypeError(value, catalog) {
+  if (!packageTypeCodes(catalog).has(value)) {
     return "类型不正确";
   }
   return "";
+}
+
+export function runtimeSummary(conditions) {
+  if (!Array.isArray(conditions) || conditions.length === 0) {
+    return "";
+  }
+  return conditions
+    .map((item) => {
+      const tool = TOOL_LABELS[item?.tool] || item?.tool || "";
+      const version = item?.version || "";
+      return `${tool} ${version}`.trim();
+    })
+    .filter(Boolean)
+    .join("，");
+}
+
+export function buildSubmitErrorTarget(detail) {
+  if (typeof detail !== "string" || !detail) {
+    return "repository";
+  }
+  if (detail.startsWith("构建类型必须与该 Skill")) {
+    return "package_type";
+  }
+  if (
+    detail.startsWith("没有可用的 Jenkins 节点") ||
+    detail.startsWith("无法确认是否有 Jenkins 节点")
+  ) {
+    return "form";
+  }
+  return "repository";
 }
 
 export function stepKindError(value) {

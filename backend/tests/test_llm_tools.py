@@ -1487,7 +1487,10 @@ class _JenkinsStub:
         git_user: str,
         git_token: str,
         declare_nexus_parameters: bool = False,
+        assigned_node: str | None = None,
     ) -> None:
+        if assigned_node:
+            raise AssertionError("this stub does not expect a Jenkins label")
         self.calls.append(
             (
                 "create_product_job",

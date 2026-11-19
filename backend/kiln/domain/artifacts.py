@@ -67,7 +67,7 @@ class ArtifactCreate(BaseModel):
     name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{1,127}$")
     group: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
     description: str = Field(default="", max_length=2000)
-    package_type: PackageType
+    package_type: str
 
 
 class ArtifactVersionCreate(BaseModel):
@@ -104,7 +104,7 @@ class Artifact(BaseModel):
     name: str
     group: str | None
     description: str
-    package_type: PackageType
+    package_type: str
     package_type_label: str
     versions: list[ArtifactVersion]
     build_owned: bool = False
@@ -130,7 +130,7 @@ class Reservation(BaseModel):
     artifact_id: UUID
     artifact_name: str
     version: str
-    package_type: PackageType
+    package_type: str
     package_type_label: str
     checksum: Checksum
     requester: str
@@ -149,7 +149,7 @@ class RetrieveResult(BaseModel):
     artifact_id: UUID
     name: str
     version: str
-    package_type: PackageType
+    package_type: str
     package_type_label: str
     checksum: Checksum
     status: Literal["reserved"] = "reserved"
