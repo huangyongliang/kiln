@@ -8,14 +8,14 @@
 
 | 系统 | 档位 | 当前仓库里实际有什么 |
 | --- | --- | --- |
-| Docker Engine 与 Compose V2 | 现在需要（走 Compose 时） | 根目录 `docker-compose.yml`。CI 用 `docker compose config` 校验。文末的进程方式不使用 Docker |
-| PostgreSQL | 现在需要 | 服务 `postgres`，镜像 `postgres:16-alpine`，容器 `kiln-postgres`，数据卷键名 `kiln-postgres-data`。API 用 `DATABASE_URL` 连接，启动时执行迁移。账号、RBAC 目录、制品、版本、下载预约和 skill 写在这个库里。数据库不可达时 API 起不来 |
+| Docker Engine 与 Compose V2 | 现在需要（走 Compose 时） | 根目录 `docker-compose.yml`。CI 用 `docker compose config` 校验。文末的进程方式不使用 Docker。部署步骤见下文「安装 Docker Engine 与 Compose V2」 |
+| PostgreSQL | 现在需要 | 服务 `postgres`，镜像 `postgres:16-alpine`，容器 `kiln-postgres`，数据卷键名 `kiln-postgres-data`。API 用 `DATABASE_URL` 连接，启动时执行迁移。账号、RBAC 目录、制品、版本、下载预约和 skill 写在这个库里。数据库不可达时 API 起不来。不使用 Docker 时的部署步骤见下文「不使用 Docker」 |
 | kiln API | 现在需要 | 服务 `api`，本地镜像 `kiln-api:local`，容器 `kiln-api`。基础镜像 `python:3.11-slim`，监听容器内 `8000` |
 | 控制台 | 现在需要 | 服务 `console`，本地镜像 `kiln-console:local`，容器 `kiln-console`。构建阶段 `node:22-alpine`，运行阶段 `nginx:1.27-alpine`，容器内 `80` 映射到宿主机 `8080` |
-| Jenkins 兼容执行器与产品构建 | 按环境变量接线 | API 在 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN` 都有值时，向该 Jenkins 创建兼容任务并读取状态和日志。再配上代码源后，产品构建会检出仓库、运行 `kiln-build.sh`，并把 `kiln-dist/artifact.bin` 写入平台目录。不部署到运行环境。profile `lab` 的 `jenkins/jenkins:lts-jdk17`、容器 `kiln-jenkins`、卷 `kiln-jenkins-home`、端口 `127.0.0.1:18080` 仍是本仓库里的占位，不是共享实验机上的实例 |
-| Git 远端 | 可替换适配器 | `GIT_PROVIDER=gitlab` 是生产代码源，`GIT_PROVIDER=gitea` 是实验室实现。地址只来自 `GIT_BASE_URL`，令牌只来自 `GIT_TOKEN`。仓库不写生产 GitLab 地址。profile `lab` 的 `gitea/gitea:1.22`（容器 `kiln-gitea`）仍是占位，不是生产代码源 |
+| Jenkins 兼容执行器与产品构建 | 按环境变量接线 | API 在 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN` 都有值时，向该 Jenkins 创建兼容任务并读取状态和日志。再配上代码源后，产品构建会检出仓库、运行 `kiln-build.sh`，并把 `kiln-dist/artifact.bin` 写入平台目录。不部署到运行环境。profile `lab` 的 `jenkins/jenkins:lts-jdk17`、容器 `kiln-jenkins`、卷 `kiln-jenkins-home`、端口 `127.0.0.1:18080` 仍是本仓库里的占位，不是共享实验机上的实例。部署步骤见下文「自行部署一台 kiln 可调用的 Jenkins」 |
+| Git 远端 | 可替换适配器 | `GIT_PROVIDER=gitlab` 是生产代码源，`GIT_PROVIDER=gitea` 是实验室实现。地址只来自 `GIT_BASE_URL`，令牌只来自 `GIT_TOKEN`。仓库不写生产 GitLab 地址。profile `lab` 的 `gitea/gitea:1.22`（容器 `kiln-gitea`）仍是占位，不是生产代码源。部署步骤见下文「自行部署实验室 Gitea」和「连接已经在跑的 GitLab」 |
 | 制品存储 | 目录在 PostgreSQL，字节在平台本地目录 | 制品、版本和下载预约写在 Postgres。字节写在 `KILN_ARTIFACT_ROOT`。compose 把它挂到命名卷 `kiln-artifact-data`，容器内路径是 `/var/lib/kiln/artifacts`。版本保存字节后 `content_available` 为 true，`GET /api/v1/retrieve/{reservation_id}/content` 返回这些字节。包类型字段有 `maven`、`python`、`generic`、`frontend`。制品不发布到 Nexus |
-| 可选依赖代理对接，默认关闭；制品不发布到 Nexus | 现在可以接线 | 默认关闭。设置 `KILN_NEXUS_URL` 与 `KILN_NEXUS_REPOSITORY` 后，产品构建可通过该代理解析依赖。`GET /api/v1/dependency-proxy` 需要 `executor.read`。未配置时不向外连接。制品不发布到 Nexus，字节仍在 `KILN_ARTIFACT_ROOT`。compose 只透传环境变量，不增加 Nexus 服务 |
+| 可选依赖代理对接，默认关闭；制品不发布到 Nexus | 现在可以接线 | 默认关闭。设置 `KILN_NEXUS_URL` 与 `KILN_NEXUS_REPOSITORY` 后，产品构建可通过该代理解析依赖。`GET /api/v1/dependency-proxy` 需要 `executor.read`。未配置时不向外连接。制品不发布到 Nexus，字节仍在 `KILN_ARTIFACT_ROOT`。compose 只透传环境变量，不增加 Nexus 服务。一次性实例见下文「可选：本地或 CI 的一次性 Nexus」 |
 | OpenAI 兼容模型端点 | 可选 | `LLM_PROVIDER` 默认 `off`。`openai` 会 `POST {LLM_BASE_URL}/chat/completions`。提供方与端点仍由环境变量配置。模型目录和角色分配在管理页维护，首次从 `LLM_MODEL` / `LLM_MODELS` 种子，不从端点拉取目录。`mock` 不访问网络 |
 | 本地登录与用户信息同步 | 这一版已接上起步 | 平台自身具备完整的账号与权限能力。本地账号、口令哈希、会话和 RBAC 目录在 Postgres 中。控制台有登录页。未配置公司用户系统时使用本地口令登录。`KILN_API_TOKEN` 仍是必填的机器和开发访问令牌，拥有目录中的全部权限。公司用户系统的对接是可选的。可选对接之后，公司系统只同步身份和在职状态，kiln 的授权仍留在平台上 |
 | Harbor、Kubernetes、专用镜像仓库 | 不属于一期 | 没有清单、没有镜像推送。架构方案把镜像构建放在一期之后 |
@@ -58,6 +58,16 @@ Compose 文件没有 `cpus`、`mem_limit`、`deploy.resources`。Jenkins 服务�
 - 默认栈的三个宿主机端口在 `127.0.0.1` 上是空闲的。准备启动 lab 时，`127.0.0.1` 上的 `18080` 和 `13000` 也要空闲
 
 进程方式（不使用 Docker）另需 Python 3.11 或更高，以及 Node.js 22。`backend/pyproject.toml` 要求 `requires-python >= 3.11`。CI 和 `console/Dockerfile` 使用 Node.js 22；`console/package.json` 没有 `engines` 字段。
+
+## 安装 Docker Engine 与 Compose V2
+
+走 Compose 时需要 Docker Engine 和 Compose V2。仓库不指定发行版，也没有钉死 Docker 的版本号。按自己的操作系统打开官方文档安装。不要把某一发行版的非官方教程当成唯一路径。
+
+- Docker Engine：<https://docs.docker.com/engine/install/>
+- Compose：<https://docs.docker.com/compose/install/>
+- Linux 上安装 Compose 插件的说明在同一站点：<https://docs.docker.com/compose/install/linux/>
+
+其它操作系统以 Compose 安装页上对应系统的官方说明为准。装完后 `docker compose version` 应能执行。本仓库的 compose 文件使用 `profiles` 和 `depends_on.condition: service_healthy`。Compose V1 的 `docker-compose` 不适用。默认栈的启动命令仍在「构建并启动默认栈」，本节不重复。
 
 ## 获取代码
 
@@ -412,9 +422,143 @@ python -m pytest backend/tests/test_executor.py backend/tests/test_git_source.py
 
 GitHub Actions 不使用上面的容器名和端口。`scripts/ci-external-services.sh` 启动 `kiln-ci-jenkins`、`kiln-ci-gitea`，卷是 `kiln-ci-jenkins-data`、`kiln-ci-gitea-data`，网络是 `kiln-ci-net`，端口是 `127.0.0.1:28080` 和 `127.0.0.1:23000`。镜像是 `jenkins/jenkins:2.580.2-lts-alpine` 和 `gitea/gitea:1.24.7`。口令在作业里生成。Jenkins 通过该网络上的 `http://kiln-ci-gitea:3000` 克隆，不另开宿主机端口。这个脚本拒绝使用实验室的容器名、卷名、网络名 `kiln-net` 和端口。
 
+## 部署 kiln 依赖的外部系统
+
+模型端点见上文「可选：模型端点」。本节不另写模型的安装。默认 `docker compose up` 仍然只启动 Postgres、API 和控制台。profile `lab` 的 Jenkins 和 Gitea 仍是占位，不是共享实验机上的实例。不要在共享实验机上加 `--profile lab`，也不要在那台机器上启动这份 compose 或 Nexus。
+
+下面的 Jenkins 与实验室 Gitea 只作为操作者自己机器上的示例。容器名、卷名、网络名不要用 `kiln-jenkins`、`kiln-gitea`、`kiln-postgres` 或 `kiln-net`。示例网络与默认栈和 CI 都错开，只创建一次：
+
+```bash
+docker network create kiln-own-net
+```
+
+### 自行部署一台 kiln 可调用的 Jenkins
+
+镜像用 CI 已经钉死的 `jenkins/jenkins:2.580.2-lts-alpine`（`scripts/ci-external-services.sh`，上文「CI 里的一次性 Jenkins 与 Gitea」已记载）。上文占位说明里的浮动标签不是本节的推荐镜像，也不是共享实验机上的实例。不要靠 `--profile lab` 完成这一节。
+
+在操作者自己的机器上启动。容器名用 `kiln-own-jenkins`，卷名用 `kiln-own-jenkins-home`，网络用上面的 `kiln-own-net`。绑定只写 `127.0.0.1`。默认栈已经占用宿主机 `127.0.0.1:8080`（控制台），示例不用 `8080` 做 Jenkins 的宿主机端口。下面用 `127.0.0.1:18080`。这只是本机示例，不是共享实验机上的实例，也不表示可以在共享实验机上执行 `--profile lab`。运维可以换成自己的空闲端口和绑定。官方示例不写猜出来的公网地址。
+
+不要把 `scripts/jenkins/init.groovy.d` 挂进这个卷，也不要挂到共享实验机或任何长期使用的卷上。该目录只由 CI 挂到一次性容器。首次启动走官方安装向导，不跳过向导。
+
+```bash
+docker run -d \
+  --name kiln-own-jenkins \
+  --network kiln-own-net \
+  -p 127.0.0.1:18080:8080 \
+  -v kiln-own-jenkins-home:/var/jenkins_home \
+  jenkins/jenkins:2.580.2-lts-alpine
+```
+
+向导的解锁、插件步骤和创建第一个管理员，以官方说明为准：<https://www.jenkins.io/doc/book/installing/docker/> 里的 Post-installation setup wizard。端口、镜像和容器名以本节为准，不要改用该页示例里的标签或宿主机 `8080`。
+
+等到 Unlock Jenkins 页面出现。浏览器打开 <http://127.0.0.1:18080/>。初始口令在容器内的 `/var/jenkins_home/secrets/initialAdminPassword`。文件还没有时稍等再取：
+
+```bash
+docker exec kiln-own-jenkins cat /var/jenkins_home/secrets/initialAdminPassword
+```
+
+把这串口令贴进 Unlock Jenkins 的管理员口令栏并继续。后面的插件步骤本仓库不指定清单，也不把某个插件写成 kiln 的必需项，按该向导完成即可。然后在创建第一个管理员的页面（Create First Admin User）填写用户名、口令、全名和邮箱，保存并完成，进入 Jenkins。实例地址保持这次打开的本机地址，不要改成猜出来的公网地址。跳过创建用户时，官方向导会留下用户名 `admin` 和这份初始口令；仍然在这一步创建管理员。口令不要写进仓库。
+
+再用这个管理员为 kiln 单独创建用户，并为该用户生成 API 令牌。打开 Manage Jenkins（系统管理）里的 Users（用户），创建用户。用该用户登录，点右上角自己的名字，进入 Security（安全）。官方说明见 <https://www.jenkins.io/doc/book/system-administration/authenticating-scripted-clients/>，快捷路径是 `/me/security`。在 API Token 里新增并生成令牌。令牌只显示一次。用户名写入 `JENKINS_USER`，令牌写入 `JENKINS_API_TOKEN`，只放在环境或本机 `.env`，不要提交。
+
+`JENKINS_URL` 写成 kiln API 进程访问得到的地址。API 直接跑在宿主机上、并且 Jenkins 用了上面的绑定时，这个地址是 `http://127.0.0.1:18080`。API 跑在 compose 的 `kiln-api` 里时，容器内的 `127.0.0.1` 是容器自己，不是宿主机，见上文「Jenkins 与代码源」。不要发明主机名。
+
+推荐使用上面的用户和 API 令牌。产品也接受该用户的口令，只建议用于一次性环境。CI 的一次性实例把管理员口令当作令牌。
+
+该用户要能创建、读取、删除任务，触发构建，读取日志，并下载归档制品。kiln 的调用是 `POST /createItem`、`POST /job/.../build`、`POST /job/.../buildWithParameters`、`POST /job/.../doDelete`、任务和队列的 `GET .../api/json`、`GET .../consoleText`、`GET .../artifact/...`，以及 `GET /crumbIssuer/api/json`。把这些调用对照官方 Jenkins 的授权说明自行映射。本文不写仓库里没有出现的矩阵权限标识，也不写插件名。
+
+CI 一次性实例使用 `FullControlOnceLoggedInAuthorizationStrategy`，并禁止匿名读取。那是一次性环境的宽松策略，不是生产环境的最小权限。对应脚本是 `scripts/jenkins/init.groovy.d/basic-security.groovy`，只给 CI 的一次性容器使用。
+
+产品构建会在这台 Jenkins 上创建任务、检出提交、运行仓库根目录的 `kiln-build.sh`。成功时脚本写出 `kiln-dist/artifact.bin`。平台再从 Jenkins 归档收集该文件，工作区相对路径是 `src/kiln-dist/artifact.bin`，字节写入 `KILN_ARTIFACT_ROOT`。制品留在平台，不发布到 Nexus。响应里的 `deploys_to_runtime` 为 false。
+
+CI 已断言该镜像提供 `git`，产品构建需要它。产品构建若编译 Java，执行器上需要 JDK 17 或更高。本仓库没有写明 `jenkins/jenkins:2.580.2-lts-alpine` 镜像内的具体 JDK 版本，这里不猜测。
+
+### 自行部署实验室 Gitea
+
+`GIT_PROVIDER=gitea` 是实验室代码源。生产代码源是 `GIT_PROVIDER=gitlab`。本节不安装 GitLab。镜像用 CI 钉死的 `gitea/gitea:1.24.7`。适配器按 Gitea 1.24 的 `/api/v1/repos/{owner}/{name}/git/commits/{ref}` 解析提交，响应字段是 `sha`。上文占位说明里的浮动标签不是本节的推荐镜像。
+
+绑定 `127.0.0.1:13000:3000`。共享实验机说明里的实验室 Gitea 使用 `127.0.0.1:3000`。这里的 `13000` 只是本机示例，不是那台机器上的实例，也不表示可以在共享实验机上执行 `--profile lab`。容器名用 `kiln-own-gitea`，卷名用 `kiln-own-gitea-data`。不要用 `kiln-gitea`。数据库用 SQLite3，与 compose 占位和 CI 相同。本示例不设置 `INSTALL_LOCK`，第一次打开页面是安装向导。还没有 `kiln-own-net` 时，先执行上面「部署 kiln 依赖的外部系统」里的 `docker network create`。
+
+```bash
+docker run -d \
+  --name kiln-own-gitea \
+  --network kiln-own-net \
+  -p 127.0.0.1:13000:3000 \
+  -e GITEA__database__DB_TYPE=sqlite3 \
+  -e GITEA__database__PATH=/data/gitea/gitea.db \
+  -e GITEA__server__DOMAIN=127.0.0.1 \
+  -e GITEA__server__ROOT_URL=http://127.0.0.1:13000/ \
+  -e GITEA__server__HTTP_PORT=3000 \
+  -e GITEA__server__DISABLE_SSH=true \
+  -e GITEA__service__DISABLE_REGISTRATION=true \
+  -v kiln-own-gitea-data:/data \
+  gitea/gitea:1.24.7
+```
+
+浏览器打开 <http://127.0.0.1:13000/>。在安装页确认数据库为 SQLite3，路径沿用 `/data/gitea/gitea.db`，然后创建管理员（用户名、口令、邮箱）并完成安装。口令不要写进仓库。官方 Docker 安装说明在 <https://docs.gitea.com/installation/install-with-docker>。那一页的 compose 示例不是本仓库的文件；镜像、绑定和容器名以本节为准。
+
+管理员创建完成之后，用该用户登录，在用户设置的「应用」（Applications）页面生成访问令牌。令牌只显示一次，写入 `GIT_TOKEN`，不要提交。
+
+令牌需要能完成这些调用：`GET /api/v1/user`（当前用户）、`GET /api/v1/user/repos`（列出仓库）、`GET /api/v1/repos/{owner}/{name}/git/commits/{ref}`（解析引用）。该令牌还会交给 Jenkins 用于克隆。跑本仓库测试时，还要能创建并删除名字以 `kiln-src-` 开头的仓库；测试使用 `POST /api/v1/user/repos` 和 `DELETE /api/v1/repos/{full_name}`。仓库里唯一出现的生成参数是 CI 一次性令牌的 `--scopes all`。长期实验室按上面的调用对照 Gitea 官方令牌范围自行勾选。本文不写仓库里没有出现的范围名称。
+
+`GIT_BASE_URL` 和 `GIT_TOKEN` 由运维填写，本文留空：
+
+```bash
+GIT_PROVIDER=gitea
+GIT_BASE_URL=
+GIT_TOKEN=
+```
+
+kiln API 若直接跑在宿主机上，并且 Gitea 用了上面的绑定，根地址就是 `http://127.0.0.1:13000`。API 若跑在 `kiln-api` 里，容器内的 `127.0.0.1` 是容器自己。Jenkins 与 Gitea 同在 `kiln-own-net` 时，Jenkins 看到的是该网络上的 Gitea，容器内端口是 `3000`。只有这个地址和 `GIT_BASE_URL` 不同时才填 `GIT_CLONE_BASE_URL`，留空则等于 `GIT_BASE_URL`。不要把地址或令牌写进仓库。
+
+### 连接已经在跑的 GitLab
+
+只连接已经在跑的实例。不在这里从零安装 GitLab，也不写公司地址。`GIT_PROVIDER=gitlab`。`GIT_BASE_URL` 与 `GIT_TOKEN` 由运维填写，本文留空：
+
+```bash
+GIT_PROVIDER=gitlab
+GIT_BASE_URL=
+GIT_TOKEN=
+```
+
+`GIT_CLONE_BASE_URL` 仅当 Jenkins 看到的根地址和 API 不同时才填，留空则等于 `GIT_BASE_URL`。
+
+请求使用 `PRIVATE-TOKEN` 头。产品调用是 `GET /api/v4/user`、`GET /api/v4/projects?membership=true`、`GET /api/v4/projects/{path}/repository/commits/{ref}`。解析引用时，响应里的提交号字段是 `id`。令牌需要能列出调用者有成员关系的项目、解析引用，并允许 Jenkins 克隆该提交。仓库里没有 GitLab 的官方范围名称，也没有对着真实 GitLab 创建或删除 `kiln-src-*` 仓库的测试。对照官方范围时，以这些调用为准。
+
+### 可选：本地或 CI 的一次性 Nexus
+
+这是可选对接，不是必装。只用于本地或 CI 里的一次性依赖解析试验。制品仍然不发布到 Nexus，字节只在 `KILN_ARTIFACT_ROOT`。
+
+一次性实例由 `scripts/ci-nexus.sh` 定义。镜像是 `sonatype/nexus3:3.98.1@sha256:f32dc457fa6a842efda50ffb7531f5986627723cc35daab169a99a202cb52a6c`。脚本把 API 绑在 `127.0.0.1:28081`。容器名是 `kiln-ci-depproxy`，卷名是 `kiln-ci-depproxy-data`，网络名是 `kiln-ci-net`。它拒绝使用 `kiln-postgres`、`kiln-gitea`、`kiln-jenkins`、`kiln-api`、`kiln-console` 和网络 `kiln-net`，也拒绝绑定实验室、默认栈和其它 CI 已经占用的端口。镜像以脚本里钉死的那一行为准。不要把 Nexus 加进 `docker-compose.yml`。默认 `docker compose up` 仍然没有 Nexus 服务。
+
+CI 作业执行 `bash scripts/ci-nexus.sh start`，结束时执行 `bash scripts/ci-nexus.sh stop`。该脚本只在 CI 中运行。仓库外直接执行会退出，并提示「只在 CI 中运行」。不要在共享实验机上执行它，也不要在那台机器上另起 Nexus。不要绕过这个检查去启动它。
+
+`KILN_NEXUS_URL`、`KILN_NEXUS_REPOSITORY`、`KILN_NEXUS_BUILD_URL`、`KILN_NEXUS_USERNAME`、`KILN_NEXUS_PASSWORD` 仍由运维填写，本文留空。接线、任务参数和构建脚本示例仍在上文「可选依赖代理」。本节不重写那一节。`publishes_artifacts` 仍为 false。
+
 ## 不使用 Docker
 
 在仓库根目录另开进程时，不启动 Jenkins 或 Gitea，但 API 仍然要能连上 `DATABASE_URL` 指向的 PostgreSQL。默认值是本机 `localhost:5432` 的库 `kiln`。进程启动时执行迁移。没有数据库时 API 起不来。
+
+自管 PostgreSQL 16 时，打开官方下载页 <https://www.postgresql.org/download/>，按自己的平台选择官方安装方式。不要另找第三方软件源，也不要发明主机名。无 Docker 路径使用这套自管实例。不要把再启动 compose 里的 `postgres` 当作这条路径的做法。
+
+安装完成后，用该平台官方方式提供的本地超级用户连上本机实例，创建角色和数据库。编码使用 `UTF8`。集群以 UTF8 初始化时，这就是 PostgreSQL 的默认编码，创建语句里仍然写明。库名、用户名和口令由运维自定。沿用仓库本地示例时，三者都是 `kiln`。示例口令只用于本地，不能用于生产。
+
+```sql
+CREATE ROLE kiln WITH LOGIN PASSWORD 'kiln';
+CREATE DATABASE kiln WITH OWNER kiln ENCODING 'UTF8' TEMPLATE template0;
+```
+
+监听写在 `postgresql.conf`：把 `listen_addresses` 设为 `127.0.0.1`，或者设成运维自己选择的绑定。官方示例不写猜出来的公网地址。`pg_hba.conf` 与这个绑定一致，只放行该地址上的这个用户和这个库，例如：
+
+```
+host kiln kiln 127.0.0.1/32 scram-sha-256
+```
+
+改完后重新加载或重启这套 PostgreSQL 16，使监听和 `pg_hba.conf` 生效。
+
+`DATABASE_URL` 写成 `postgresql://<user>:<password>@127.0.0.1:5432/<db>`，三项与上面创建的值一致。沿用本地示例时是 `postgresql://kiln:kiln@127.0.0.1:5432/kiln`。它和现有的 `localhost` 示例等价：`.env.example` 的 `DATABASE_URL`、上文环境表，以及进程默认值，用的都是 `localhost`。不必为此修改 `.env.example`。数据库若不在本机回环上，主机名留空给运维填写，本文不给主机名。
+
+没有这条可连接的库时，API 起不来。下面的进程启动时会执行迁移。
 
 ```bash
 python3 -m venv .venv
