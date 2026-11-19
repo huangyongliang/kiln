@@ -4,7 +4,9 @@ The OIDC cases always run. They do not read KILN_SKIP_EXTERNAL_TESTS.
 """
 
 import logging
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import httpx
@@ -12,6 +14,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from kiln.domain.rbac import PERMISSIONS, permissions_for
+from kiln.login_limit import LoginLimiter, normalize_username, peer_host
 from kiln.main import create_app
 from tests.oidc_double import OidcDouble
 from tests.support import PROCESS_API_TOKEN, app_settings, auth_headers, truncate_domain
@@ -49,6 +52,7 @@ def test_local_login_rejects_wrong_and_disabled_passwords(client: TestClient, ca
         json={"username": "ada_login", "password": "not-the-password"},
     )
     assert wrong.status_code == 401
+    assert wrong.json()["detail"] == "用户名或口令不正确"
     assert "password" not in wrong.text
     assert "not-the-password" not in wrong.text
     assert _session_count(engine) == 0
@@ -62,6 +66,7 @@ def test_local_login_rejects_wrong_and_disabled_passwords(client: TestClient, ca
         json={"username": "ada_login", "password": LOCAL_PASSWORD},
     )
     assert disabled.status_code == 401
+    assert disabled.json()["detail"] == "账号已停用"
     assert LOCAL_PASSWORD not in disabled.text
     assert stored_hash not in disabled.text
     assert _session_count(engine) == 0
@@ -532,3 +537,449 @@ def _session_count(engine) -> int:
 def _account_count(engine) -> int:
     with engine.connect() as connection:
         return connection.execute(text("SELECT count(*) FROM accounts")).scalar_one()
+
+
+_LIMIT_DETAIL = "尝试次数过多，请稍后再试"
+_SHARED_IP = "经控制台登录时，多位用户共享控制台的对端地址，IP 键是同一条。"
+_RESTART_CLEARS = "重启 API 进程会清空进程内计数。"
+
+
+class _Clock:
+    def __init__(self, now: float = 10_000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_login_limiter_drops_expired_failures_and_keeps_the_ip_key() -> None:
+    """The window is time-based. Success clears only the username key."""
+
+    clock = _Clock(0.0)
+    limiter = LoginLimiter(
+        window_seconds=60,
+        username_max_failures=2,
+        ip_max_failures=2,
+        clock=clock,
+    )
+    assert isinstance(limiter.lock, type(threading.Lock()))
+    assert normalize_username("  Ada ") == "ada"
+    assert normalize_username("   ") is None
+    assert peer_host(None) is None
+    assert peer_host(SimpleNamespace(host="")) is None
+    assert peer_host(SimpleNamespace(host="203.0.113.8")) == "203.0.113.8"
+
+    assert limiter.record_failure("ada", "203.0.113.1") is None
+    clock.now = 10.0
+    # Both keys reach 2. Retry-After follows the older stamp on each key.
+    assert limiter.record_failure("ada", "203.0.113.1") == 50
+    assert limiter.blocked("ada", "203.0.113.9") == 50
+    assert limiter.blocked("other", "203.0.113.1") == 50
+    limiter.clear_username("ada")
+    assert limiter.blocked("ada", None) is None
+    assert limiter.blocked(None, "203.0.113.1") == 50
+    clock.now = 70.0
+    assert limiter.blocked("ada", "203.0.113.1") is None
+    assert limiter.record_failure(None, None) is None
+
+
+def test_username_limit_returns_429_and_stops_password_checks(tmp_path: Path) -> None:
+    app = _limited_app(tmp_path, username_max=3, ip_max=1000)
+    with TestClient(app) as http:
+        truncate_domain(app.state.engine)
+        _create_account(http, "ada_limit")
+        anon = TestClient(app)
+        store = app.state.store
+        calls = {"n": 0}
+        original = store.authenticate_password
+
+        def spy(username: str, password: str):
+            calls["n"] += 1
+            return original(username, password)
+
+        store.authenticate_password = spy  # type: ignore[method-assign]
+        first = _post_login(anon, "ada_limit", "not-the-password")
+        second = _post_login(anon, "ada_limit", "not-the-password")
+        assert first.status_code == 401
+        assert first.json()["detail"] == "用户名或口令不正确"
+        assert second.status_code == 401
+        assert calls["n"] == 2
+        capped = _post_login(anon, "ada_limit", "not-the-password")
+        _assert_limited(capped)
+        assert calls["n"] == 3
+        assert _session_count(app.state.engine) == 0
+        before = calls["n"]
+        blocked = _post_login(anon, "ada_limit", LOCAL_PASSWORD)
+        _assert_limited(blocked)
+        assert calls["n"] == before
+        assert _session_count(app.state.engine) == 0
+        assert "set-cookie" not in blocked.headers
+
+
+def test_disabled_login_stays_401_until_the_window_is_full(tmp_path: Path) -> None:
+    app = _limited_app(tmp_path, username_max=3, ip_max=1000)
+    with TestClient(app) as http:
+        truncate_domain(app.state.engine)
+        _create_account(http, "ada_off")
+        with app.state.engine.begin() as connection:
+            connection.execute(
+                text("UPDATE accounts SET status = 'disabled' WHERE username = 'ada_off'")
+            )
+        anon = TestClient(app)
+        disabled = _post_login(anon, "ada_off", LOCAL_PASSWORD)
+        assert disabled.status_code == 401
+        assert disabled.json()["detail"] == "账号已停用"
+        wrong = _post_login(anon, "ada_off", "not-the-password")
+        assert wrong.status_code == 401
+        assert wrong.json()["detail"] == "用户名或口令不正确"
+        capped = _post_login(anon, "ada_off", LOCAL_PASSWORD)
+        _assert_limited(capped)
+        store = app.state.store
+        calls = {"n": 0}
+        original = store.authenticate_password
+
+        def spy(username: str, password: str):
+            calls["n"] += 1
+            return original(username, password)
+
+        store.authenticate_password = spy  # type: ignore[method-assign]
+        blocked = _post_login(anon, "ada_off", LOCAL_PASSWORD)
+        _assert_limited(blocked)
+        assert calls["n"] == 0
+        assert _session_count(app.state.engine) == 0
+        status = connection_status(app.state.engine, "ada_off")
+        assert status == "disabled"
+
+
+def test_successful_login_clears_that_username_only(tmp_path: Path) -> None:
+    app = _limited_app(tmp_path, username_max=3, ip_max=1000)
+    with TestClient(app) as http:
+        truncate_domain(app.state.engine)
+        _create_account(http, "ada_clear")
+        _create_account(http, "bea_clear")
+        anon = TestClient(app)
+        assert _post_login(anon, "ada_clear", "not-the-password").status_code == 401
+        assert _post_login(anon, "ada_clear", "not-the-password").status_code == 401
+        # A different username still has its own counter while ada is one failure from the cap.
+        assert _post_login(anon, "bea_clear", "not-the-password").status_code == 401
+        logged_in = _post_login(anon, "ada_clear", LOCAL_PASSWORD)
+        assert logged_in.status_code == 200
+        assert logged_in.json()["account"]["username"] == "ada_clear"
+        assert "set-cookie" in logged_in.headers
+        assert _session_count(app.state.engine) == 1
+        # The success cleared ada, so the next two failures are still 401.
+        assert _post_login(anon, "ada_clear", "not-the-password").status_code == 401
+        assert _post_login(anon, "ada_clear", "not-the-password").status_code == 401
+        _assert_limited(_post_login(anon, "ada_clear", "not-the-password"))
+        # bea used one failure above and is not sharing ada's cap.
+        assert _post_login(anon, "bea_clear", "not-the-password").status_code == 401
+
+
+def test_login_names_share_one_key_across_case_and_space(tmp_path: Path) -> None:
+    app = _limited_app(tmp_path, username_max=3, ip_max=1000)
+    with TestClient(app):
+        truncate_domain(app.state.engine)
+        anon = TestClient(app)
+        assert _post_login(anon, "Ada", "not-the-password").status_code == 401
+        assert _post_login(anon, "ada", "not-the-password").status_code == 401
+        _assert_limited(_post_login(anon, "  ADA  ", "not-the-password"))
+        store = app.state.store
+        calls = {"n": 0}
+
+        def spy(username: str, password: str):
+            calls["n"] += 1
+            return None, "invalid"
+
+        store.authenticate_password = spy  # type: ignore[method-assign]
+        _assert_limited(_post_login(anon, "\tada\t", "not-the-password"))
+        assert calls["n"] == 0
+
+
+def test_blank_username_skips_the_username_key_and_still_honors_ip(tmp_path: Path) -> None:
+    app = _limited_app(tmp_path, username_max=3, ip_max=1000)
+    with TestClient(app):
+        truncate_domain(app.state.engine)
+        anon = TestClient(app)
+        for name in (" ", "  ", "   ", "\t"):
+            rejected = _post_login(anon, name, "not-the-password")
+            assert rejected.status_code == 401
+            assert rejected.json()["detail"] == "用户名或口令不正确"
+        assert _post_login(anon, "ada_blank", "not-the-password").status_code == 401
+
+    ip_app = _limited_app(tmp_path / "ip", username_max=100, ip_max=5)
+    with TestClient(ip_app):
+        truncate_domain(ip_app.state.engine)
+        anon = TestClient(ip_app, client=("203.0.113.20", 50000))
+        for _ in range(4):
+            assert _post_login(anon, " ", "not-the-password").status_code == 401
+        _assert_limited(_post_login(anon, "   ", "not-the-password"))
+
+
+def test_ip_limit_is_independent_of_the_username_budget(tmp_path: Path) -> None:
+    clock = _Clock(5_000.0)
+    app = _limited_app(tmp_path, username_max=100, ip_max=5, clock=clock)
+    with TestClient(app) as http:
+        truncate_domain(app.state.engine)
+        _create_account(http, "ada_ip")
+        left = TestClient(app, client=("203.0.113.10", 50000))
+        right = TestClient(app, client=("198.51.100.10", 50000))
+        for index in range(4):
+            failed = _post_login(left, f"user_{index}", "not-the-password")
+            assert failed.status_code == 401
+        capped = _post_login(
+            left,
+            "user_4",
+            "not-the-password",
+            extra_headers={"X-Forwarded-For": "198.51.100.10", "X-Real-IP": "198.51.100.10"},
+        )
+        _assert_limited(capped, retry_after="60")
+        store = app.state.store
+        calls = {"n": 0}
+        original = store.authenticate_password
+
+        def spy(username: str, password: str):
+            calls["n"] += 1
+            return original(username, password)
+
+        store.authenticate_password = spy  # type: ignore[method-assign]
+        _assert_limited(
+            _post_login(
+                left,
+                "user_5",
+                "not-the-password",
+                extra_headers={"X-Forwarded-For": "203.0.113.99"},
+            )
+        )
+        assert calls["n"] == 0
+        # A different peer is not limited, even if it copies the blocked address into a header.
+        other = _post_login(
+            right,
+            "user_6",
+            "not-the-password",
+            extra_headers={"X-Forwarded-For": "203.0.113.10", "X-Real-IP": "203.0.113.10"},
+        )
+        assert other.status_code == 401
+        assert _post_login(right, "ada_ip", LOCAL_PASSWORD).status_code == 200
+
+
+def test_success_does_not_clear_the_ip_key(tmp_path: Path) -> None:
+    app = _limited_app(tmp_path, username_max=100, ip_max=5)
+    with TestClient(app) as http:
+        truncate_domain(app.state.engine)
+        _create_account(http, "ada_keep_ip")
+        anon = TestClient(app, client=("203.0.113.40", 50000))
+        for index in range(4):
+            assert _post_login(anon, f"miss_{index}", "not-the-password").status_code == 401
+        assert _post_login(anon, "ada_keep_ip", LOCAL_PASSWORD).status_code == 200
+        _assert_limited(_post_login(anon, "miss_after", "not-the-password"))
+
+
+def test_login_limit_does_not_change_status_or_existing_sessions(tmp_path: Path) -> None:
+    app = _limited_app(tmp_path, username_max=3, ip_max=1000)
+    with TestClient(app) as http:
+        truncate_domain(app.state.engine)
+        _create_account(http, "ada_keep")
+        session = TestClient(app)
+        logged_in = _post_login(session, "ada_keep", LOCAL_PASSWORD)
+        assert logged_in.status_code == 200
+        token = logged_in.json()["token"]
+        anon = TestClient(app)
+        assert _post_login(anon, "ada_keep", "not-the-password").status_code == 401
+        assert _post_login(anon, "ada_keep", "not-the-password").status_code == 401
+        _assert_limited(_post_login(anon, "ada_keep", "not-the-password"))
+        assert connection_status(app.state.engine, "ada_keep") == "active"
+        me = session.get("/api/v1/auth/me")
+        assert me.status_code == 200
+        assert me.json()["account"]["username"] == "ada_keep"
+        bearer = TestClient(app)
+        by_token = bearer.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert by_token.status_code == 200
+        assert _session_count(app.state.engine) == 1
+        _assert_limited(_post_login(anon, "ada_keep", LOCAL_PASSWORD))
+        assert _session_count(app.state.engine) == 1
+
+
+def test_other_auth_entries_do_not_gain_429(tmp_path: Path) -> None:
+    app = _limited_app(tmp_path, username_max=3, ip_max=1000)
+    with TestClient(app) as http:
+        truncate_domain(app.state.engine)
+        created = _create_account(http, "ada_other")
+        session = TestClient(app)
+        assert _post_login(session, "ada_other", LOCAL_PASSWORD).status_code == 200
+        anon = TestClient(app)
+        assert _post_login(anon, "ada_other", "not-the-password").status_code == 401
+        assert _post_login(anon, "ada_other", "not-the-password").status_code == 401
+        _assert_limited(_post_login(anon, "ada_other", "not-the-password"))
+        start = http.get("/api/v1/auth/oidc/start")
+        assert start.status_code == 503
+        assert start.json()["detail"] == "用户信息同步未配置"
+        callback = http.get("/api/v1/auth/oidc/callback")
+        assert callback.status_code == 503
+        assert callback.json()["detail"] == "用户信息同步未配置"
+        bad_token = http.get(
+            "/api/v1/accounts",
+            headers={"Authorization": "Bearer not-a-machine-token"},
+        )
+        assert bad_token.status_code == 401
+        assert bad_token.json()["detail"] == "需要访问令牌"
+        changed = session.post(
+            "/api/v1/auth/password",
+            json={"current_password": "wrong-pass", "new_password": "another-ok-1"},
+        )
+        assert changed.status_code == 400
+        assert changed.json()["detail"] == "当前口令不正确"
+        reset = http.post(
+            f"/api/v1/accounts/{created['id']}/password",
+            headers=auth_headers(),
+            json={"password": "reset-pass-1"},
+        )
+        # Resetting ada revokes her sessions. The call itself must not be 429.
+        assert reset.status_code == 204
+
+
+def test_login_window_expires_to_401_then_200(tmp_path: Path) -> None:
+    """Old failures leave the window without a success or a new process."""
+
+    clock = _Clock(1_000.0)
+    app = _limited_app(tmp_path, username_max=3, ip_max=1000, window=60, clock=clock)
+    with TestClient(app) as http:
+        truncate_domain(app.state.engine)
+        _create_account(http, "ada_window")
+        anon = TestClient(app)
+        assert _post_login(anon, "ada_window", "not-the-password").status_code == 401
+        clock.now = 1_010.0
+        assert _post_login(anon, "ada_window", "not-the-password").status_code == 401
+        clock.now = 1_020.0
+        capped = _post_login(anon, "ada_window", "not-the-password")
+        _assert_limited(capped, retry_after="40")
+        clock.now = 1_059.8
+        _assert_limited(_post_login(anon, "ada_window", LOCAL_PASSWORD), retry_after="1")
+        # 1000 and 1010 have left the window. One stamp remains, so this failure is 401.
+        clock.now = 1_079.0
+        again = _post_login(anon, "ada_window", "not-the-password")
+        assert again.status_code == 401
+        assert again.json()["detail"] == "用户名或口令不正确"
+        clock.now = 1_139.0
+        ok = _post_login(anon, "ada_window", LOCAL_PASSWORD)
+        assert ok.status_code == 200
+        assert ok.json()["account"]["username"] == "ada_window"
+        assert _session_count(app.state.engine) == 1
+
+
+def test_login_counters_are_not_shared_across_app_instances(tmp_path: Path) -> None:
+    settings = app_settings(
+        kiln_artifact_root=str(tmp_path / "artifacts"),
+        kiln_login_window_seconds=60,
+        kiln_login_username_max_failures=3,
+        kiln_login_ip_max_failures=1000,
+    )
+    first = create_app(settings)
+    second = create_app(settings)
+    with TestClient(first) as left, TestClient(second) as right:
+        truncate_domain(first.state.engine)
+        assert first.state.login_limit is not second.state.login_limit
+        for _ in range(2):
+            assert _post_login(left, "ada_proc", "not-the-password").status_code == 401
+        _assert_limited(_post_login(left, "ada_proc", "not-the-password"))
+        assert _post_login(right, "ada_proc", "not-the-password").status_code == 401
+
+
+def test_login_limit_docs_and_env_keys() -> None:
+    root = Path(__file__).resolve().parents[2]
+    conftest = (root / "backend" / "tests" / "conftest.py").read_text(encoding="utf-8")
+    keys = conftest.split("ENV_KEYS = (", 1)[1].split(")", 1)[0]
+    for name in (
+        "KILN_LOGIN_WINDOW_SECONDS",
+        "KILN_LOGIN_USERNAME_MAX_FAILURES",
+        "KILN_LOGIN_IP_MAX_FAILURES",
+    ):
+        assert name in keys
+    example = (root / ".env.example").read_text(encoding="utf-8")
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    deploy = (root / "docs" / "DEPLOY.md").read_text(encoding="utf-8")
+    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+    for document in (example, readme, deploy):
+        assert "KILN_LOGIN_WINDOW_SECONDS" in document
+        assert "KILN_LOGIN_USERNAME_MAX_FAILURES" in document
+        assert "KILN_LOGIN_IP_MAX_FAILURES" in document
+        assert "900" in document
+        assert "尝试次数过多，请稍后再试" in document
+        assert "Retry-After" in document
+        assert _SHARED_IP in document
+        assert _RESTART_CLEARS in document
+        assert "联邦" not in document
+        assert "federation" not in document.casefold()
+    assert "KILN_LOGIN_WINDOW_SECONDS: ${KILN_LOGIN_WINDOW_SECONDS:-900}" in compose
+    assert "KILN_LOGIN_USERNAME_MAX_FAILURES: ${KILN_LOGIN_USERNAME_MAX_FAILURES:-5}" in compose
+    assert "KILN_LOGIN_IP_MAX_FAILURES: ${KILN_LOGIN_IP_MAX_FAILURES:-30}" in compose
+    source = (root / "backend" / "kiln" / "login_limit.py").read_text(encoding="utf-8")
+    assert "self.lock = threading.Lock()" in source
+    assert "asyncio.Lock()" not in source
+    assert "import asyncio" not in source
+
+
+def _limited_app(
+    tmp_path: Path,
+    *,
+    username_max: int,
+    ip_max: int,
+    window: int = 60,
+    clock: _Clock | None = None,
+):
+    app = create_app(
+        app_settings(
+            kiln_artifact_root=str(tmp_path / "artifacts"),
+            kiln_login_window_seconds=window,
+            kiln_login_username_max_failures=username_max,
+            kiln_login_ip_max_failures=ip_max,
+        )
+    )
+    if clock is not None:
+        app.state.login_limit.clock = clock
+    return app
+
+
+def _create_account(client: TestClient, username: str) -> dict:
+    created = client.post(
+        "/api/v1/accounts",
+        headers=auth_headers(),
+        json={
+            "username": username,
+            "display_name": "限速",
+            "password": LOCAL_PASSWORD,
+            "role_ids": ["reader"],
+        },
+    )
+    assert created.status_code == 201, created.text
+    return created.json()
+
+
+def _post_login(
+    client: TestClient,
+    username: str,
+    password: str,
+    extra_headers: dict[str, str] | None = None,
+):
+    return client.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": password},
+        headers=extra_headers,
+    )
+
+
+def _assert_limited(response, retry_after: str | None = None) -> None:
+    assert response.status_code == 429, response.text
+    assert response.json() == {"detail": _LIMIT_DETAIL}
+    assert "www-authenticate" not in response.headers
+    assert int(response.headers["retry-after"]) >= 1
+    if retry_after is not None:
+        assert response.headers["retry-after"] == retry_after
+    assert "set-cookie" not in response.headers
+
+
+def connection_status(engine, username: str) -> str:
+    with engine.connect() as connection:
+        return connection.execute(
+            text("SELECT status FROM accounts WHERE username = :name"),
+            {"name": username},
+        ).scalar_one()

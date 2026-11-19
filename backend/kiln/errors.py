@@ -13,6 +13,18 @@ class Unauthorized(AppError):
         super().__init__(401, detail)
 
 
+class TooManyRequests(AppError):
+    """Local password login exceeded its sliding window.
+
+    The API handler sets ``Retry-After`` from ``retry_after`` and does not
+    add ``WWW-Authenticate``.
+    """
+
+    def __init__(self, retry_after: int, detail: str = "尝试次数过多，请稍后再试") -> None:
+        super().__init__(429, detail)
+        self.retry_after = retry_after if retry_after >= 1 else 1
+
+
 class Forbidden(AppError):
     def __init__(self, detail: str = "没有权限") -> None:
         super().__init__(403, detail)
