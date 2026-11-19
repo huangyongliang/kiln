@@ -83,7 +83,7 @@ DESCRIPTION = (
     "GET /skills 与 GET /skills/{id} 需要 skill.read。"
     "GET /executor、GET /dependency-proxy、GET /jobs、GET /jobs/{id}、GET /jobs/{id}/log、"
     "GET /builds、GET /builds/{id} 和 GET /builds/{id}/log 需要 executor.read。"
-    "GET /git/source、GET /git/repositories 和 GET /git/commits 需要 git.read。"
+    "GET /git/source、GET /git/repositories、GET /git/branches 和 GET /git/commits 需要 git.read。"
     "只读角色可以查看账号、skill 与制品，没有 executor.read 和 git.read。"
     "GET /llm/provider、GET /rbac/roles 和 GET /rbac/permissions"
     "仍只需会话或机器令牌。GET /retrieve/{id} 与 GET /retrieve/{id}/content"

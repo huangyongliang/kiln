@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   DISABLE_CONFIRM_TEXT,
   conflictText,
+  passwordChangeBody,
   passwordChangeErrors,
   resetPasswordError,
   rowActionLabels,
@@ -40,20 +41,46 @@ test("a 409 detail is shown unchanged", () => {
 });
 
 test("changing a password checks the new password length", () => {
-  assert.deepEqual(passwordChangeErrors("", "short"), {
+  assert.deepEqual(passwordChangeErrors("", "short", "short"), {
     current_password: "请填写当前口令",
     new_password: "口令至少 8 个字符",
   });
-  assert.deepEqual(passwordChangeErrors("current-password", "short"), {
+  assert.deepEqual(passwordChangeErrors("current-password", "short", "short"), {
     new_password: "口令至少 8 个字符",
   });
-  assert.deepEqual(passwordChangeErrors("current-password", "a".repeat(129)), {
+  assert.deepEqual(passwordChangeErrors("current-password", "a".repeat(129), "a".repeat(129)), {
     new_password: "口令过长",
   });
-  assert.deepEqual(passwordChangeErrors("current-password", "long-enough"), {});
+  assert.deepEqual(passwordChangeErrors("current-password", "long-enough", "long-enough"), {});
   assert.equal(resetPasswordError("short"), "口令至少 8 个字符");
   assert.equal(resetPasswordError("a".repeat(129)), "口令过长");
   assert.equal(resetPasswordError("long-enough"), "");
+});
+
+test("confirming a new password stays in the form and out of the request", () => {
+  assert.deepEqual(passwordChangeErrors("current-password", "long-enough", ""), {
+    confirm_password: "请再次输入新口令",
+  });
+  assert.deepEqual(passwordChangeErrors("current-password", "long-enough"), {
+    confirm_password: "请再次输入新口令",
+  });
+  assert.deepEqual(passwordChangeErrors("current-password", "long-enough", "other-value"), {
+    confirm_password: "两次输入的新口令不一致",
+  });
+  assert.deepEqual(passwordChangeErrors("current-password", "long-enough", "long-enough "), {
+    confirm_password: "两次输入的新口令不一致",
+  });
+  assert.deepEqual(passwordChangeErrors("current-password", "short", ""), {
+    new_password: "口令至少 8 个字符",
+    confirm_password: "请再次输入新口令",
+  });
+  assert.deepEqual(passwordChangeErrors("current-password", "long-enough", "long-enough"), {});
+  const body = passwordChangeBody("current-password", "long-enough");
+  assert.deepEqual(Object.keys(body), ["current_password", "new_password"]);
+  assert.deepEqual(body, {
+    current_password: "current-password",
+    new_password: "long-enough",
+  });
 });
 
 test("the signed-in user can open change-password", () => {

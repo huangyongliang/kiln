@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { apiPath, isUuid } from "./paths.js";
+import { apiPath, gitBranchesPath, isUuid } from "./paths.js";
 
 test("apiPath encodes each interpolation", () => {
   assert.equal(apiPath`/p/${"../"}`, "/p/..%2F");
@@ -12,6 +12,14 @@ test("apiPath encodes each interpolation", () => {
   assert.equal(apiPath`/p/${"+"}`, "/p/%2B");
   assert.equal(apiPath`/api/v1/skills/${"one"}/reject`, "/api/v1/skills/one/reject");
   assert.equal(apiPath`/a/${"one"}/b/${"two"}`, "/a/one/b/two");
+});
+
+test("git branch queries encode the repository so slashes stay in the value", () => {
+  const nested = gitBranchesPath("group/sub/app");
+  assert.equal(nested, "/api/v1/git/branches?repository=group%2Fsub%2Fapp");
+  assert.equal(nested.split("?")[1].includes("/"), false);
+  assert.equal(gitBranchesPath("ada/demo?x#y"), "/api/v1/git/branches?repository=ada%2Fdemo%3Fx%23y");
+  assert.equal(gitBranchesPath("ada/demo+1"), "/api/v1/git/branches?repository=ada%2Fdemo%2B1");
 });
 
 test("isUuid accepts a canonical uuid and rejects lookalikes", () => {

@@ -7,11 +7,13 @@ production adapter type. These tests do not invent a production GitLab URL.
 from uuid import uuid4
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from kiln.config import Settings
-from kiln.git.gitea import GiteaSource, commit_path
-from kiln.git.gitlab import GitLabSource, project_commit_path
+from kiln.errors import NotFound, UpstreamFailure
+from kiln.git.gitea import GiteaSource, branches_path, commit_path
+from kiln.git.gitlab import GitLabSource, project_branches_path, project_commit_path
 from kiln.git.source import PRODUCTION_GIT_PROVIDER, build_git_source
 from kiln.main import create_app
 from tests.external import ExternalTargets, external_settings
@@ -51,11 +53,21 @@ def test_gitlab_is_the_production_adapter_and_gitea_is_the_lab() -> None:
     )
     assert commit_path("kiln", "sample", "main") == "/api/v1/repos/kiln/sample/git/commits/main"
     assert "/api/v4/" not in commit_path("kiln", "sample", "main")
+    assert project_branches_path("group/sub", "app") == (
+        "/api/v4/projects/group%2Fsub%2Fapp/repository/branches"
+    )
+    assert branches_path("group/sub", "app") == "/api/v1/repos/group%2Fsub/app/branches"
+    assert "/api/v4/" not in branches_path("kiln", "sample")
 
 
 def test_unconfigured_git_source_names_gitlab_without_a_url(client: TestClient) -> None:
     spec = client.get("/openapi.json").json()
-    for path in ("/api/v1/git/source", "/api/v1/git/repositories", "/api/v1/git/commits"):
+    for path in (
+        "/api/v1/git/source",
+        "/api/v1/git/repositories",
+        "/api/v1/git/branches",
+        "/api/v1/git/commits",
+    ):
         assert path in spec["paths"]
         for operation in spec["paths"][path].values():
             if isinstance(operation, dict) and "responses" in operation:
@@ -73,6 +85,161 @@ def test_unconfigured_git_source_names_gitlab_without_a_url(client: TestClient) 
     listed = client.get("/api/v1/git/repositories")
     assert listed.status_code == 503
     assert "GIT_PROVIDER" in listed.json()["detail"]
+    branches = client.get("/api/v1/git/branches", params={"repository": "ada/demo"})
+    assert branches.status_code == 503
+    assert "GIT_PROVIDER" in branches.json()["detail"]
+    assert "代码源未配置" in branches.json()["detail"]
+
+
+def test_gitea_and_gitlab_list_branches_with_mock_http() -> None:
+    gitea = _list_with_mock(
+        GiteaSource,
+        "limit",
+        b"/api/v1/repos/group%2Fsub/app/branches",
+        "token local-only",
+        "Authorization",
+    )
+    gitlab = _list_with_mock(
+        GitLabSource,
+        "per_page",
+        b"/api/v4/projects/group%2Fsub%2Fapp/repository/branches",
+        "local-only",
+        "PRIVATE-TOKEN",
+    )
+    assert gitea.names == ["main", "feature/demo"]
+    assert gitlab.names == ["main", "feature/demo"]
+    for listed in (gitea, gitlab):
+        assert listed.pages == [1]
+        assert [item.model_dump() for item in listed.branches] == [
+            {"name": "main"},
+            {"name": "feature/demo"},
+        ]
+        assert all("sha" not in item.model_dump() for item in listed.branches)
+
+    gitea_pages = _paginate(GiteaSource, "limit", "per_page")
+    gitlab_pages = _paginate(GitLabSource, "per_page", "limit")
+    assert gitea_pages.short_pages == [1, 2]
+    assert gitlab_pages.short_pages == [1, 2]
+    assert gitea_pages.full_pages == [1, 2, 3, 4, 5]
+    assert gitlab_pages.full_pages == [1, 2, 3, 4, 5]
+    assert gitea_pages.names[0] == "b-1-0"
+    assert gitea_pages.names[-1] == "b-2-0"
+    assert len(gitea_pages.full_names) == 250
+
+    for source_type in (GiteaSource, GitLabSource):
+        missing = _exchange(
+            source_type,
+            lambda _request: httpx.Response(404, json={"message": "no"}),
+        )
+        with pytest.raises(NotFound) as not_found:
+            missing.list_branches("ada", "demo")
+        assert not_found.value.detail == "仓库或引用不存在"
+        assert "no" not in not_found.value.detail
+
+        broken = _exchange(
+            source_type,
+            lambda _request: httpx.Response(200, json={"message": "nope"}),
+        )
+        with pytest.raises(UpstreamFailure) as failed:
+            broken.list_branches("ada", "demo")
+        assert failed.value.detail == "代码源返回的不是分支列表（127.0.0.1:9）"
+        assert "仓库列表" not in failed.value.detail
+        assert "nope" not in failed.value.detail
+
+
+class _Listed:
+    def __init__(self, branches: list, pages: list[int]) -> None:
+        self.branches = branches
+        self.pages = pages
+
+    @property
+    def names(self) -> list[str]:
+        return [item.name for item in self.branches]
+
+
+class _Pages:
+    def __init__(
+        self,
+        short_pages: list[int],
+        full_pages: list[int],
+        names: list[str],
+        full_names: list[str],
+    ) -> None:
+        self.short_pages = short_pages
+        self.full_pages = full_pages
+        self.names = names
+        self.full_names = full_names
+
+
+def _list_with_mock(
+    source_type: type,
+    page_param: str,
+    encoded_path: bytes,
+    token_value: str,
+    token_header: str,
+) -> _Listed:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        assert request.url.host == "127.0.0.1"
+        assert request.url.port == 9
+        assert encoded_path in request.url.raw_path
+        assert page_param in request.url.params
+        assert request.url.params[page_param] == "50"
+        assert request.url.params["page"] == "1"
+        assert token_value not in str(request.url)
+        assert request.headers[token_header] == token_value
+        return httpx.Response(
+            200,
+            json=[
+                {"name": "main", "commit": {"id": "abc", "sha": "should-not-surface"}},
+                {"commit": {"id": "hidden"}},
+                {"name": ""},
+                {"name": "feature/demo"},
+                "not-a-branch",
+            ],
+        )
+
+    source = _exchange(source_type, handler)
+    branches = source.list_branches("group/sub", "app")
+    return _Listed(branches, [int(item.url.params["page"]) for item in seen])
+
+
+def _paginate(source_type: type, page_param: str, absent_param: str) -> _Pages:
+    short = _pages_for(source_type, page_param, absent_param, {1: 50, 2: 1})
+    full = _pages_for(source_type, page_param, absent_param, {page: 50 for page in range(1, 6)})
+    return _Pages(short[0], full[0], short[1], full[1])
+
+
+def _pages_for(
+    source_type: type,
+    page_param: str,
+    absent_param: str,
+    counts: dict[int, int],
+) -> tuple[list[int], list[str]]:
+    seen: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        seen.append(page)
+        assert request.url.params[page_param] == "50"
+        assert absent_param not in request.url.params
+        assert page in counts
+        rows = [
+            {"name": f"b-{page}-{index}", "commit": {"id": "abc"}}
+            for index in range(counts[page])
+        ]
+        return httpx.Response(200, json=rows)
+
+    source = _exchange(source_type, handler)
+    branches = source.list_branches("ada", "demo")
+    return seen, [item.name for item in branches]
+
+
+def _exchange(source_type: type, handler) -> GiteaSource | GitLabSource:
+    client = httpx.Client(transport=httpx.MockTransport(handler), trust_env=False)
+    return source_type("http://127.0.0.1:9", "local-only", client)
 
 
 def test_gitea_adapter_lists_and_resolves_a_real_repository(
@@ -126,6 +293,13 @@ def test_gitea_adapter_lists_and_resolves_a_real_repository(
             with TestClient(anon) as unauthenticated:
                 assert unauthenticated.get("/api/v1/git/source").status_code == 401
                 assert unauthenticated.get("/api/v1/git/repositories").status_code == 401
+                assert (
+                    unauthenticated.get(
+                        "/api/v1/git/branches",
+                        params={"repository": full_name},
+                    ).status_code
+                    == 401
+                )
                 denied = unauthenticated.get(
                     "/api/v1/git/commits",
                     params={"repository": full_name, "ref": branch},

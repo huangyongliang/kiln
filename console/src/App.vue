@@ -3,7 +3,12 @@ import { computed, ref, watch } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 
 import { accessReady, account, ensureAccess, perms, roleTags } from "./access";
-import { conflictText, passwordChangeErrors, showOwnPassword } from "./accountLifecycle";
+import {
+  conflictText,
+  passwordChangeBody,
+  passwordChangeErrors,
+  showOwnPassword,
+} from "./accountLifecycle";
 import { errorText, postJson, requestJson } from "./api";
 import { clearChatStorage } from "./chat";
 import AppIcon from "./components/AppIcon.vue";
@@ -21,6 +26,7 @@ const healthKnown = ref(false);
 const ownOpen = ref(false);
 const ownCurrent = ref("");
 const ownNext = ref("");
+const ownConfirm = ref("");
 const ownError = ref("");
 const ownFieldErrors = ref({});
 const ownBusy = ref(false);
@@ -116,6 +122,7 @@ function saveToken() {
 function openOwnPassword() {
   ownCurrent.value = "";
   ownNext.value = "";
+  ownConfirm.value = "";
   ownError.value = "";
   ownFieldErrors.value = {};
   ownOpen.value = true;
@@ -125,7 +132,7 @@ async function submitOwnPassword() {
   if (ownBusy.value) {
     return;
   }
-  const local = passwordChangeErrors(ownCurrent.value, ownNext.value);
+  const local = passwordChangeErrors(ownCurrent.value, ownNext.value, ownConfirm.value);
   ownFieldErrors.value = local;
   ownError.value = "";
   if (Object.keys(local).length) {
@@ -135,12 +142,10 @@ async function submitOwnPassword() {
   const next = ownNext.value;
   ownCurrent.value = "";
   ownNext.value = "";
+  ownConfirm.value = "";
   ownBusy.value = true;
   try {
-    await postJson("/api/v1/auth/password", {
-      current_password: current,
-      new_password: next,
-    });
+    await postJson("/api/v1/auth/password", passwordChangeBody(current, next));
     ownOpen.value = false;
   } catch (caught) {
     ownError.value = conflictText(caught) || errorText(caught, "无法修改口令");
@@ -251,6 +256,13 @@ async function logout() {
         <label for="own-next">新口令</label>
         <input id="own-next" v-model="ownNext" type="password" autocomplete="new-password" />
         <p v-if="ownFieldErrors.new_password" class="field-error">{{ ownFieldErrors.new_password }}</p>
+      </div>
+      <div class="field">
+        <label for="own-confirm">确认新口令</label>
+        <input id="own-confirm" v-model="ownConfirm" type="password" autocomplete="new-password" />
+        <p v-if="ownFieldErrors.confirm_password" class="field-error">
+          {{ ownFieldErrors.confirm_password }}
+        </p>
       </div>
     </FormDialog>
     <div v-if="toasts.length" class="toast-wrap" aria-live="polite">

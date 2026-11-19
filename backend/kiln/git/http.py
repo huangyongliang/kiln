@@ -41,6 +41,12 @@ def as_list(payload: object, netloc: str) -> list[object]:
     return payload
 
 
+def as_branch_list(payload: object, netloc: str) -> list[object]:
+    if not isinstance(payload, list):
+        raise UpstreamFailure(f"代码源返回的不是分支列表（{netloc}）")
+    return payload
+
+
 def as_object(payload: object, netloc: str) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise UpstreamFailure(f"代码源返回的不是 JSON 对象（{netloc}）")

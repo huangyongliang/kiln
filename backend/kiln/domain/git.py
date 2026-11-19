@@ -30,6 +30,20 @@ class GitRepositoryList(BaseModel):
     items: list[GitRepository]
 
 
+class GitBranch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+
+
+class GitBranchList(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["gitea", "gitlab"]
+    role: Literal["lab", "production"]
+    items: list[GitBranch]
+
+
 class ResolvedCommit(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

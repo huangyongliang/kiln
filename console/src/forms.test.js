@@ -14,7 +14,10 @@ import {
 import {
   artifactNameError,
   boundError,
+  branchLoadMessage,
   buildNameError,
+  catalogBranchError,
+  catalogRepositoryError,
   checksumError,
   codePointLength,
   controlCharError,
@@ -26,6 +29,7 @@ import {
   inputNameError,
   packageTypeError,
   passwordError,
+  preferredBranch,
   refError,
   rejectReasonError,
   repositoryError,
@@ -133,6 +137,43 @@ test("repository and ref follow the build parsers", () => {
   assert.equal(refError("/main"), "引用无效");
   assert.equal(refError("a..b"), "引用无效");
   assert.equal(refError("a".repeat(256)), "引用过长");
+});
+
+test("a build must choose a repository and branch from the loaded lists", () => {
+  const catalog = [{ full_name: "group/demo", default_branch: "main" }, "group/sub/app"];
+  const branches = [{ name: "main" }, { name: "feature/demo" }, "dev"];
+  assert.equal(catalogRepositoryError("", catalog), "请选择仓库");
+  assert.equal(catalogRepositoryError("   ", catalog), "请选择仓库");
+  assert.equal(catalogRepositoryError("ghost/repo", catalog), "请从目录中选择仓库");
+  assert.equal(catalogRepositoryError("nope", catalog), "请从目录中选择仓库");
+  assert.equal(catalogRepositoryError("group/demo", catalog), "");
+  assert.equal(catalogRepositoryError(" group/demo ", catalog), "");
+  assert.equal(catalogRepositoryError("group/sub/app", catalog), "");
+  assert.equal(catalogRepositoryError("group/demo", []), "请从目录中选择仓库");
+  assert.equal(catalogRepositoryError("no slash", ["no slash"]), "仓库必须是 owner/name");
+
+  assert.equal(catalogBranchError("", branches), "请选择分支");
+  assert.equal(catalogBranchError("   ", branches), "请选择分支");
+  assert.equal(catalogBranchError("ghost", branches), "请从列表中选择分支");
+  assert.equal(catalogBranchError("a..b", branches), "引用无效");
+  assert.equal(catalogBranchError("/main", branches), "引用无效");
+  assert.equal(catalogBranchError("main", branches), "");
+  assert.equal(catalogBranchError("feature/demo", branches), "");
+  assert.equal(catalogBranchError("dev", branches), "");
+  assert.equal(catalogBranchError("main", []), "请从列表中选择分支");
+  assert.equal(catalogBranchError("main", [{ name: "main", commit: { id: "abc" } }]), "");
+
+  assert.equal(preferredBranch("main", branches), "main");
+  assert.equal(preferredBranch("missing", branches), "");
+  assert.equal(preferredBranch("", branches), "");
+  assert.equal(preferredBranch("main", []), "");
+  assert.equal(preferredBranch("main", [{ name: "other" }]), "");
+
+  assert.equal(branchLoadMessage(403), "没有权限");
+  assert.equal(branchLoadMessage(503), "代码源未配置");
+  assert.equal(branchLoadMessage(502), "无法读取分支");
+  assert.equal(branchLoadMessage(undefined), "无法读取分支");
+  assert.equal(branchLoadMessage(502).includes("http"), false);
 });
 
 test("optional build name, package type, and step kind", () => {

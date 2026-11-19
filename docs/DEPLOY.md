@@ -333,7 +333,7 @@ Compose 把 `LLM_BASE_URL` 原样写进 `kiln-api`。容器里的 `127.0.0.1` �
 
 ## Jenkins 与代码源
 
-执行器只在 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN` 都非空时工作。代码源只在 `GIT_PROVIDER` 为 `gitea` 或 `gitlab` 且 `GIT_BASE_URL`、`GIT_TOKEN` 都有值时工作。缺任何一项时，API 仍然启动。已具备 `executor.run` 时，`POST /api/v1/jobs` 返回 503；已具备 `git.read` 且代码源未配置时，`GET /api/v1/git/repositories` 返回 503。只读角色调用 `POST /api/v1/jobs` 或 `POST /api/v1/builds` 返回 403，即使 Jenkins 或代码源未配置，也不会写入任务或构建记录。读取执行器状态、任务、产品构建及其日志需要 `executor.read`，读取代码源需要 `git.read`。只读角色没有这两项，这些 GET 返回 403，正文是「没有权限」，不含 `JENKINS_URL` 或「代码源未配置」。构建者、发布者、管理员和机器令牌在未配置时，任务、构建、仓库列表和解析引用返回 503。`GET /api/v1/executor` 和 `GET /api/v1/git/source` 对具备对应读取权限的调用返回未配置（`configured` 为 false），并且代码源响应里的 `production_provider` 固定为 `gitlab`。
+执行器只在 `JENKINS_URL`、`JENKINS_USER`、`JENKINS_API_TOKEN` 都非空时工作。代码源只在 `GIT_PROVIDER` 为 `gitea` 或 `gitlab` 且 `GIT_BASE_URL`、`GIT_TOKEN` 都有值时工作。缺任何一项时，API 仍然启动。已具备 `executor.run` 时，`POST /api/v1/jobs` 返回 503；已具备 `git.read` 且代码源未配置时，`GET /api/v1/git/repositories` 返回 503。只读角色调用 `POST /api/v1/jobs` 或 `POST /api/v1/builds` 返回 403，即使 Jenkins 或代码源未配置，也不会写入任务或构建记录。读取执行器状态、任务、产品构建及其日志需要 `executor.read`，读取代码源需要 `git.read`。只读角色没有这两项，这些 GET 返回 403，正文是「没有权限」，不含 `JENKINS_URL` 或「代码源未配置」。构建者、发布者、管理员和机器令牌在未配置时，任务、构建、仓库列表、列分支和解析引用返回 503。`GET /api/v1/executor` 和 `GET /api/v1/git/source` 对具备对应读取权限的调用返回未配置（`configured` 为 false），并且代码源响应里的 `production_provider` 固定为 `gitlab`。
 
 这些调用接受会话 cookie、登录返回的 Bearer 令牌，或 `Authorization: Bearer <KILN_API_TOKEN>`。`POST /api/v1/jobs` 需要 `executor.run`。`POST /api/v1/builds` 需要 `executor.run` 与 `skill.use`。读取任务、构建和执行器状态还需要 `executor.read`，读取代码源还需要 `git.read`。没有凭证时返回 401，不会到 Jenkins 或代码源上去创建任务。机器令牌拥有目录中的全部权限。
 
@@ -372,7 +372,7 @@ if [ -n "${KILN_NEXUS_URL:-}" ]; then
 fi
 ```
 
-解析代码引用是 `GET /api/v1/git/commits?repository=owner/name&ref=main`。`gitea` 走 Gitea 的 `/api/v1/`，`gitlab` 走 GitLab 的 `/api/v4/`。Gitea 1.24 解析单个提交用的是 `/git/commits/{ref}`，响应字段是 `sha`。
+解析代码引用是 `GET /api/v1/git/commits?repository=owner/name&ref=main`。列出分支是 `GET /api/v1/git/branches?repository=owner/name`，Gitea 路径是 `/api/v1/repos/{owner}/{name}/branches`，GitLab 路径是 `/api/v4/projects/{urlencoded owner/name}/repository/branches`，响应的 `items` 只有分支名。`gitea` 走 Gitea 的 `/api/v1/`，`gitlab` 走 GitLab 的 `/api/v4/`。Gitea 1.24 解析单个提交用的是 `/git/commits/{ref}`，响应字段是 `sha`。
 
 ### 共享实验机上已经在跑的实验室
 
