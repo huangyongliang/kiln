@@ -16,6 +16,7 @@ import {
   boundError,
   branchLoadMessage,
   buildNameError,
+  buildRepositoryChoices,
   catalogBranchError,
   catalogRepositoryError,
   checksumError,
@@ -33,8 +34,11 @@ import {
   refError,
   rejectReasonError,
   repositoryError,
+  repositoryInSkillScope,
+  repositoryKeptForSkill,
   scopeList,
   scopeListError,
+  skillAllowlistCatalogHint,
   skillNameError,
   stepKindError,
   uploadSizeError,
@@ -174,6 +178,110 @@ test("a build must choose a repository and branch from the loaded lists", () => 
   assert.equal(branchLoadMessage(502), "无法读取分支");
   assert.equal(branchLoadMessage(undefined), "无法读取分支");
   assert.equal(branchLoadMessage(502).includes("http"), false);
+});
+
+test("start-build repositories are the skill allow list intersected with the catalog", () => {
+  const catalog = [
+    { full_name: "kiln-admin/kiln-demo-build", default_branch: "main" },
+    { full_name: "kiln-admin/kiln-demo-node", default_branch: "develop" },
+    { full_name: "other/repo", default_branch: "dev" },
+  ];
+  const narrow = { allowed_repositories: ["kiln-admin/kiln-demo-build"] };
+  const choices = buildRepositoryChoices(narrow, catalog);
+  assert.deepEqual(
+    choices.map((item) => item.full_name),
+    ["kiln-admin/kiln-demo-build"],
+  );
+  assert.equal(choices[0].default_branch, "main");
+  assert.equal(
+    choices.some((item) => item.full_name === "kiln-admin/kiln-demo-node"),
+    false,
+  );
+
+  assert.equal(repositoryInSkillScope("group/demo", []), true);
+  assert.equal(repositoryInSkillScope(" group/demo ", ["group/demo"]), true);
+  assert.equal(repositoryInSkillScope("org/team/app", ["  org/team/app  "]), true);
+  assert.equal(repositoryInSkillScope("group/demo", ["other/repo"]), false);
+  assert.equal(repositoryInSkillScope("Group/Demo", ["group/demo"]), false);
+  assert.equal(repositoryInSkillScope("group/demo", ["lab repo"]), false);
+  assert.equal(repositoryInSkillScope("group/demo", ["group/demo/"]), false);
+  assert.equal(repositoryInSkillScope("lab repo", ["lab repo"]), true);
+  assert.equal(repositoryInSkillScope("group/demo/", ["group/demo/"]), true);
+  assert.equal(repositoryInSkillScope("group/demo", null), true);
+
+  const nested = buildRepositoryChoices(
+    { allowed_repositories: ["  org/team/app  "] },
+    [{ full_name: "org/team/app" }, { full_name: "Org/Team/App" }],
+  );
+  assert.deepEqual(
+    nested.map((item) => item.full_name),
+    ["org/team/app"],
+  );
+  const literal = buildRepositoryChoices(
+    { allowed_repositories: ["lab repo"] },
+    [{ full_name: "lab repo" }, { full_name: "group/demo" }],
+  );
+  assert.deepEqual(
+    literal.map((item) => item.full_name),
+    ["lab repo"],
+  );
+
+  const open = buildRepositoryChoices({ allowed_repositories: [] }, catalog);
+  assert.deepEqual(
+    open.map((item) => item.full_name),
+    catalog.map((item) => item.full_name),
+  );
+  assert.equal(buildRepositoryChoices({ id: "published" }, catalog).length, catalog.length);
+  assert.deepEqual(buildRepositoryChoices(null, catalog), []);
+  assert.deepEqual(buildRepositoryChoices(undefined, catalog), []);
+  assert.deepEqual(buildRepositoryChoices(narrow, null), []);
+
+  const ordered = buildRepositoryChoices(
+    {
+      allowed_repositories: ["kiln-admin/kiln-demo-build", "kiln-admin/kiln-demo-node"],
+    },
+    [catalog[1], catalog[0]],
+  );
+  assert.deepEqual(
+    ordered.map((item) => item.full_name),
+    ["kiln-admin/kiln-demo-node", "kiln-admin/kiln-demo-build"],
+  );
+
+  assert.equal(
+    repositoryKeptForSkill("kiln-admin/kiln-demo-build", choices),
+    "kiln-admin/kiln-demo-build",
+  );
+  assert.equal(
+    repositoryKeptForSkill(" kiln-admin/kiln-demo-build ", choices),
+    "kiln-admin/kiln-demo-build",
+  );
+  assert.equal(repositoryKeptForSkill("kiln-admin/kiln-demo-node", choices), "");
+  assert.equal(repositoryKeptForSkill("Kiln-admin/kiln-demo-build", choices), "");
+  assert.equal(repositoryKeptForSkill("", choices), "");
+  assert.equal(repositoryKeptForSkill("kiln-admin/kiln-demo-build", []), "");
+  assert.equal(repositoryKeptForSkill("missing/repo", open), "");
+
+  assert.equal(skillAllowlistCatalogHint(null, []), "");
+  assert.equal(skillAllowlistCatalogHint({ allowed_repositories: [] }, []), "");
+  assert.equal(
+    skillAllowlistCatalogHint({ allowed_repositories: ["kiln-admin/kiln-demo-node"] }, []),
+    "该 Skill 的允许仓库不在当前代码源目录中",
+  );
+  assert.equal(
+    skillAllowlistCatalogHint(
+      { allowed_repositories: ["kiln-admin/kiln-demo-node"] },
+      [{ full_name: "kiln-admin/kiln-demo-node" }],
+    ),
+    "",
+  );
+
+  assert.equal(catalogRepositoryError("", choices), "请选择仓库");
+  assert.equal(
+    catalogRepositoryError("kiln-admin/kiln-demo-node", choices),
+    "请从目录中选择仓库",
+  );
+  assert.equal(catalogRepositoryError("kiln-admin/kiln-demo-build", choices), "");
+  assert.equal(catalogRepositoryError("kiln-admin/kiln-demo-node", catalog), "");
 });
 
 test("optional build name, package type, and step kind", () => {

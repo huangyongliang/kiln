@@ -12,11 +12,14 @@ import {
   artifactNameError,
   branchLoadMessage,
   buildNameError,
+  buildRepositoryChoices,
   catalogBranchError,
   catalogRepositoryError,
   fieldErrors,
   packageTypeError,
   preferredBranch,
+  repositoryKeptForSkill,
+  skillAllowlistCatalogHint,
   versionError,
 } from "../forms";
 import { formatTime, shortSha } from "../format";
@@ -93,6 +96,15 @@ const PACKAGE_OPTIONS = [
 const showJobForm = computed(
   () => Boolean(executor.value?.configured) && canDo("job.create", perms.value),
 );
+const selectedPublishedSkill = computed(
+  () => publishedSkills.value.find((item) => item.id === skillId.value) || null,
+);
+const buildRepositories = computed(() =>
+  buildRepositoryChoices(selectedPublishedSkill.value, repositories.value),
+);
+const skillRepositoryGap = computed(() =>
+  skillAllowlistCatalogHint(selectedPublishedSkill.value, buildRepositories.value),
+);
 
 const filteredBuilds = computed(() => {
   const needle = query.value.trim().toLowerCase();
@@ -127,6 +139,18 @@ watch(accessReady, (ready) => {
 });
 watch(repository, (value) => {
   loadBranches(value);
+});
+watch(skillId, () => {
+  const kept = repositoryKeptForSkill(repository.value, buildRepositories.value);
+  if (kept !== repository.value) {
+    repository.value = kept;
+  }
+  if (!Object.prototype.hasOwnProperty.call(buildErrors.value, "repository")) {
+    return;
+  }
+  const next = { ...buildErrors.value };
+  delete next.repository;
+  buildErrors.value = next;
 });
 
 function matchesStatus(status, filter) {
@@ -368,7 +392,7 @@ async function submitBuild() {
   ) {
     local.skill_id = "请选择已发布的 Skill";
   }
-  const repositoryMessage = catalogRepositoryError(repository.value, repositories.value);
+  const repositoryMessage = catalogRepositoryError(repository.value, buildRepositories.value);
   if (repositoryMessage) {
     local.repository = repositoryMessage;
   }
@@ -713,12 +737,13 @@ async function loadBranches(value) {
       </div>
       <div class="field">
         <label for="build-repository">仓库</label>
-        <select id="build-repository" v-model="repository">
+        <select id="build-repository" v-model="repository" :disabled="!selectedPublishedSkill">
           <option value="">选择仓库</option>
-          <option v-for="item in repositories" :key="item.full_name" :value="item.full_name">
+          <option v-for="item in buildRepositories" :key="item.full_name" :value="item.full_name">
             {{ item.full_name }}
           </option>
         </select>
+        <p v-if="skillRepositoryGap" class="hint">{{ skillRepositoryGap }}</p>
         <p v-if="perms != null && !canDo('git.read', perms)" class="hint">
           {{ actionDeniedText("git.read") }}
         </p>
