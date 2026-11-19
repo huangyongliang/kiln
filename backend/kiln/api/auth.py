@@ -25,7 +25,8 @@ from kiln.db.store import PostgresStore
 from kiln.domain.accounts import Account, PasswordChange
 from kiln.domain.auth import LoginRequest, SessionLogin, SessionPrincipal, SyncStatus
 from kiln.domain.rbac import PERMISSIONS
-from kiln.errors import Forbidden, NotConfigured, Unauthorized, UpstreamFailure
+from kiln.errors import Forbidden, NotConfigured, TooManyRequests, Unauthorized, UpstreamFailure
+from kiln.login_limit import LoginLimiter, normalize_username, peer_host
 from kiln.oidc import OidcFlowError, begin_authorization, finish_authorization
 
 router = APIRouter(prefix="/auth", tags=["登录"])
@@ -38,15 +39,29 @@ _OIDC_MAX_AGE = 600
 @router.post("/login", response_model=SessionLogin, summary="本地口令登录")
 def login(
     payload: LoginRequest,
+    request: Request,
     store: PostgresStore = Depends(get_store),
     settings: Settings = Depends(get_settings),
 ) -> JSONResponse:
+    limiter: LoginLimiter = request.app.state.login_limit
+    username_key = normalize_username(payload.username)
+    ip_key = peer_host(request.client)
+    # Already over the cap: 429 before any password check, so a limited
+    # request cannot tell a disabled account from a bad password.
+    retry_after = limiter.blocked(username_key, ip_key)
+    if retry_after is not None:
+        raise TooManyRequests(retry_after)
     account, reason = store.authenticate_password(payload.username, payload.password)
     if account is None:
+        retry_after = limiter.record_failure(username_key, ip_key)
+        if retry_after is not None:
+            raise TooManyRequests(retry_after)
         if reason == "disabled":
             raise Unauthorized("账号已停用")
         raise Unauthorized("用户名或口令不正确")
     body, token = _issue_session(store, settings, account)
+    if username_key is not None:
+        limiter.clear_username(username_key)
     response = JSONResponse(content=jsonable_encoder(body))
     _remember_session(response, settings, token)
     return response

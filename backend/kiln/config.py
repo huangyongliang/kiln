@@ -43,6 +43,15 @@ API_TOKEN_OPERATOR_HINT = (
 BUILD_PENDING_TIMEOUT_MIN_SECONDS = 60
 BUILD_PENDING_TIMEOUT_MAX_SECONDS = 86400
 BUILD_PENDING_TIMEOUT_ERROR = "KILN_BUILD_PENDING_TIMEOUT_SECONDS 须为 60–86400 的整数"
+LOGIN_WINDOW_MIN_SECONDS = 60
+LOGIN_WINDOW_MAX_SECONDS = 86400
+LOGIN_WINDOW_ERROR = "KILN_LOGIN_WINDOW_SECONDS 须为 60–86400 的整数"
+LOGIN_USERNAME_MIN_FAILURES = 3
+LOGIN_USERNAME_MAX_FAILURES = 100
+LOGIN_USERNAME_ERROR = "KILN_LOGIN_USERNAME_MAX_FAILURES 须为 3–100 的整数"
+LOGIN_IP_MIN_FAILURES = 5
+LOGIN_IP_MAX_FAILURES = 1000
+LOGIN_IP_ERROR = "KILN_LOGIN_IP_MAX_FAILURES 须为 5–1000 的整数"
 
 # LLM_MODELS items. The 32-item cap applies to the parsed allow-list only.
 # Prepending a missing LLM_MODEL happens later and may add one extra catalog
@@ -79,6 +88,12 @@ class Settings(BaseSettings):
     Nexus settings are optional and empty by default. ``KILN_NEXUS_URL`` and
     ``KILN_NEXUS_REPOSITORY`` are set together. Credentials are optional and
     are also set together. The password is never written into a job config.
+
+    Local password login keeps an in-process sliding window of failures.
+    ``KILN_LOGIN_WINDOW_SECONDS`` defaults to 900 (60–86400).
+    ``KILN_LOGIN_USERNAME_MAX_FAILURES`` defaults to 5 (3–100).
+    ``KILN_LOGIN_IP_MAX_FAILURES`` defaults to 30 (5–1000). Restarting the
+    process clears the counters. Workers do not share them.
     """
 
     model_config = SettingsConfigDict(
@@ -145,6 +160,11 @@ class Settings(BaseSettings):
     kiln_oidc_scopes: str = ""
     kiln_session_ttl_seconds: int = Field(default=12 * 60 * 60, ge=60, le=14 * 24 * 60 * 60)
     kiln_session_cookie_secure: bool = False
+
+    # Local password login only. The process keeps the counters in memory.
+    kiln_login_window_seconds: int = 900
+    kiln_login_username_max_failures: int = 5
+    kiln_login_ip_max_failures: int = 30
 
     @field_validator("llm_provider", mode="before")
     @classmethod
@@ -290,6 +310,36 @@ class Settings(BaseSettings):
         if number < BUILD_PENDING_TIMEOUT_MIN_SECONDS or number > BUILD_PENDING_TIMEOUT_MAX_SECONDS:
             raise ValueError(BUILD_PENDING_TIMEOUT_ERROR)
         return number
+
+    @field_validator("kiln_login_window_seconds", mode="before")
+    @classmethod
+    def login_window_in_range(cls, value: object) -> object:
+        return _bounded_int(
+            value,
+            minimum=LOGIN_WINDOW_MIN_SECONDS,
+            maximum=LOGIN_WINDOW_MAX_SECONDS,
+            message=LOGIN_WINDOW_ERROR,
+        )
+
+    @field_validator("kiln_login_username_max_failures", mode="before")
+    @classmethod
+    def login_username_cap_in_range(cls, value: object) -> object:
+        return _bounded_int(
+            value,
+            minimum=LOGIN_USERNAME_MIN_FAILURES,
+            maximum=LOGIN_USERNAME_MAX_FAILURES,
+            message=LOGIN_USERNAME_ERROR,
+        )
+
+    @field_validator("kiln_login_ip_max_failures", mode="before")
+    @classmethod
+    def login_ip_cap_in_range(cls, value: object) -> object:
+        return _bounded_int(
+            value,
+            minimum=LOGIN_IP_MIN_FAILURES,
+            maximum=LOGIN_IP_MAX_FAILURES,
+            message=LOGIN_IP_ERROR,
+        )
 
     @model_validator(mode="after")
     def openai_requires_base_url(self) -> "Settings":
@@ -513,6 +563,25 @@ def parse_llm_model_ids(value: str) -> list[str]:
     return seen
 
 
+def _bounded_int(value: object, *, minimum: int, maximum: int, message: str) -> int:
+    if isinstance(value, bool) or value is None:
+        raise ValueError(message)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("+"):
+            text = text[1:]
+        if not text.isdigit():
+            raise ValueError(message)
+        number = int(text)
+    elif isinstance(value, int):
+        number = value
+    else:
+        raise ValueError(message)
+    if number < minimum or number > maximum:
+        raise ValueError(message)
+    return number
+
+
 def _clean_http_url(value: str) -> str:
     text = value.strip()
     if not text:
@@ -539,6 +608,12 @@ def settings_failure_lines(exc: ValidationError) -> list[str]:
             line = API_TOKEN_ERROR
         elif "kiln_build_pending_timeout_seconds" in names:
             line = BUILD_PENDING_TIMEOUT_ERROR
+        elif "kiln_login_window_seconds" in names:
+            line = LOGIN_WINDOW_ERROR
+        elif "kiln_login_username_max_failures" in names:
+            line = LOGIN_USERNAME_ERROR
+        elif "kiln_login_ip_max_failures" in names:
+            line = LOGIN_IP_ERROR
         else:
             message = str(err.get("msg") or "配置不正确")
             prefix = "Value error, "

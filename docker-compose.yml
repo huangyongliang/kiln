@@ -26,6 +26,7 @@ services:
       retries: 20
 
   api:
+    # 不覆盖镜像 CMD。CMD 含 --no-proxy-headers，登录 IP 键保持 TCP 对端。
     build:
       context: ./backend
     image: kiln-api:local
@@ -74,6 +75,10 @@ services:
       KILN_OIDC_SCOPES: ${KILN_OIDC_SCOPES:-}
       KILN_SESSION_TTL_SECONDS: ${KILN_SESSION_TTL_SECONDS:-43200}
       KILN_SESSION_COOKIE_SECURE: ${KILN_SESSION_COOKIE_SECURE:-false}
+      # 本地口令登录限速。只作用于 POST /api/v1/auth/login。重启 API 进程会清空进程内计数。
+      KILN_LOGIN_WINDOW_SECONDS: ${KILN_LOGIN_WINDOW_SECONDS:-900}
+      KILN_LOGIN_USERNAME_MAX_FAILURES: ${KILN_LOGIN_USERNAME_MAX_FAILURES:-5}
+      KILN_LOGIN_IP_MAX_FAILURES: ${KILN_LOGIN_IP_MAX_FAILURES:-30}
     volumes:
       - kiln-artifact-data:/var/lib/kiln/artifacts
     ports:

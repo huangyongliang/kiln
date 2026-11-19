@@ -262,6 +262,43 @@ def test_llm_models_over_32_items_refuses_startup() -> None:
     assert settings.llm_model_ids() == [f"model-{index}" for index in range(32)]
 
 
+def test_login_limit_defaults_and_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(_env_file=None)
+    assert settings.kiln_login_window_seconds == 900
+    assert settings.kiln_login_username_max_failures == 5
+    assert settings.kiln_login_ip_max_failures == 30
+    rejected = (
+        ({"kiln_login_window_seconds": 59}, "KILN_LOGIN_WINDOW_SECONDS"),
+        ({"kiln_login_window_seconds": 86401}, "KILN_LOGIN_WINDOW_SECONDS"),
+        ({"kiln_login_window_seconds": "nope"}, "KILN_LOGIN_WINDOW_SECONDS"),
+        ({"kiln_login_window_seconds": True}, "KILN_LOGIN_WINDOW_SECONDS"),
+        ({"kiln_login_username_max_failures": 2}, "KILN_LOGIN_USERNAME_MAX_FAILURES"),
+        ({"kiln_login_username_max_failures": 101}, "KILN_LOGIN_USERNAME_MAX_FAILURES"),
+        ({"kiln_login_ip_max_failures": 4}, "KILN_LOGIN_IP_MAX_FAILURES"),
+        ({"kiln_login_ip_max_failures": 1001}, "KILN_LOGIN_IP_MAX_FAILURES"),
+    )
+    for kwargs, match in rejected:
+        with pytest.raises(ValidationError, match=match) as caught:
+            Settings(_env_file=None, **kwargs)
+        assert "nope" not in str(caught.value)
+    accepted = Settings(
+        _env_file=None,
+        kiln_login_window_seconds="60",
+        kiln_login_username_max_failures=3,
+        kiln_login_ip_max_failures=1000,
+    )
+    assert accepted.kiln_login_window_seconds == 60
+    assert accepted.kiln_login_username_max_failures == 3
+    assert accepted.kiln_login_ip_max_failures == 1000
+    monkeypatch.setenv("KILN_LOGIN_WINDOW_SECONDS", "120")
+    monkeypatch.setenv("KILN_LOGIN_USERNAME_MAX_FAILURES", "4")
+    monkeypatch.setenv("KILN_LOGIN_IP_MAX_FAILURES", "40")
+    from_env = Settings(_env_file=None)
+    assert from_env.kiln_login_window_seconds == 120
+    assert from_env.kiln_login_username_max_failures == 4
+    assert from_env.kiln_login_ip_max_failures == 40
+
+
 def test_mock_and_off_do_not_apply_the_model_catalog() -> None:
     for provider in ("mock", "off"):
         settings = Settings(

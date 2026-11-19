@@ -1204,6 +1204,7 @@ def _start_api(
             "127.0.0.1",
             "--port",
             str(port),
+            "--no-proxy-headers",
         ],
         cwd=BACKEND,
         env=_api_env(database_url, artifact_root),

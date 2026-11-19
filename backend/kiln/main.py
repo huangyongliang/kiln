@@ -37,10 +37,11 @@ from kiln.db.migrate import upgrade_database
 from kiln.db.seed import seed_rbac
 from kiln.db.store import PostgresStore
 from kiln.domain.llm_catalog import warn_env_seed
-from kiln.errors import AppError
+from kiln.errors import AppError, TooManyRequests
 from kiln.executor.jenkins import JenkinsClient
 from kiln.git.source import build_git_source
 from kiln.llm.provider import build_provider
+from kiln.login_limit import LoginLimiter
 from kiln.nexus.client import NexusClient
 from kiln.paths import API_PREFIX
 from kiln.storage.local import LocalBlobStore
@@ -54,6 +55,19 @@ DESCRIPTION = (
     "API 启动时自动迁移。"
     "本地登录把口令存成哈希，会话保存在 PostgreSQL。控制台使用 httpOnly cookie，"
     "API 客户端使用登录返回的 Bearer 令牌。"
+    "POST /api/v1/auth/login 只对本地口令失败做进程内滑动窗口限速。"
+    "默认 900 秒内同一用户名 5 次、同一 TCP 对端 30 次。"
+    "用户名去掉首尾空白并做大小写折叠。IP 键是真实 TCP 对端。"
+    "uvicorn 以 --no-proxy-headers 启动，kiln-api 关闭代理头，"
+    "不采用 X-Forwarded-For 或 X-Real-IP，包括直接访问本机时。"
+    "不设置可信代理名单。"
+    "达到上限返回 429，正文是「尝试次数过多，请稍后再试」，"
+    "Retry-After 是最老一次计入失败掉出窗口的剩余整秒，至少为 1。"
+    "已超限时不再校验口令。成功登录清除该用户名的失败计数，不清除 IP 计数。"
+    "不自动停用账号，不撤销已有会话。"
+    "用户信息同步、机器令牌、已登录改密、管理员重置和引导命令不受这道限制。"
+    "经控制台登录时，多位用户共享控制台的对端地址，IP 键是同一条。"
+    "重启 API 进程会清空进程内计数。"
     "KILN_API_TOKEN 仍是必填的机器和开发访问令牌，拥有目录中的全部权限。"
     "未配置公司用户系统时，本地口令登录可用。配置之后，用户信息同步只接收身份和在职状态，"
     "不把公司侧的组或角色写入 kiln 权限。kiln 的授权仍留在平台上。"
@@ -190,6 +204,11 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = resolved
+    app.state.login_limit = LoginLimiter(
+        window_seconds=resolved.kiln_login_window_seconds,
+        username_max_failures=resolved.kiln_login_username_max_failures,
+        ip_max_failures=resolved.kiln_login_ip_max_failures,
+    )
     app.state.http_client = client
     app.state.engine = engine
     app.state.store = store
@@ -225,7 +244,9 @@ def create_app(
     @app.exception_handler(AppError)
     async def handle_app_error(_request: Request, exc: AppError) -> JSONResponse:
         headers: dict[str, str] = {}
-        if exc.status_code == 401:
+        if isinstance(exc, TooManyRequests):
+            headers["Retry-After"] = str(exc.retry_after)
+        elif exc.status_code == 401:
             headers["WWW-Authenticate"] = "Bearer"
         if _request.url.path == f"{API_PREFIX}/auth/me":
             headers["Cache-Control"] = "no-store"
@@ -285,9 +306,13 @@ def _settings_or_exit() -> Settings:
 
 def run() -> None:
     settings = _settings_or_exit()
+    # The login IP key is the TCP peer. Leave proxy headers off so a client
+    # that can reach this process cannot rewrite request.client with
+    # X-Forwarded-For or X-Real-IP. There is no trusted-proxy allowlist.
     uvicorn.run(
         "kiln.main:create_app",
         factory=True,
         host=settings.kiln_http_host,
         port=settings.kiln_http_port,
+        proxy_headers=False,
     )

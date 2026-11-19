@@ -1089,6 +1089,7 @@ class _running:
                 port=self.port,
                 log_level="error",
                 access_log=False,
+                proxy_headers=False,
             )
         )
         self.thread = threading.Thread(target=self.server.run, name="kiln-s1b-api", daemon=True)
