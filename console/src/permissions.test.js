@@ -209,6 +209,13 @@ test("creating an account needs account.manage", () => {
   assert.equal(canDo("account.create", new Set(["account.read"])), false);
 });
 
+test("the account row column is shown only with account.manage", () => {
+  assert.deepEqual(ACTION_GATES["account.manage"], ["account.manage"]);
+  assert.equal(canDo("account.manage", new Set(["account.manage"])), true);
+  assert.equal(canDo("account.manage", new Set(["account.read"])), false);
+  assert.equal(canDo("account.manage", new Set(["skill.publish"])), false);
+});
+
 test("disabling, changing roles, and resetting a password need account.manage", () => {
   for (const action of ["account.disable", "account.roles", "account.resetPassword"]) {
     assert.equal(canDo(action, new Set(["account.manage"])), true, action);
