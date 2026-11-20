@@ -19,6 +19,12 @@ const controllers = new Set();
 const identityListeners = new Set();
 const persistJobs = [];
 const heldFlushes = [];
+const signalScopes = new WeakMap();
+
+let loginViewSerial = 0;
+let activeLoginView = 0;
+let loginAttemptSerial = 0;
+let activeLoginAttempt = 0;
 
 export function currentAuthEpoch() {
   return authEpoch;
@@ -85,6 +91,10 @@ export function openChatView() {
 
 export function registerAbortController(controller) {
   const entry = { controller };
+  signalScopes.set(controller.signal, {
+    epoch: authEpoch,
+    generation: chatGeneration,
+  });
   controllers.add(entry);
   const drop = () => controllers.delete(entry);
   if (controller.signal.aborted) {
@@ -95,6 +105,57 @@ export function registerAbortController(controller) {
   return () => {
     controller.signal.removeEventListener("abort", drop);
     drop();
+  };
+}
+
+export function expiryApplies(epochAtStart, signal) {
+  if (epochAtStart !== authEpoch) {
+    return false;
+  }
+  if (signal?.aborted) {
+    return false;
+  }
+  if (signal && signalScopes.has(signal)) {
+    const scope = signalScopes.get(signal);
+    if (scope.generation !== chatGeneration || scope.epoch !== epochAtStart) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function hasActiveLoginAttempt() {
+  return activeLoginView !== 0 && activeLoginAttempt !== 0;
+}
+
+export function openLoginView() {
+  loginViewSerial += 1;
+  const viewId = loginViewSerial;
+  activeLoginView = viewId;
+  return {
+    alive() {
+      return activeLoginView === viewId;
+    },
+    close() {
+      if (activeLoginView !== viewId) {
+        return;
+      }
+      activeLoginView = 0;
+      activeLoginAttempt = 0;
+    },
+  };
+}
+
+export function beginLoginAttempt(view) {
+  loginAttemptSerial += 1;
+  const id = loginAttemptSerial;
+  if (view?.alive()) {
+    activeLoginAttempt = id;
+  }
+  return {
+    current() {
+      return Boolean(view?.alive()) && activeLoginAttempt === id;
+    },
   };
 }
 
@@ -165,16 +226,28 @@ export function acceptLogin(account) {
 }
 
 export async function logoutSession(requestJson) {
-  beginIdentityBoundary();
+  const boundary = beginIdentityBoundary();
   clearChatStorage(window.sessionStorage);
   clearChatStorage(window.localStorage);
   try {
     await requestJson("/api/v1/auth/logout", { method: "POST" });
   } finally {
+    if (authEpoch !== boundary.authEpoch) {
+      return;
+    }
     writeApiToken("");
     clearAccount();
     window.location.assign("/login");
   }
+}
+
+export function replaceApiToken(nextToken) {
+  beginIdentityBoundary();
+  clearChatStorage(window.sessionStorage);
+  clearChatStorage(window.localStorage);
+  writeApiToken(typeof nextToken === "string" ? nextToken : "");
+  clearAccount();
+  window.location.reload();
 }
 
 export function resetChatRuntimeForTests() {
@@ -195,4 +268,8 @@ export function resetChatRuntimeForTests() {
   identityListeners.clear();
   persistJobs.length = 0;
   heldFlushes.length = 0;
+  loginViewSerial = 0;
+  activeLoginView = 0;
+  loginAttemptSerial = 0;
+  activeLoginAttempt = 0;
 }

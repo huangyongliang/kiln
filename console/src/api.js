@@ -1,6 +1,6 @@
 import { fieldMessage } from "./forms.js";
 import { clearChatStorage } from "./chat.js";
-import { beginIdentityBoundary, currentAuthEpoch } from "./identity.js";
+import { beginIdentityBoundary, currentAuthEpoch, expiryApplies, hasActiveLoginAttempt } from "./identity.js";
 import { clearAccount, readAccount, writeFlash } from "./session.js";
 import { readApiToken } from "./token.js";
 
@@ -34,16 +34,17 @@ function networkError(caught) {
   return error;
 }
 
-function applyCurrentExpiry(epochAtStart) {
-  if (epochAtStart !== currentAuthEpoch()) {
+function applyCurrentExpiry(epochAtStart, signal) {
+  if (!expiryApplies(epochAtStart, signal)) {
     return false;
   }
+  const loginInFlight = hasActiveLoginAttempt();
   beginIdentityBoundary();
   clearChatStorage(window.sessionStorage);
   clearChatStorage(window.localStorage);
   const hadAccount = Boolean(readAccount());
   clearAccount();
-  if (window.location.pathname !== "/login") {
+  if (!loginInFlight && window.location.pathname !== "/login") {
     if (hadAccount) {
       writeFlash("登录已过期，请重新登录");
     }
@@ -99,7 +100,7 @@ async function send(path, options = {}) {
     error.status = response.status;
     error.detail = body ? body.detail : null;
     if (isSessionExpiry(path, response.status)) {
-      const current = applyCurrentExpiry(epochAtStart);
+      const current = applyCurrentExpiry(epochAtStart, signal);
       if (!current) {
         error.staleAuth = true;
       }

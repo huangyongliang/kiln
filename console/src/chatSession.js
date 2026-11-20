@@ -428,6 +428,8 @@ export function createChatSession(options = {}) {
     interruptNotice.value = "";
     writeChatThread(storage, []);
     if (catalogTrusted.value && provider.value) {
+      mode.value = "ready";
+      pageError.value = "";
       if (provider.value.provider === "openai") {
         const candidate = selectedModel.value || readChatModel(storage);
         const state = chatModelState(provider.value, candidate);

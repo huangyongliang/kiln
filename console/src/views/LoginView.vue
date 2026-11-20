@@ -1,10 +1,10 @@
 <script setup>
-import { onMounted, ref } from "vue";
+import { onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 
 import { errorText, getJson, postJson } from "../api";
 import AppIcon from "../components/AppIcon.vue";
-import { acceptLogin } from "../identity";
+import { acceptLogin, beginLoginAttempt, openLoginView } from "../identity";
 import { clearAccount, readFlash } from "../session";
 import { pushToast, toasts } from "../toast";
 
@@ -18,6 +18,8 @@ const companySignIn = ref(false);
 const note =
   "使用本地账号登录。口令只以哈希保存在平台里。公司用户系统的对接是可选的；配置用户信息同步之后，这里会显示公司登录。公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。";
 
+const loginView = openLoginView();
+
 onMounted(async () => {
   const flash = readFlash();
   clearAccount();
@@ -26,13 +28,27 @@ onMounted(async () => {
   }
   try {
     const status = await getJson("/api/v1/auth/sync");
+    if (!loginView.alive()) {
+      return;
+    }
     companySignIn.value = status.configured === true;
   } catch {
+    if (!loginView.alive()) {
+      return;
+    }
     companySignIn.value = false;
   }
 });
 
+onBeforeUnmount(() => {
+  loginView.close();
+});
+
 async function submit() {
+  const attempt = beginLoginAttempt(loginView);
+  if (!attempt.current()) {
+    return;
+  }
   error.value = "";
   submitting.value = true;
   try {
@@ -40,12 +56,23 @@ async function submit() {
       username: username.value.trim(),
       password: password.value,
     });
+    if (!attempt.current()) {
+      return;
+    }
     acceptLogin(body?.account);
+    if (!attempt.current()) {
+      return;
+    }
     await router.push("/");
   } catch (caught) {
+    if (!attempt.current()) {
+      return;
+    }
     error.value = errorText(caught, "登录失败");
   } finally {
-    submitting.value = false;
+    if (attempt.current()) {
+      submitting.value = false;
+    }
   }
 }
 </script>

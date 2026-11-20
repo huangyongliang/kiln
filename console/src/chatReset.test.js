@@ -34,9 +34,13 @@ const localStorage = memoryStorage();
 const assigned = [];
 const location = {
   pathname: "/chat",
+  reloads: 0,
   assign(url) {
     assigned.push(String(url));
     this.pathname = String(url);
+  },
+  reload() {
+    this.reloads += 1;
   },
 };
 
@@ -421,6 +425,7 @@ const {
   holdChatPersistForTests,
   logoutSession,
   openChatView,
+  replaceApiToken,
   resetChatRuntimeForTests,
   scheduleChatPersist,
 } = await import("./identity.js");
@@ -588,6 +593,7 @@ afterEach(() => {
   localStorage.clear();
   assigned.length = 0;
   location.pathname = "/chat";
+  location.reloads = 0;
   accessReady.value = false;
   perms.value = null;
   account.value = null;
@@ -1079,6 +1085,7 @@ test("A07 sidebar refreshes are guarded and a reset does not undo a skill or bui
   assert.equal(session.mineItems.value[0].name, "已有");
   const reload = session.loadMine();
   const stale = take("/api/v1/skills?scope=mine");
+  stale.honorAbort = false;
   session.messages.value = [{ role: "user", content: "清掉这页" }];
   session.requestNewChat();
   session.confirmNewChat();
@@ -1400,4 +1407,430 @@ test("mounted login keeps a new account when an older generic 401 arrives", asyn
   assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), null);
   assert.equal(assigned.length, 0);
   assert.equal(location.pathname, "/chat");
+});
+
+test("a late chat or status 401 after reset does not expire the current identity", async () => {
+  const session = openSession();
+  await boot(session);
+  session.prompt.value = "仍在这一次";
+  const live = session.send();
+  const liveCall = take("/api/v1/llm/chat", "POST");
+  liveCall.resolveWith({ status: 401, json: { detail: "未登录" } });
+  await live;
+  assert.equal(readAccount(), null);
+  assert.deepEqual(assigned, ["/login"]);
+
+  location.pathname = "/chat";
+  assigned.length = 0;
+  allowQa();
+  const again = openSession();
+  await boot(again);
+  again.prompt.value = "会被清掉";
+  const first = again.send();
+  const firstCall = take("/api/v1/llm/chat", "POST");
+  firstCall.honorAbort = false;
+  again.requestNewChat();
+  again.confirmNewChat();
+  again.prompt.value = "下一问";
+  const second = again.send();
+  const secondCall = take("/api/v1/llm/chat", "POST");
+  firstCall.resolveWith({ status: 401, json: { detail: "旧对话未登录" } });
+  await first;
+  flushHeldChatPersist();
+  assert.equal(readAccount().username, "ada");
+  assert.equal(assigned.length, 0);
+  assert.equal(location.pathname, "/chat");
+  assert.equal(again.sending.value, true);
+  assert.deepEqual(again.messages.value.map((item) => item.content), ["下一问"]);
+  secondCall.resolveWith({ json: { content: "下一答" } });
+  await second;
+  assert.equal(again.messages.value.at(-1).content, "下一答");
+
+  const status = again.load();
+  const statusCall = take("/api/v1/llm/provider");
+  statusCall.honorAbort = false;
+  take("/api/v1/skills?scope=mine").resolveWith({ json: { items: [] } });
+  take("/api/v1/skills?scope=usable").resolveWith({ json: { items: [] } });
+  again.messages.value = [{ role: "user", content: "再清一次" }];
+  again.requestNewChat();
+  again.confirmNewChat();
+  statusCall.resolveWith({ status: 401, json: { detail: "旧状态未登录" } });
+  await status;
+  await settled();
+  assert.equal(readAccount().username, "ada");
+  assert.equal(assigned.length, 0);
+  assert.equal(again.mode.value, "ready");
+  assert.equal(again.pageError.value, "");
+
+  const builds = getJson("/api/v1/builds");
+  const buildsCall = take("/api/v1/builds");
+  buildsCall.resolveWith({ status: 401, json: { detail: "当前请求未登录" } });
+  await assert.rejects(builds, (caught) => caught.staleAuth !== true && caught.status === 401);
+  assert.equal(readAccount(), null);
+  assert.deepEqual(assigned, ["/login"]);
+
+  location.pathname = "/chat";
+  assigned.length = 0;
+  allowQa();
+  const controller = new AbortController();
+  const canceled = getJson("/api/v1/artifacts", { signal: controller.signal });
+  const canceledCall = take("/api/v1/artifacts");
+  canceledCall.honorAbort = false;
+  controller.abort();
+  canceledCall.resolveWith({ status: 401, json: { detail: "已取消的请求" } });
+  await assert.rejects(canceled, (caught) => caught.staleAuth === true && caught.status === 401);
+  assert.equal(readAccount().username, "ada");
+  assert.equal(assigned.length, 0);
+});
+
+test("a trusted status refresh can be reset without leaving the composer disabled", async () => {
+  const session = openSession();
+  await boot(session);
+  session.selectedModel.value = "model-b";
+  session.onModelChange();
+  session.messages.value = [{ role: "user", content: "刷新时清空" }];
+  const refresh = session.load();
+  const providerCall = take("/api/v1/llm/provider");
+  providerCall.honorAbort = false;
+  take("/api/v1/skills?scope=mine").resolveWith({ json: { items: [] } });
+  take("/api/v1/skills?scope=usable").resolveWith({ json: { items: [] } });
+  assert.equal(session.mode.value, "loading");
+  assert.equal(session.catalogTrusted.value, true);
+  const providers = count("/api/v1/llm/provider");
+  session.requestNewChat();
+  session.confirmNewChat();
+  flushHeldChatPersist();
+  assert.equal(session.mode.value, "ready");
+  assert.equal(session.pageError.value, "");
+  assert.equal(session.selectedModel.value, "model-b");
+  assert.equal(session.modelNotice.value, "");
+  assert.equal(session.composerDisabled.value, false);
+  assert.equal(session.modelSendBlocked.value, false);
+  assert.equal(count("/api/v1/llm/provider"), providers);
+  assert.equal(count("/api/v1/llm/chat", "POST"), 0);
+  providerCall.resolveWith({
+    status: 500,
+    json: { detail: "旧的刷新失败" },
+  });
+  await refresh;
+  await settled();
+  assert.equal(session.mode.value, "ready");
+  assert.equal(session.pageError.value, "");
+  assert.equal(session.selectedModel.value, "model-b");
+  assert.equal(readAccount().username, "ada");
+
+  const next = openSession();
+  await boot(next);
+  next.messages.value = [{ role: "user", content: "成功也会晚到" }];
+  const late = next.load();
+  const lateCall = take("/api/v1/llm/provider");
+  lateCall.honorAbort = false;
+  take("/api/v1/skills?scope=mine").resolveWith({ json: { items: [] } });
+  take("/api/v1/skills?scope=usable").resolveWith({ json: { items: [] } });
+  next.requestNewChat();
+  next.confirmNewChat();
+  const afterReset = count("/api/v1/llm/provider");
+  lateCall.resolveWith({
+    json: { provider: "openai", models: ["model-z"], default_model: "model-z" },
+  });
+  await late;
+  await settled();
+  assert.equal(next.mode.value, "ready");
+  assert.equal(next.selectedModel.value, "model-b");
+  assert.equal(next.modelNotice.value, "");
+  assert.equal(next.selectedModel.value === "model-z", false);
+  assert.equal(count("/api/v1/llm/provider"), afterReset);
+  assert.equal(count("/api/v1/llm/chat", "POST"), 0);
+});
+
+test("a model change made after the winning status request started is kept", async () => {
+  const session = openSession();
+  await boot(session);
+  assert.equal(session.selectedModel.value, "model-a");
+  const pending = session.load();
+  const call = take("/api/v1/llm/provider");
+  take("/api/v1/skills?scope=mine").resolveWith({ json: { items: [] } });
+  take("/api/v1/skills?scope=usable").resolveWith({ json: { items: [] } });
+  session.selectedModel.value = "model-b";
+  session.onModelChange();
+  call.resolveWith({ json: OPENAI });
+  await pending;
+  await settled();
+  assert.equal(session.selectedModel.value, "model-b");
+  assert.equal(session.modelNotice.value, "");
+  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), "model-b");
+  assert.equal(session.mode.value, "ready");
+});
+
+test("replacing the API token clears the chat before reload for the same user and a new credential", async () => {
+  writeApiToken("credential-old");
+  sessionStorage.setItem(CHAT_MODEL_KEY, "model-b");
+  const session = openSession();
+  await boot(session);
+  session.selectedModel.value = "model-b";
+  session.onModelChange();
+  session.prompt.value = "换令牌前";
+  const sending = session.send();
+  const chat = take("/api/v1/llm/chat", "POST");
+  chat.honorAbort = false;
+  let seenAtReload = null;
+  location.reload = function reload() {
+    this.reloads += 1;
+    seenAtReload = {
+      thread: sessionStorage.getItem(CHAT_THREAD_KEY),
+      model: sessionStorage.getItem(CHAT_MODEL_KEY),
+      token: readApiToken(),
+      account: readAccount(),
+    };
+  };
+  replaceApiToken("credential-new");
+  assert.equal(location.reloads, 1);
+  assert.equal(seenAtReload.thread, null);
+  assert.equal(seenAtReload.model, null);
+  assert.equal(seenAtReload.token, "credential-new");
+  assert.equal(seenAtReload.account, null);
+  assert.equal(currentAuthEpoch() > 0, true);
+  chat.resolveWith({ json: { content: "旧令牌的回答" } });
+  await sending;
+  flushHeldChatPersist();
+  assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY), null);
+  assert.equal(session.messages.value.length, 0);
+  writeAccount({ id: "user-1", username: "ada", role_ids: ["qa"] });
+  const remounted = openSession();
+  assert.equal(remounted.messages.value.length, 0);
+  assert.equal(remounted.selectedModel.value, "");
+  chat.resolveWith({ status: 401, json: { detail: "旧对话未登录" } });
+  await settled();
+  assert.equal(readApiToken(), "credential-new");
+  assert.equal(readAccount().id, "user-1");
+  assert.equal(location.reloads, 1);
+  assert.equal(assigned.length, 0);
+
+  replaceApiToken("credential-other");
+  assert.equal(readApiToken(), "credential-other");
+  assert.equal(readAccount(), null);
+  assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY), null);
+  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), null);
+  assert.equal(location.reloads, 2);
+  flushHeldChatPersist();
+  const other = openSession();
+  assert.equal(other.messages.value.length, 0);
+  assert.equal(other.selectedModel.value, "");
+});
+
+async function loadLoginComponent() {
+  const source = resolve(dirname(fileURLToPath(import.meta.url)), "views/LoginView.vue");
+  return (await import(pathToFileURL(compileVue(source)).href)).default;
+}
+
+async function mountLogin(router) {
+  const component = await loadLoginComponent();
+  const { createApp, h } = await import("vue");
+  const { createMemoryHistory, createRouter, RouterView } = await import("vue-router");
+  const activeRouter = router || createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: "/", name: "overview", component: { render: () => h("div", "概览") } },
+      { path: "/login", name: "login", component },
+    ],
+  });
+  await activeRouter.push("/login");
+  await activeRouter.isReady();
+  const pushes = [];
+  const originalPush = activeRouter.push.bind(activeRouter);
+  activeRouter.push = (to) => {
+    pushes.push(typeof to === "string" ? to : to?.path);
+    return originalPush(to);
+  };
+  const root = document.createElement("div");
+  document.body.appendChild(root);
+  const app = createApp({ render: () => h(RouterView) });
+  app.use(activeRouter);
+  app.mount(root);
+  apps.push(app);
+  await nextTick();
+  return { app, router: activeRouter, component, pushes };
+}
+
+function submitLoginForm() {
+  document.body.querySelector("form").dispatchEvent({
+    type: "submit",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+}
+
+test("an older login cannot overwrite a newer login, and a 401 during login does not navigate", async () => {
+  const firstMount = await mountLogin();
+  take("/api/v1/auth/sync").resolveWith({ json: { configured: false } });
+  await settled();
+  submitLoginForm();
+  await settled();
+  const firstLogin = take("/api/v1/auth/login", "POST");
+  const during = getJson("/api/v1/builds");
+  const duringCall = take("/api/v1/builds");
+  duringCall.resolveWith({ status: 401, json: { detail: "登录过程中的旧 401" } });
+  await assert.rejects(during, (caught) => caught.status === 401 && caught.staleAuth !== true);
+  assert.equal(assigned.length, 0);
+  assert.equal(location.pathname, "/chat");
+  assert.equal(document.body.textContent.includes("登录过程中的旧 401"), false);
+  assert.equal(document.body.textContent.includes("正在登录"), true);
+  firstLogin.resolveWith({
+    json: { account: { id: "user-2", username: "bea", display_name: "Bea", role_ids: ["reader"] } },
+  });
+  for (let step = 0; step < 5; step += 1) {
+    await nextTick();
+  }
+  assert.equal(readAccount().username, "bea");
+  assert.deepEqual(firstMount.pushes, ["/"]);
+  assert.equal(document.body.textContent.includes("登录失败"), false);
+  assert.equal(assigned.length, 0);
+
+  const { createMemoryHistory, createRouter } = await import("vue-router");
+  const { h } = await import("vue");
+  const Login = await loadLoginComponent();
+  const shared = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: "/", name: "overview", component: { render: () => h("div", "概览") } },
+      { path: "/login", name: "login", component: Login },
+    ],
+  });
+  const older = await mountLogin(shared);
+  const olderSync = take("/api/v1/auth/sync");
+  await settled();
+  submitLoginForm();
+  await settled();
+  const olderCall = take("/api/v1/auth/login", "POST");
+  older.app.unmount();
+  apps.pop();
+  document.body.textContent = "";
+  const newer = await mountLogin(shared);
+  const newerSync = take("/api/v1/auth/sync");
+  olderSync.resolveWith({ json: { configured: true } });
+  await settled();
+  assert.equal(document.body.textContent.includes("使用公司账号登录"), false);
+  newerSync.resolveWith({ json: { configured: false } });
+  await settled();
+  submitLoginForm();
+  await settled();
+  const newerCall = take("/api/v1/auth/login", "POST");
+  newerCall.resolveWith({
+    json: { account: { id: "user-9", username: "bea", display_name: "Bea", role_ids: ["reader"] } },
+  });
+  await settled();
+  olderCall.resolveWith({
+    json: { account: { id: "user-1", username: "ada", display_name: "Ada", role_ids: ["qa"] } },
+  });
+  await settled();
+  flushHeldChatPersist();
+  assert.equal(readAccount().username, "bea");
+  assert.equal(readAccount().id, "user-9");
+  assert.deepEqual(newer.pushes, ["/"]);
+  assert.equal(document.body.textContent.includes("登录失败"), false);
+
+  const racing = await mountLogin();
+  take("/api/v1/auth/sync").resolveWith({ json: { configured: false } });
+  await settled();
+  submitLoginForm();
+  await settled();
+  const earlyCall = take("/api/v1/auth/login", "POST");
+  submitLoginForm();
+  await settled();
+  const laterCall = take("/api/v1/auth/login", "POST");
+  earlyCall.resolveWith({ status: 500, json: { detail: "旧登录失败" } });
+  await settled();
+  assert.equal(document.body.textContent.includes("旧登录失败"), false);
+  assert.equal(document.body.textContent.includes("正在登录"), true);
+  laterCall.resolveWith({
+    json: { account: { id: "user-3", username: "cy", display_name: "Cy", role_ids: ["reader"] } },
+  });
+  await settled();
+  assert.equal(readAccount().username, "cy");
+  assert.deepEqual(racing.pushes, ["/"]);
+  assert.equal(document.body.textContent.includes("旧登录失败"), false);
+});
+
+test("logout success or failure after a newer login does not clear that login", async () => {
+  writeApiToken("session-token");
+  const loggingOut = logoutSession(requestJson);
+  const logoutCall = take("/api/v1/auth/logout", "POST");
+  acceptLogin({ id: "user-2", username: "bea", role_ids: ["reader"] });
+  writeApiToken("newer-token");
+  logoutCall.resolveWith({ json: { ok: true } });
+  await loggingOut;
+  flushHeldChatPersist();
+  assert.equal(readAccount().username, "bea");
+  assert.equal(readApiToken(), "newer-token");
+  assert.equal(assigned.length, 0);
+
+  const failing = logoutSession(requestJson);
+  const failingCall = take("/api/v1/auth/logout", "POST");
+  acceptLogin({ id: "user-2", username: "bea", role_ids: ["reader"] });
+  writeApiToken("still-newer");
+  failingCall.rejectWith(new TypeError("logout dropped"));
+  await failing;
+  flushHeldChatPersist();
+  assert.equal(readAccount().username, "bea");
+  assert.equal(readApiToken(), "still-newer");
+  assert.equal(assigned.length, 0);
+});
+
+test("unmounting the chat page drops late success and error from the previous view", async () => {
+  await mountChatView();
+  await finishInitialLoad();
+  const textarea = document.body.querySelector("textarea");
+  textarea.value = "卸载前";
+  textarea.dispatchEvent({ type: "input", preventDefault() {}, stopPropagation() {} });
+  await nextTick();
+  document.body.querySelector("form").dispatchEvent({
+    type: "submit",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  await settled();
+  const first = take("/api/v1/llm/chat", "POST");
+  first.honorAbort = false;
+  apps.at(-1).unmount();
+  apps.pop();
+  document.body.textContent = "";
+  await mountChatView();
+  await finishInitialLoad();
+  await nextTick();
+  assert.equal(document.body.textContent.includes("结果未知，请求已中断"), true);
+  assert.equal(document.body.textContent.includes("卸载前"), true);
+  first.resolveWith({ status: 500, json: { detail: "旧页面的失败" } });
+  await settled();
+  await nextTick();
+  flushHeldChatPersist();
+  assert.equal(document.body.textContent.includes("旧页面的失败"), false);
+  assert.equal(document.body.textContent.includes("结果未知，请求已中断"), true);
+  const again = document.body.querySelector("textarea");
+  again.value = "新页面";
+  again.dispatchEvent({ type: "input", preventDefault() {}, stopPropagation() {} });
+  await nextTick();
+  document.body.querySelector("form").dispatchEvent({
+    type: "submit",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  await settled();
+  const second = take("/api/v1/llm/chat", "POST");
+  second.honorAbort = false;
+  assert.equal(document.body.textContent.includes("新页面"), true);
+  assert.equal(JSON.parse(second.options.body).messages.some((item) => item.content === "卸载前"), false);
+  apps.at(-1).unmount();
+  apps.pop();
+  document.body.textContent = "";
+  await mountChatView();
+  await finishInitialLoad();
+  await nextTick();
+  second.resolveWith({ json: { content: "旧页面的回答" } });
+  await settled();
+  await nextTick();
+  flushHeldChatPersist();
+  assert.equal(document.body.textContent.includes("旧页面的回答"), false);
+  assert.equal(document.body.textContent.includes("旧页面的失败"), false);
+  assert.equal(readChatThread(sessionStorage).some((item) => item.content === "旧页面的回答"), false);
+  assert.equal(readChatThread(sessionStorage).some((item) => item.interrupted === true), true);
 });
