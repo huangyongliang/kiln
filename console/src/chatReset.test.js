@@ -414,6 +414,7 @@ const {
   CHAT_THREAD_KEY,
   INTERRUPTED_HINT,
   INTERRUPTED_MARK,
+  MODEL_NOT_ALLOWED,
   NEW_CHAT_WARNING,
   STALE_MODEL_TIP,
   readChatThread,
@@ -1374,6 +1375,72 @@ test("a cold provider failure stays recoverable after 新建对话 clears the er
   assert.equal(currentAuthEpoch(), epoch);
   assert.equal(assigned.length, 0);
   assert.equal(readAccount().username, "ada");
+});
+
+test("a cached but untrusted provider keeps status recovery after the error is cleared", async () => {
+  const epoch = currentAuthEpoch();
+  await mountChatView();
+  await finishInitialLoad();
+  const textarea = document.body.querySelector("textarea");
+  textarea.value = "这个模型不被允许";
+  textarea.dispatchEvent({ type: "input", preventDefault() {}, stopPropagation() {} });
+  await nextTick();
+  document.body.querySelector("form").dispatchEvent({
+    type: "submit",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  await settled();
+  const chat = take("/api/v1/llm/chat", "POST");
+  chat.resolveWith({ status: 400, json: { detail: MODEL_NOT_ALLOWED } });
+  await settled();
+  const revalidate = take("/api/v1/llm/provider");
+  revalidate.resolveWith({ status: 503, json: { detail: "重新校验失败" } });
+  await settled();
+  await nextTick();
+  buttonsNamed("新建对话")[0].click();
+  await nextTick();
+  assert.ok(document.body.querySelector('[role="alertdialog"]'));
+  buttonsNamed("确认")[0].click();
+  await settled();
+  const afterConfirm = take("/api/v1/llm/provider");
+  take("/api/v1/skills?scope=mine").resolveWith({ json: { items: [] } });
+  take("/api/v1/skills?scope=usable").resolveWith({ json: { items: [] } });
+  afterConfirm.resolveWith({ status: 503, json: { detail: "确认后的状态失败" } });
+  await settled();
+  await nextTick();
+  assert.equal(document.body.textContent.includes("确认后的状态失败"), true);
+  const posts = count("/api/v1/llm/chat", "POST");
+  const providers = count("/api/v1/llm/provider");
+  buttonsNamed("新建对话")[0].click();
+  await nextTick();
+  assert.equal(document.body.querySelector('[role="alertdialog"]'), null);
+  assert.equal(document.body.textContent.includes("确认后的状态失败"), false);
+  assert.equal(count("/api/v1/llm/provider"), providers);
+  assert.equal(count("/api/v1/llm/chat", "POST"), posts);
+  const retry = buttonsNamed("重试读取模型状态");
+  assert.equal(retry.length, 1);
+  assert.notEqual(document.body.querySelector("textarea").getAttribute("disabled"), "false");
+  retry[0].click();
+  await settled();
+  const recovered = take("/api/v1/llm/provider");
+  take("/api/v1/skills?scope=mine").resolveWith({ json: { items: [] } });
+  take("/api/v1/skills?scope=usable").resolveWith({ json: { items: [] } });
+  recovered.resolveWith({ json: OPENAI });
+  await settled();
+  await nextTick();
+  assert.equal(buttonsNamed("重试读取模型状态").length, 0);
+  const composer = document.body.querySelector("textarea");
+  assert.equal(composer.getAttribute("disabled"), "false");
+  composer.value = "信任恢复后";
+  composer.dispatchEvent({ type: "input", preventDefault() {}, stopPropagation() {} });
+  await nextTick();
+  const send = [...document.body.querySelectorAll("button")].find((button) => button.getAttribute("type") === "submit");
+  assert.ok(send);
+  assert.equal(send.getAttribute("disabled"), "false");
+  assert.equal(count("/api/v1/llm/chat", "POST"), posts);
+  assert.equal(currentAuthEpoch(), epoch);
+  assert.equal(assigned.length, 0);
 });
 
 test("the mounted page drops a late reply after confirm and hides the chat from a reader", async () => {

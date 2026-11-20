@@ -389,7 +389,7 @@ export function createChatSession(options = {}) {
     if (mode.value !== "error") {
       return;
     }
-    if (provider.value) {
+    if (provider.value && catalogTrusted.value) {
       mode.value = "ready";
       return;
     }
