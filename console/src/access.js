@@ -1,8 +1,8 @@
 import { computed, ref } from "vue";
 
-import { getJson } from "./api";
-import { permsFrom } from "./permissions";
-import { clearAccount, readAccount, writeAccount } from "./session";
+import { getJson } from "./api.js";
+import { permsFrom } from "./permissions.js";
+import { clearAccount, readAccount, writeAccount } from "./session.js";
 
 export const perms = ref(null);
 export const account = ref(null);

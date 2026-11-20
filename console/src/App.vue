@@ -10,7 +10,7 @@ import {
   showOwnPassword,
 } from "./accountLifecycle";
 import { errorText, postJson, requestJson } from "./api";
-import { clearChatStorage } from "./chat";
+import { logoutSession } from "./identity";
 import AppIcon from "./components/AppIcon.vue";
 import FormDialog from "./components/FormDialog.vue";
 import { pageCrumb } from "./crumb";
@@ -156,16 +156,8 @@ async function submitOwnPassword() {
   }
 }
 
-async function logout() {
-  try {
-    await requestJson("/api/v1/auth/logout", { method: "POST" });
-  } finally {
-    clearChatStorage(window.sessionStorage);
-    clearChatStorage(window.localStorage);
-    writeApiToken("");
-    clearAccount();
-    window.location.assign("/login");
-  }
+function logout() {
+  return logoutSession(requestJson);
 }
 </script>
 

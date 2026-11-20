@@ -1,79 +1,70 @@
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 
-import { accessReady, account, actionDeniedText, perms } from "../access";
-import { errorText, getJson, isForbidden, postJson } from "../api";
-import {
-  EMPTY_CATALOG_TIP,
-  STALE_MODEL_TIP,
-  chatModelState,
-  chatRequestBody,
-  failOutgoingMessage,
-  shouldRefetchProvider,
-  readChatModel,
-  readChatThread,
-  showModelPicker,
-  takeUserMessage,
-  writeChatModel,
-  writeChatThread,
-  composerKeyAction,
-} from "../chat";
+import { accessReady, perms } from "../access";
+import { createChatSession } from "../chatSession";
+import { EMPTY_CATALOG_TIP, INTERRUPTED_MARK, NEW_CHAT_WARNING, composerKeyAction } from "../chat";
 import MarkdownBody from "../components/MarkdownBody.vue";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
 import StatusTag from "../components/StatusTag.vue";
 import { isUuid } from "../paths";
-import { canDo, canSee } from "../permissions";
-import { canBuildWithSkill, canReviseSkill, skillListPath } from "../skillLists";
+import { canDo } from "../permissions";
+import { canBuildWithSkill, canReviseSkill } from "../skillLists";
 
 const note =
   "模型接口固定为 OpenAI 兼容协议，端点由环境变量配置。端点未就绪时使用模拟或关闭模式。对话不能下发任意 shell。";
 
-const provider = ref(null);
-const messages = ref(readChatThread(window.sessionStorage));
-const selectedModel = ref("");
-const modelNotice = ref("");
-const prompt = ref("");
-const error = ref("");
-const pageError = ref("");
-const sending = ref(false);
-const forbidden = ref(false);
-const mode = ref("loading");
 const listEl = ref(null);
-const mineItems = ref([]);
-const usableItems = ref([]);
-const mineMode = ref("idle");
-const usableMode = ref("idle");
-const mineError = ref("");
-const usableError = ref("");
-
-const off = computed(() => provider.value?.provider === "off");
-const mock = computed(() => provider.value?.provider === "mock");
-const canSend = computed(() => canDo("chat.send", perms.value));
-const composerDisabled = computed(() => off.value || !canSend.value || mode.value !== "ready");
-const showPicker = computed(() => showModelPicker(provider.value));
-const emptyCatalog = computed(
-  () => mode.value === "ready" && provider.value?.provider === "openai" && !showPicker.value,
-);
-const canUseSkills = computed(() => canDo("skill.create", perms.value));
-const accountId = computed(() => account.value?.id || "");
-
-const pill = computed(() => {
-  if (!provider.value) {
-    return "";
-  }
-  if (provider.value.provider === "openai") {
-    return "模型已连接";
-  }
-  if (provider.value.provider === "mock") {
-    return "模拟模式";
-  }
-  return "对话未开启";
+const session = createChatSession({
+  storage: window.sessionStorage,
+  async afterTurn() {
+    await nextTick();
+    if (listEl.value) {
+      listEl.value.scrollTop = listEl.value.scrollHeight;
+    }
+  },
 });
 
-watch(messages, (value) => writeChatThread(window.sessionStorage, value), { deep: true });
-watch(provider, syncModelSelection);
+const {
+  messages,
+  prompt,
+  error,
+  pageError,
+  modelNotice,
+  interruptNotice,
+  sending,
+  forbidden,
+  mode,
+  confirmOpen,
+  provider,
+  selectedModel,
+  mineItems,
+  usableItems,
+  mineMode,
+  usableMode,
+  mineError,
+  usableError,
+  off,
+  mock,
+  canSend,
+  showPicker,
+  emptyCatalog,
+  composerDisabled,
+  sendDisabled,
+  pill,
+  accountId,
+  load,
+  loadMine,
+  loadUsable,
+  send,
+  onModelChange,
+  requestNewChat,
+  cancelNewChat,
+  confirmNewChat,
+  dispose,
+} = session;
 
 onMounted(load);
 watch(accessReady, (ready) => {
@@ -81,110 +72,7 @@ watch(accessReady, (ready) => {
     load();
   }
 });
-
-async function load() {
-  forbidden.value = false;
-  if (accessReady.value && !canSee("chat", perms.value)) {
-    forbidden.value = true;
-    return;
-  }
-  mode.value = "loading";
-  pageError.value = "";
-  const sidebar = accessReady.value ? loadSidebar() : Promise.resolve();
-  try {
-    provider.value = await getJson("/api/v1/llm/provider");
-    mode.value = "ready";
-  } catch (caught) {
-    if (isForbidden(caught)) {
-      forbidden.value = true;
-      return;
-    }
-    mode.value = "error";
-    pageError.value = errorText(caught, "无法读取模型状态");
-  }
-  await sidebar;
-}
-
-async function loadSidebar() {
-  await Promise.all([loadMine(), loadUsable()]);
-}
-
-async function loadMine() {
-  mineMode.value = "loading";
-  mineError.value = "";
-  try {
-    const body = await getJson(skillListPath("mine"));
-    mineItems.value = Array.isArray(body?.items) ? body.items : [];
-    mineMode.value = "ready";
-  } catch (caught) {
-    mineMode.value = "error";
-    mineError.value = errorText(caught, "无法读取我产出的 Skill");
-  }
-}
-
-async function loadUsable() {
-  if (!canUseSkills.value) {
-    usableItems.value = [];
-    usableMode.value = "hidden";
-    usableError.value = "";
-    return;
-  }
-  usableMode.value = "loading";
-  usableError.value = "";
-  try {
-    const body = await getJson(skillListPath("usable"));
-    usableItems.value = Array.isArray(body?.items) ? body.items : [];
-    usableMode.value = "ready";
-  } catch (caught) {
-    if (isForbidden(caught)) {
-      usableItems.value = [];
-      usableMode.value = "hidden";
-      return;
-    }
-    usableMode.value = "error";
-    usableError.value = errorText(caught, "无法读取已发布 Skill");
-  }
-}
-
-function syncModelSelection() {
-  const state = chatModelState(provider.value, readChatModel(window.sessionStorage));
-  selectedModel.value = state.model;
-  if (!state.showPicker) {
-    modelNotice.value = "";
-  } else if (state.fellBack) {
-    modelNotice.value = STALE_MODEL_TIP;
-  }
-  if (state.model) {
-    writeChatModel(window.sessionStorage, state.model);
-  }
-}
-
-async function refetchDisallowedModel(rejected) {
-  try {
-    const fresh = await getJson("/api/v1/llm/provider");
-    const state = chatModelState(fresh, rejected);
-    if (state.model) {
-      writeChatModel(window.sessionStorage, state.model);
-    }
-    provider.value = fresh;
-    selectedModel.value = state.model;
-    modelNotice.value = state.showPicker && state.fellBack ? STALE_MODEL_TIP : state.notice;
-  } catch {
-    // The failed bubble and the 400 text stay either way.
-  }
-}
-
-function onModelChange() {
-  writeChatModel(window.sessionStorage, selectedModel.value);
-  modelNotice.value = "";
-}
-
-function suggest(text) {
-  if (composerDisabled.value) {
-    return;
-  }
-  prompt.value = text;
-}
+onBeforeUnmount(dispose);
 
 function onKeydown(event) {
   if (composerKeyAction(event) !== "send") {
@@ -194,11 +82,11 @@ function onKeydown(event) {
   send();
 }
 
-async function scrollMessages() {
-  await nextTick();
-  if (listEl.value) {
-    listEl.value.scrollTop = listEl.value.scrollHeight;
+function suggest(text) {
+  if (composerDisabled.value) {
+    return;
   }
+  prompt.value = text;
 }
 
 function actionTarget(action) {
@@ -231,60 +119,25 @@ function canEditItem(item) {
 function canBuildItem(item) {
   return canBuildWithSkill(item, perms.value);
 }
-
-async function send() {
-  if (sending.value || composerDisabled.value) {
-    return;
-  }
-  const started = takeUserMessage(prompt.value, messages.value);
-  if (!started) {
-    return;
-  }
-  // Capture the id now. Changing the select while this request is in flight
-  // applies only to the next send, and does not rewrite bubbles already shown.
-  const outboundModel = showPicker.value ? selectedModel.value : "";
-  const payload = chatRequestBody(messages.value, started.content, outboundModel);
-  sending.value = true;
-  error.value = "";
-  messages.value = started.messages;
-  prompt.value = started.prompt;
-  await scrollMessages();
-  try {
-    const body = await postJson("/api/v1/llm/chat", payload);
-    const actions = Array.isArray(body?.actions)
-      ? body.actions.filter((item) => actionTarget(item))
-      : [];
-    const reply = { role: "assistant", content: body?.content || "", actions };
-    if (typeof body?.model === "string" && body.model.length > 0) {
-      reply.model = body.model;
-    }
-    messages.value = [...messages.value, reply];
-    if (actions.some((item) => item.type === "skill_drafted" || item.type === "skill_updated")) {
-      loadSidebar();
-    }
-    await scrollMessages();
-  } catch (caught) {
-    const failed = failOutgoingMessage(messages.value, prompt.value);
-    messages.value = failed.messages;
-    prompt.value = failed.prompt;
-    if (shouldRefetchProvider(caught)) {
-      await refetchDisallowedModel(outboundModel);
-    }
-    error.value = isForbidden(caught) ? actionDeniedText("agent.qa") : errorText(caught, "发送失败");
-  } finally {
-    sending.value = false;
-  }
-}
 </script>
 
 <template>
   <StatePanel v-if="forbidden" forbidden forbidden-code="agent.qa" />
   <div v-else class="chat-page">
     <PageIntro title="对话" lead="在平台内向已配置的模型提问。" :note="note">
-      <template v-if="pill" #actions>
-        <span class="pill" :data-provider="provider?.provider">{{ pill }}</span>
+      <template #actions>
+        <button type="button" class="btn btn-secondary" @click="requestNewChat">新建对话</button>
+        <span v-if="pill" class="pill" :data-provider="provider?.provider">{{ pill }}</span>
       </template>
     </PageIntro>
+    <div v-if="confirmOpen" class="chat-confirm" role="alertdialog" aria-labelledby="new-chat-title">
+      <h2 id="new-chat-title">确认清除当前对话</h2>
+      <p>{{ NEW_CHAT_WARNING }}</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" @click="cancelNewChat">取消</button>
+        <button type="button" class="btn" @click="confirmNewChat">确认</button>
+      </div>
+    </div>
     <div class="chat-body">
       <aside class="skill-rail" aria-label="Skill 列表">
         <section>
@@ -365,11 +218,12 @@ async function send() {
                 v-for="(item, index) in messages"
                 :key="index"
                 class="bubble"
-                :class="{ user: item.role === 'user', failed: item.failed }"
+                :class="{ user: item.role === 'user', failed: item.failed, interrupted: item.interrupted }"
               >
                 <MarkdownBody :text="item.content" />
                 <span v-if="item.role === 'assistant' && item.model" class="bubble-model">{{ item.model }}</span>
-                <span v-if="item.failed" class="fail-mark">发送失败</span>
+                <span v-if="item.interrupted" class="fail-mark">{{ INTERRUPTED_MARK }}</span>
+                <span v-else-if="item.failed" class="fail-mark">发送失败</span>
                 <p v-if="item.actions?.length" class="bubble-actions">
                   <RouterLink
                     v-for="action in item.actions"
@@ -382,6 +236,7 @@ async function send() {
                 </p>
               </div>
             </div>
+            <p v-if="interruptNotice" class="hint">{{ interruptNotice }}</p>
             <div v-if="mode === 'ready' && !off" class="suggest">
               <button type="button" @click="suggest('看看我的 Skill')">看看我的 Skill</button>
               <button
@@ -422,7 +277,7 @@ async function send() {
                   v-if="canSend"
                   type="submit"
                   class="btn"
-                  :disabled="composerDisabled || sending || !prompt.trim()"
+                  :disabled="sendDisabled || !prompt.trim()"
                 >
                   <span v-if="sending" class="spinner" aria-hidden="true"></span>
                   发送

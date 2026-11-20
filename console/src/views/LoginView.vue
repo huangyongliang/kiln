@@ -4,7 +4,8 @@ import { useRouter } from "vue-router";
 
 import { errorText, getJson, postJson } from "../api";
 import AppIcon from "../components/AppIcon.vue";
-import { clearAccount, readFlash, writeAccount } from "../session";
+import { acceptLogin } from "../identity";
+import { clearAccount, readFlash } from "../session";
 import { pushToast, toasts } from "../toast";
 
 const router = useRouter();
@@ -39,9 +40,7 @@ async function submit() {
       username: username.value.trim(),
       password: password.value,
     });
-    if (body?.account) {
-      writeAccount(body.account);
-    }
+    acceptLogin(body?.account);
     await router.push("/");
   } catch (caught) {
     error.value = errorText(caught, "登录失败");
