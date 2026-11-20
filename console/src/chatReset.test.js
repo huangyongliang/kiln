@@ -2188,6 +2188,91 @@ test("a cached login does not keep the previous account's page access", async ()
   assert.equal(guarded.textContent, "reader-new chat=false");
 });
 
+test("a roles response already in flight cannot restore the previous permissions", async () => {
+  accessReady.value = false;
+  const first = ensureAccess();
+  take("/api/v1/auth/me").resolveWith({
+    json: {
+      permissions: ["skill.read"],
+      account: { id: "user-1", username: "ada", display_name: "Ada", role_ids: ["qa"] },
+    },
+  });
+  await settled();
+  const oldRoles = take("/api/v1/rbac/roles");
+  acceptLogin({ id: "user-9", username: "reader-new", display_name: "Reader", role_ids: ["reader"] });
+  const second = ensureAccess();
+  const freshMe = take("/api/v1/auth/me");
+  oldRoles.resolveWith({
+    json: { items: [{ id: "qa", name: "QA", permissions: ["agent.qa", "account.manage"] }] },
+  });
+  await settled();
+  const oldLabels = calls.findLast((call) => call.url === "/api/v1/rbac/permissions" && !call.taken);
+  if (oldLabels) {
+    oldLabels.taken = true;
+    oldLabels.rejectWith(Object.assign(new Error("旧权限列表失败"), { status: 500 }));
+  }
+  await Promise.resolve(first).catch(() => {});
+  assert.equal(readAccount().username, "reader-new");
+  assert.equal(accessReady.value, false);
+  assert.equal(perms.value.has("agent.qa"), false);
+  assert.equal(freshMe.settled, false);
+  freshMe.resolveWith({ json: readerMe() });
+  await settled();
+  take("/api/v1/rbac/roles").resolveWith({
+    json: { items: [{ id: "reader", name: "读者", permissions: ["skill.read"] }] },
+  });
+  await settled();
+  take("/api/v1/rbac/permissions").resolveWith({
+    json: { items: [{ code: "skill.read", description: "读取 Skill" }] },
+  });
+  await second;
+  assert.equal(account.value.username, "reader-new");
+  assert.equal(perms.value.has("agent.qa"), false);
+  assert.equal(perms.value.has("skill.read"), true);
+});
+
+test("a permissions response already in flight cannot restore the previous permissions", async () => {
+  accessReady.value = false;
+  const first = ensureAccess();
+  take("/api/v1/auth/me").resolveWith({
+    json: {
+      permissions: ["skill.read"],
+      account: { id: "user-1", username: "ada", display_name: "Ada", role_ids: ["qa"] },
+    },
+  });
+  await settled();
+  take("/api/v1/rbac/roles").resolveWith({
+    json: { items: [{ id: "qa", name: "QA", permissions: ["agent.qa"] }] },
+  });
+  await settled();
+  const oldLabels = take("/api/v1/rbac/permissions");
+  acceptLogin({ id: "user-9", username: "reader-new", display_name: "Reader", role_ids: ["reader"] });
+  const second = ensureAccess();
+  const freshMe = take("/api/v1/auth/me");
+  oldLabels.resolveWith({
+    json: { items: [{ code: "agent.qa", description: "问答" }, { code: "account.manage", description: "账号" }] },
+  });
+  await Promise.resolve(first).catch(() => {});
+  assert.equal(readAccount().username, "reader-new");
+  assert.equal(accessReady.value, false);
+  assert.equal(perms.value.has("agent.qa"), false);
+  assert.equal(perms.value.has("account.manage"), false);
+  assert.equal(freshMe.settled, false);
+  freshMe.resolveWith({ json: readerMe() });
+  await settled();
+  take("/api/v1/rbac/roles").resolveWith({
+    json: { items: [{ id: "reader", name: "读者", permissions: ["skill.read"] }] },
+  });
+  await settled();
+  take("/api/v1/rbac/permissions").resolveWith({
+    json: { items: [{ code: "skill.read", description: "读取 Skill" }] },
+  });
+  await second;
+  assert.equal(account.value.username, "reader-new");
+  assert.equal(perms.value.has("skill.read"), true);
+  assert.equal(perms.value.has("agent.qa"), false);
+});
+
 test("a late auth/me cannot restore the previous account or permissions", async () => {
   accessReady.value = false;
   const first = ensureAccess();
@@ -2246,10 +2331,16 @@ test("a failed access refresh cannot clear the refresh that replaced it", async 
   acceptLogin({ id: "user-9", username: "reader-new", display_name: "Reader", role_ids: ["reader"] });
   const second = ensureAccess();
   const freshMe = take("/api/v1/auth/me");
+  const meCount = count("/api/v1/auth/me");
+  const third = ensureAccess();
+  assert.equal(third, second);
+  assert.equal(count("/api/v1/auth/me"), meCount);
   oldMe.resolveWith({ status: 500, json: { detail: "旧访问失败" } });
   await settled();
   await Promise.resolve(first).catch(() => {});
   assert.equal(freshMe.settled, false);
+  assert.equal(ensureAccess(), second);
+  assert.equal(count("/api/v1/auth/me"), meCount);
   assert.equal(accessReady.value, false);
   assert.equal(perms.value.has("agent.qa"), false);
   freshMe.resolveWith({ json: readerMe() });
@@ -2279,6 +2370,75 @@ test("a current auth/me 401 still expires the identity", async () => {
   assert.equal(perms.value.has("agent.qa"), false);
   assert.equal(location.pathname, "/login");
   assert.deepEqual(assigned, ["/login"]);
+});
+
+test("a failed fresh access check does not open client gates", async () => {
+  const { h } = await import("vue");
+  const { createMemoryHistory, createRouter, RouterView } = await import("vue-router");
+  const { allowRoute } = await import("./router/guard.js");
+  const { canDo, canSee } = await import("./permissions.js");
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: "/login", name: "login", component: { render: () => h("p", "登录") } },
+      {
+        path: "/",
+        name: "overview",
+        component: {
+          render() {
+            const chat = accessReady.value && canSee("chat", perms.value);
+            const send = accessReady.value && canDo("chat.send", perms.value);
+            return h("p", { id: "after-login" }, `ready=${accessReady.value} chat=${chat} send=${send}`);
+          },
+        },
+      },
+    ],
+  });
+  router.beforeEach(allowRoute);
+  await router.push("/login");
+  await router.isReady();
+  const root = document.createElement("div");
+  document.body.appendChild(root);
+  const { createApp } = await import("vue");
+  const app = createApp({ render: () => h(RouterView) });
+  app.use(router);
+  app.mount(root);
+  apps.push(app);
+  await nextTick();
+  replaceApiToken("replacement-bearer");
+  assert.equal(readAccount(), null);
+  assert.equal(accessReady.value, false);
+  assert.equal(perms.value.has("agent.qa"), false);
+  const opened = router.replace({ name: "overview" });
+  await settled();
+  take("/api/v1/auth/me").resolveWith({ status: 503, json: { detail: "身份暂不可用" } });
+  await settled();
+  take("/api/v1/rbac/roles").resolveWith({
+    json: { items: [{ id: "qa", name: "QA", permissions: ["agent.qa", "account.manage"] }] },
+  });
+  await settled();
+  take("/api/v1/rbac/permissions").resolveWith({
+    json: { items: [{ code: "agent.qa", description: "问答" }, { code: "account.manage", description: "账号" }] },
+  });
+  await opened;
+  await nextTick();
+  assert.notEqual(perms.value, null);
+  assert.equal(canDo("chat.send", perms.value), false);
+  assert.equal(canSee("chat", perms.value), false);
+  assert.equal(accessReady.value, false);
+  assert.equal(document.body.querySelector("#after-login").textContent, "ready=false chat=false send=false");
+  const beforeRetry = count("/api/v1/auth/me");
+  const retry = ensureAccess();
+  await settled();
+  assert.equal(count("/api/v1/auth/me"), beforeRetry + 1);
+  await finishAccessRefresh(readerMe());
+  await retry;
+  await nextTick();
+  assert.equal(accessReady.value, true);
+  assert.equal(account.value.username, "reader-new");
+  assert.equal(perms.value.has("skill.read"), true);
+  assert.equal(perms.value.has("agent.qa"), false);
+  assert.equal(document.body.querySelector("#after-login").textContent, "ready=true chat=false send=false");
 });
 
 test("unmounting the chat page drops late success and error from the previous view", async () => {

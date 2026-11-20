@@ -158,8 +158,13 @@ async function refreshAccess(epoch, serial) {
   }
 
   account.value = readAccount();
-  if (!account.value || nextRoles.length === 0) {
-    perms.value = account.value ? closedPerms() : null;
+  if (!account.value) {
+    perms.value = closedPerms();
+    accessReady.value = false;
+    return;
+  }
+  if (nextRoles.length === 0) {
+    perms.value = closedPerms();
     accessReady.value = true;
     return;
   }
