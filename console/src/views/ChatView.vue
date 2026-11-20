@@ -37,6 +37,7 @@ const {
   sending,
   forbidden,
   mode,
+  statusRecovery,
   confirmOpen,
   provider,
   selectedModel,
@@ -284,6 +285,9 @@ function canBuildItem(item) {
                 </button>
               </div>
             </form>
+            <p v-if="statusRecovery" class="hint">
+              <button type="button" class="btn btn-ghost" @click="load">重试读取模型状态</button>
+            </p>
             <p v-if="modelNotice" class="hint">{{ modelNotice }}</p>
             <p v-else-if="emptyCatalog" class="hint">{{ EMPTY_CATALOG_TIP }}</p>
             <p v-if="off" class="hint">

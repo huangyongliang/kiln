@@ -1302,6 +1302,7 @@ test("the mounted page has one 新建对话 button and the exact confirmation", 
   await nextTick();
   assert.equal(document.body.textContent.includes(NEW_CHAT_WARNING), false);
   assert.equal(document.body.querySelector('[role="alertdialog"]'), null);
+  assert.equal(buttonsNamed("重试读取模型状态").length, 0);
 
   const textarea = document.body.querySelector("textarea");
   textarea.value = "未发送草稿";
@@ -1329,6 +1330,50 @@ test("the mounted page has one 新建对话 button and the exact confirmation", 
   assert.equal(document.body.textContent.includes("未发送草稿"), false);
   assert.equal(document.body.textContent.includes(NEW_CHAT_WARNING), false);
   assert.deepEqual(readChatThread(sessionStorage), []);
+});
+
+test("a cold provider failure stays recoverable after 新建对话 clears the error", async () => {
+  const epoch = currentAuthEpoch();
+  await mountChatView();
+  const failed = take("/api/v1/llm/provider");
+  take("/api/v1/skills?scope=mine").resolveWith({ json: { items: [] } });
+  take("/api/v1/skills?scope=usable").resolveWith({ json: { items: [] } });
+  failed.resolveWith({ status: 503, json: { detail: "模型状态暂不可用" } });
+  await settled();
+  await nextTick();
+  assert.equal(document.body.textContent.includes("模型状态暂不可用"), true);
+  assert.equal(buttonsNamed("重试").length, 1);
+  const beforeReset = count("/api/v1/llm/provider");
+  buttonsNamed("新建对话")[0].click();
+  await nextTick();
+  assert.equal(document.body.querySelector('[role="alertdialog"]'), null);
+  assert.equal(document.body.textContent.includes("模型状态暂不可用"), false);
+  assert.equal(count("/api/v1/llm/provider"), beforeReset);
+  assert.equal(count("/api/v1/llm/chat", "POST"), 0);
+  const retry = buttonsNamed("重试读取模型状态");
+  assert.equal(retry.length, 1);
+  assert.notEqual(document.body.querySelector("textarea").getAttribute("disabled"), "false");
+  retry[0].click();
+  await settled();
+  const recovered = take("/api/v1/llm/provider");
+  take("/api/v1/skills?scope=mine").resolveWith({ json: { items: [] } });
+  take("/api/v1/skills?scope=usable").resolveWith({ json: { items: [] } });
+  recovered.resolveWith({ json: OPENAI });
+  await settled();
+  await nextTick();
+  const textarea = document.body.querySelector("textarea");
+  assert.equal(textarea.getAttribute("disabled"), "false");
+  assert.equal(buttonsNamed("重试读取模型状态").length, 0);
+  textarea.value = "恢复后才写";
+  textarea.dispatchEvent({ type: "input", preventDefault() {}, stopPropagation() {} });
+  await nextTick();
+  const send = [...document.body.querySelectorAll("button")].find((button) => button.getAttribute("type") === "submit");
+  assert.ok(send);
+  assert.equal(send.getAttribute("disabled"), "false");
+  assert.equal(count("/api/v1/llm/chat", "POST"), 0);
+  assert.equal(currentAuthEpoch(), epoch);
+  assert.equal(assigned.length, 0);
+  assert.equal(readAccount().username, "ada");
 });
 
 test("the mounted page drops a late reply after confirm and hides the chat from a reader", async () => {

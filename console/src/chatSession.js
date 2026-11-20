@@ -54,6 +54,7 @@ export function createChatSession(options = {}) {
   const sending = ref(false);
   const forbidden = ref(false);
   const mode = ref("loading");
+  const statusRecovery = ref(false);
   const confirmOpen = ref(false);
   const provider = ref(null);
   const selectedModel = ref(readChatModel(storage));
@@ -147,6 +148,7 @@ export function createChatSession(options = {}) {
     interruptNotice.value = "";
     sending.value = false;
     confirmOpen.value = false;
+    statusRecovery.value = false;
     selectedModel.value = "";
     provider.value = null;
     catalogTrusted.value = false;
@@ -328,6 +330,7 @@ export function createChatSession(options = {}) {
       return;
     }
     const ticket = issueStatusTicket();
+    statusRecovery.value = false;
     mode.value = "loading";
     pageError.value = "";
     const sidebar = accessReady.value ? loadSidebar() : Promise.resolve();
@@ -383,9 +386,15 @@ export function createChatSession(options = {}) {
     error.value = "";
     pageError.value = "";
     modelNotice.value = "";
-    if (mode.value === "error") {
-      mode.value = provider.value ? "ready" : "idle";
+    if (mode.value !== "error") {
+      return;
     }
+    if (provider.value) {
+      mode.value = "ready";
+      return;
+    }
+    mode.value = "idle";
+    statusRecovery.value = true;
   }
 
   function requestNewChat() {
@@ -578,6 +587,7 @@ export function createChatSession(options = {}) {
     sending,
     forbidden,
     mode,
+    statusRecovery,
     confirmOpen,
     provider,
     selectedModel,
