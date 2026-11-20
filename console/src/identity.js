@@ -139,8 +139,10 @@ let authExchangeSerial = 0;
 let authExchange = null;
 let authTail = Promise.resolve();
 let authDepth = 0;
-let credentialSerial = 0;
-let logoutObligation = null;
+let bearerGeneration = 0;
+let sessionGeneration = 0;
+let logoutBearerAt = null;
+let logoutSessionAt = null;
 
 export function beginAuthExchange() {
   const controller = new AbortController();
@@ -179,37 +181,53 @@ export function hasActiveLoginAttempt() {
   return loginAttemptPending();
 }
 
-function installCredential() {
-  credentialSerial += 1;
-  logoutObligation = null;
+function replaceBearer() {
+  bearerGeneration += 1;
+  logoutBearerAt = null;
 }
 
-function collectLogoutObligation() {
-  if (logoutObligation == null) {
+function installSession() {
+  sessionGeneration += 1;
+  logoutSessionAt = null;
+}
+
+function clearOwedBearer() {
+  if (logoutBearerAt == null || bearerGeneration !== logoutBearerAt) {
+    logoutBearerAt = null;
     return;
   }
-  if (credentialSerial !== logoutObligation) {
-    logoutObligation = null;
+  logoutBearerAt = null;
+  writeApiToken("");
+}
+
+function clearOwedSession() {
+  if (logoutSessionAt == null || sessionGeneration !== logoutSessionAt) {
+    logoutSessionAt = null;
     return;
   }
   if (loginAttemptPending()) {
     return;
   }
-  logoutObligation = null;
-  writeApiToken("");
+  logoutSessionAt = null;
   clearAccount();
   if (window.location.pathname !== "/login") {
     window.location.assign("/login");
   }
 }
 
-function rememberLogout(snapshot) {
-  if (credentialSerial !== snapshot) {
-    logoutObligation = null;
+function rememberLogout(bearerSnap, sessionSnap) {
+  logoutBearerAt = bearerGeneration === bearerSnap ? bearerSnap : null;
+  logoutSessionAt = sessionGeneration === sessionSnap ? sessionSnap : null;
+  if (loginAttemptPending() && logoutSessionAt != null) {
     return;
   }
-  logoutObligation = snapshot;
-  collectLogoutObligation();
+  clearOwedBearer();
+  clearOwedSession();
+}
+
+function settleLogoutAttempt() {
+  clearOwedBearer();
+  clearOwedSession();
 }
 
 export function openLoginView() {
@@ -229,7 +247,7 @@ export function openLoginView() {
         activeLoginAttempt = 0;
         activeLoginAttemptView = 0;
       }
-      collectLogoutObligation();
+      settleLogoutAttempt();
     },
   };
 }
@@ -254,7 +272,7 @@ export function finishLoginAttempt(attempt) {
     activeLoginAttempt = 0;
     activeLoginAttemptView = 0;
   }
-  collectLogoutObligation();
+  settleLogoutAttempt();
 }
 
 function enqueuePersistFlush() {
@@ -315,7 +333,8 @@ export function flushHeldChatPersist() {
 }
 
 export function acceptLogin(account) {
-  installCredential();
+  installSession();
+  clearOwedBearer();
   beginIdentityBoundary({ keepAttempt: true });
   clearChatStorage(window.sessionStorage);
   clearChatStorage(window.localStorage);
@@ -327,7 +346,8 @@ export function acceptLogin(account) {
 export async function logoutSession(requestJson) {
   beginIdentityBoundary();
   const exchange = beginAuthExchange();
-  const credentials = credentialSerial;
+  const bearerSnap = bearerGeneration;
+  const sessionSnap = sessionGeneration;
   clearChatStorage(window.sessionStorage);
   clearChatStorage(window.localStorage);
   try {
@@ -337,7 +357,7 @@ export async function logoutSession(requestJson) {
     await requestJson("/api/v1/auth/logout", { method: "POST", signal: exchange.signal });
   } finally {
     exchange.finish();
-    rememberLogout(credentials);
+    rememberLogout(bearerSnap, sessionSnap);
     if (exchange.signal.aborted) {
       return;
     }
@@ -345,7 +365,8 @@ export async function logoutSession(requestJson) {
 }
 
 export function replaceApiToken(nextToken) {
-  installCredential();
+  replaceBearer();
+  installSession();
   beginIdentityBoundary();
   clearChatStorage(window.sessionStorage);
   clearChatStorage(window.localStorage);
@@ -381,7 +402,9 @@ export function resetChatRuntimeForTests() {
   authExchangeSerial = 0;
   authTail = Promise.resolve();
   authDepth = 0;
-  credentialSerial = 0;
-  logoutObligation = null;
+  bearerGeneration = 0;
+  sessionGeneration = 0;
+  logoutBearerAt = null;
+  logoutSessionAt = null;
   activeLoginAttemptView = 0;
 }

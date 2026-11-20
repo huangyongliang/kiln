@@ -1780,28 +1780,28 @@ test("an older login cannot overwrite a newer login, and a 401 during login does
   assert.equal(document.body.textContent.includes("旧登录失败"), false);
 });
 
-test("logout success or failure after a newer login does not clear that login", async () => {
+test("logout success or failure after a newer login keeps the account and drops the old bearer", async () => {
   writeApiToken("session-token");
   const loggingOut = logoutSession(requestJson);
   const logoutCall = take("/api/v1/auth/logout", "POST");
   acceptLogin({ id: "user-2", username: "bea", role_ids: ["reader"] });
-  writeApiToken("newer-token");
   logoutCall.resolveWith({ json: { ok: true } });
   await loggingOut;
   flushHeldChatPersist();
   assert.equal(readAccount().username, "bea");
-  assert.equal(readApiToken(), "newer-token");
+  assert.equal(readApiToken(), "");
+  assert.equal(sessionStorage.getItem("kiln.apiToken"), null);
   assert.equal(assigned.length, 0);
 
+  writeApiToken("session-token");
   const failing = logoutSession(requestJson);
   const failingCall = take("/api/v1/auth/logout", "POST");
   acceptLogin({ id: "user-2", username: "bea", role_ids: ["reader"] });
-  writeApiToken("still-newer");
   failingCall.rejectWith(new TypeError("logout dropped"));
   await failing;
   flushHeldChatPersist();
   assert.equal(readAccount().username, "bea");
-  assert.equal(readApiToken(), "still-newer");
+  assert.equal(readApiToken(), "");
   assert.equal(assigned.length, 0);
 });
 
@@ -1914,7 +1914,7 @@ test("unmounting a login that replaced logout removes the old api token", async 
   assert.equal(readApiToken(), "");
 });
 
-test("a successful login after logout keeps that account and a newer token", async () => {
+test("a successful login after logout keeps the account and removes the old bearer", async () => {
   await mountLogin();
   take("/api/v1/auth/sync").resolveWith({ json: { configured: false } });
   await settled();
@@ -1928,16 +1928,50 @@ test("a successful login after logout keeps that account and a newer token", asy
   logoutCall.resolveWith({ status: 204, text: "" });
   await loggingOut;
   await settled();
-  writeApiToken("newer-token");
+  assert.equal(readApiToken(), "old-token");
   const succeeded = take("/api/v1/auth/login", "POST");
   succeeded.resolveWith({
     json: { account: { id: "user-2", username: "bea", role_ids: ["reader"] } },
   });
   await settled();
   assert.equal(readAccount().username, "bea");
-  assert.equal(readApiToken(), "newer-token");
+  assert.equal(readApiToken(), "");
+  assert.equal(sessionStorage.getItem("kiln.apiToken"), null);
   assert.equal(assigned.length, 0);
   assert.equal(location.pathname, "/chat");
+});
+
+test("replaceApiToken during a pending logout keeps the replacement bearer", async () => {
+  writeApiToken("old-token");
+  writeAccount({ id: "user-1", username: "ada", role_ids: ["qa"] });
+  location.pathname = "/chat";
+  assigned.length = 0;
+  const loggingOut = logoutSession(requestJson);
+  const logoutCall = take("/api/v1/auth/logout", "POST");
+  replaceApiToken("replacement-bearer");
+  assert.equal(logoutCall.options.signal.aborted, true);
+  assert.equal(readApiToken(), "replacement-bearer");
+  assert.equal(readAccount(), null);
+  logoutCall.resolveWith({ status: 204, text: "" });
+  await loggingOut;
+  assert.equal(readApiToken(), "replacement-bearer");
+  assert.equal(sessionStorage.getItem("kiln.apiToken"), "replacement-bearer");
+  assert.equal(readAccount(), null);
+});
+
+test("a successful login without logout leaves the stored api token", async () => {
+  await mountLogin();
+  take("/api/v1/auth/sync").resolveWith({ json: { configured: false } });
+  await settled();
+  writeApiToken("kept-token");
+  submitLoginForm();
+  await settled();
+  take("/api/v1/auth/login", "POST").resolveWith({
+    json: { account: { id: "user-2", username: "bea", role_ids: ["reader"] } },
+  });
+  await settled();
+  assert.equal(readAccount().username, "bea");
+  assert.equal(readApiToken(), "kept-token");
 });
 
 test("a failed login without logout leaves the stored api token", async () => {
