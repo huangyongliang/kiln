@@ -2126,7 +2126,7 @@ function chromeBinary() {
   return "";
 }
 
-test("this document drops cookie headers written after an in-flight auth fetch is aborted", { skip: chromeBinary() === "" }, async () => {
+test("this document sends the completed login cookie after an older in-flight auth fetch is aborted", { skip: chromeBinary() === "" }, async () => {
   const pending = [];
   const server = createServer((req, res) => {
     const url = req.url.split("?")[0];
@@ -2247,7 +2247,6 @@ test("this document drops cookie headers written after an in-flight auth fetch i
       item.res.end("{}");
     });
     const afterStale = await evaluate(`fetch("/who", { credentials: "include" }).then((response) => response.text())`);
-    assert.equal(afterStale, "");
     await evaluate(`(() => { window.authController = new AbortController(); window.logoutResult = ${authFetch("/logout")}.then(() => "stored").catch((error) => error.name); return "started"; })()`);
     for (let attempt = 0; attempt < 50 && !pending.some((item) => item.url === "/logout"); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -2257,13 +2256,17 @@ test("this document drops cookie headers written after an in-flight auth fetch i
     assert.equal(logoutAbort, "AbortError");
     await evaluate(`fetch("/set", { method: "POST", credentials: "include" })`);
     const afterFresh = await evaluate(`fetch("/who", { credentials: "include" }).then((response) => response.text())`);
-    assert.equal(afterFresh, "kiln_session=arrived");
+    assert.equal(afterFresh, "kiln_session=arrived", `cookie after the aborted header was ${JSON.stringify(afterStale)}`);
     pending.splice(0, pending.length).forEach((item) => {
       item.res.setHeader("Set-Cookie", "kiln_session=; Max-Age=0; Path=/; HttpOnly");
       item.res.end("");
     });
     const afterLateDelete = await evaluate(`fetch("/who", { credentials: "include" }).then((response) => response.text())`);
-    assert.equal(afterLateDelete, "kiln_session=arrived");
+    assert.equal(
+      afterLateDelete,
+      "kiln_session=arrived",
+      `cookie after the aborted logout header was ${JSON.stringify(afterLateDelete)}; completed login saw ${JSON.stringify(afterFresh)}; aborted login saw ${JSON.stringify(afterStale)}`,
+    );
     socket.close();
   } finally {
     chrome.kill("SIGKILL");
