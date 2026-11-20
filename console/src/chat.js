@@ -15,6 +15,10 @@ export const EMPTY_CATALOG_TIP =
   "当前没有可用的模型。请管理员在模型配置中分配，或检查环境变量 LLM_MODEL / LLM_MODELS。";
 export const MODEL_NOT_ALLOWED = "模型不在允许的模型列表中。";
 export const NO_MODELS_FOR_ACCOUNT = "当前账号没有可用的模型。请联系管理员在模型配置中分配。";
+export const NEW_CHAT_WARNING =
+  "新建对话会清除本页消息和未发送内容，无法恢复。已创建的 Skill 和已发起的构建仍会保留；停止等待不能撤销服务器已执行或仍在执行的操作。";
+export const INTERRUPTED_MARK = "结果未知，请求已中断";
+export const INTERRUPTED_HINT = "请先查看 Skill 和构建记录，再手工继续。";
 
 const MODEL_ID_MAX = 128;
 
@@ -56,9 +60,17 @@ export function failOutgoingMessage(messages, prompt) {
   const thread = Array.isArray(messages) ? messages.slice() : [];
   const last = thread[thread.length - 1];
   if (last && last.role === "user") {
-    thread[thread.length - 1] = { ...last, failed: true };
+    const next = { ...last, failed: true };
+    delete next.pending;
+    thread[thread.length - 1] = next;
   }
   return { messages: thread, prompt };
+}
+
+export function newChatNeedsConfirm({ messages, draft, requestActive }) {
+  const hasThread = Array.isArray(messages) && messages.length > 0;
+  const hasDraft = typeof draft === "string" && draft.trim().length > 0;
+  return hasThread || hasDraft || requestActive === true;
 }
 
 export function isDisallowedModelError(caught) {
@@ -181,7 +193,7 @@ export function composerKeyAction(event) {
 export function chatRequestMessages(history, content) {
   const prior = [];
   for (const item of history || []) {
-    if (!item || item.failed || !ROLES.has(item.role)) {
+    if (!item || item.failed || item.pending || item.interrupted || !ROLES.has(item.role)) {
       continue;
     }
     if (typeof item.content !== "string" || item.content.length === 0) {
@@ -212,19 +224,43 @@ export function trimChatMessages(messages, limit = CHAT_MESSAGE_LIMIT) {
 }
 
 export function readChatThread(storage) {
+  return readChatThreadState(storage).messages;
+}
+
+export function readChatThreadState(storage) {
   if (!storage) {
-    return [];
+    return { messages: [], sawPending: false };
   }
   try {
     const raw = storage.getItem(CHAT_THREAD_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) {
-      return [];
+      return { messages: [], sawPending: false };
     }
-    return parsed.map(storedMessage).filter(Boolean);
+    return normalizeLoadedThread(parsed.map(storedMessage).filter(Boolean));
   } catch {
-    return [];
+    return { messages: [], sawPending: false };
   }
+}
+
+export function normalizeLoadedThread(messages) {
+  let sawPending = false;
+  const next = [];
+  for (const item of messages || []) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    if (item.pending === true) {
+      sawPending = true;
+      const copy = { ...item };
+      delete copy.pending;
+      copy.interrupted = true;
+      next.push(copy);
+      continue;
+    }
+    next.push(item);
+  }
+  return { messages: next, sawPending };
 }
 
 export function writeChatThread(storage, messages) {
@@ -240,7 +276,7 @@ export function writeChatThread(storage, messages) {
 }
 
 function storedMessage(item) {
-  if (!item || typeof item !== "object" || !ROLES.has(item.role)) {
+  if (!item || typeof item !== "object" || !ROLES.has(item.role) || item.role === "system") {
     return null;
   }
   if (typeof item.content !== "string" || item.content.length === 0) {
@@ -257,6 +293,11 @@ function storedMessage(item) {
   }
   if (item.failed === true) {
     stored.failed = true;
+  }
+  if (item.interrupted === true) {
+    stored.interrupted = true;
+  } else if (item.pending === true) {
+    stored.pending = true;
   }
   if (Array.isArray(item.actions)) {
     const actions = item.actions.map(storedAction).filter(Boolean);

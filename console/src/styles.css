@@ -1360,6 +1360,20 @@ dialog.modal::backdrop {
   flex: none;
 }
 
+.chat-confirm {
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  background: var(--paper);
+  margin: 0 0 12px;
+  box-shadow: var(--shadow);
+}
+
+.chat-confirm p {
+  margin: 0 0 12px;
+}
+
 .chat-body {
   display: flex;
   gap: 16px;

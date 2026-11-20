@@ -1,6 +1,8 @@
-import { fieldMessage } from "./forms";
-import { clearAccount, readAccount, writeFlash } from "./session";
-import { readApiToken } from "./token";
+import { fieldMessage } from "./forms.js";
+import { clearChatStorage } from "./chat.js";
+import { beginIdentityBoundary, currentAuthEpoch, expiryApplies, hasActiveLoginAttempt } from "./identity.js";
+import { clearAccount, readAccount, writeFlash } from "./session.js";
+import { readApiToken } from "./token.js";
 
 function errorDetail(body, status) {
   if (!body || body.detail == null) {
@@ -22,28 +24,69 @@ function isSessionExpiry(path, status) {
   return !path.startsWith("/api/v1/auth/login") && !path.startsWith("/api/v1/auth/sync");
 }
 
+export function isAbortError(caught) {
+  return Boolean(caught && caught.name === "AbortError");
+}
+
+function networkError(caught) {
+  const error = new Error("无法连接 API");
+  error.cause = caught;
+  return error;
+}
+
+function applyCurrentExpiry(epochAtStart, signal) {
+  if (!expiryApplies(epochAtStart, signal)) {
+    return false;
+  }
+  const loginInFlight = hasActiveLoginAttempt();
+  beginIdentityBoundary({ keepAuth: loginInFlight });
+  clearChatStorage(window.sessionStorage);
+  clearChatStorage(window.localStorage);
+  const hadAccount = Boolean(readAccount());
+  clearAccount();
+  if (!loginInFlight && window.location.pathname !== "/login") {
+    if (hadAccount) {
+      writeFlash("登录已过期，请重新登录");
+    }
+    window.location.assign("/login");
+  }
+  return true;
+}
+
 async function send(path, options = {}) {
   const token = readApiToken();
-  const rawBody = options.body;
+  const epochAtStart = currentAuthEpoch();
+  const { signal, ...fetchOptions } = options;
+  const rawBody = fetchOptions.body;
   const jsonBody = rawBody != null && !(rawBody instanceof Blob);
   let response;
   try {
     response = await fetch(path, {
-      ...options,
+      ...fetchOptions,
+      ...(signal ? { signal } : {}),
       credentials: "include",
       headers: {
         Accept: "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(jsonBody ? { "Content-Type": "application/json" } : {}),
-        ...(options.headers || {}),
+        ...(fetchOptions.headers || {}),
       },
     });
   } catch (caught) {
-    const error = new Error("无法连接 API");
-    error.cause = caught;
-    throw error;
+    if (isAbortError(caught)) {
+      throw caught;
+    }
+    throw networkError(caught);
   }
-  const text = await response.text();
+  let text = "";
+  try {
+    text = await response.text();
+  } catch (caught) {
+    if (isAbortError(caught)) {
+      throw caught;
+    }
+    throw networkError(caught);
+  }
   let body = null;
   if (text) {
     try {
@@ -57,13 +100,9 @@ async function send(path, options = {}) {
     error.status = response.status;
     error.detail = body ? body.detail : null;
     if (isSessionExpiry(path, response.status)) {
-      const hadAccount = Boolean(readAccount());
-      clearAccount();
-      if (window.location.pathname !== "/login") {
-        if (hadAccount) {
-          writeFlash("登录已过期，请重新登录");
-        }
-        window.location.assign("/login");
+      const current = applyCurrentExpiry(epochAtStart, signal);
+      if (!current) {
+        error.staleAuth = true;
       }
     }
     throw error;
@@ -88,8 +127,8 @@ export async function putBytes(path, blob, headers = {}) {
   return result;
 }
 
-export function getJson(path) {
-  return requestJson(path);
+export function getJson(path, options) {
+  return requestJson(path, options || {});
 }
 
 export function putJson(path, payload) {
@@ -99,8 +138,9 @@ export function putJson(path, payload) {
   });
 }
 
-export function postJson(path, payload) {
+export function postJson(path, payload, options = {}) {
   return requestJson(path, {
+    ...options,
     method: "POST",
     body: JSON.stringify(payload),
   });
