@@ -1,6 +1,7 @@
 import { computed, ref } from "vue";
 
 import { getJson } from "./api.js";
+import { currentAuthEpoch, onDurableIdentityBoundary } from "./identity.js";
 import { permsFrom } from "./permissions.js";
 import { clearAccount, readAccount, writeAccount } from "./session.js";
 
@@ -20,12 +21,44 @@ export const roleTags = computed(() => {
 });
 
 let pending = null;
+let refreshSerial = 0;
+
+function closedPerms() {
+  return new Set();
+}
+
+function invalidateAccess() {
+  refreshSerial += 1;
+  pending = null;
+  accessReady.value = false;
+  account.value = null;
+  perms.value = closedPerms();
+  roles.value = [];
+  permissionLabels.value = new Map();
+}
+
+onDurableIdentityBoundary(invalidateAccess);
+
+export function resetAccessForTests() {
+  refreshSerial += 1;
+  pending = null;
+  accessReady.value = false;
+  account.value = null;
+  perms.value = null;
+  roles.value = [];
+  permissionLabels.value = new Map();
+}
 
 export function loadAccess() {
   if (!pending) {
-    pending = refreshAccess().finally(() => {
-      pending = null;
+    const serial = refreshSerial;
+    const epoch = currentAuthEpoch();
+    const job = refreshAccess(epoch, serial).finally(() => {
+      if (pending === job && refreshSerial === serial) {
+        pending = null;
+      }
     });
+    pending = job;
   }
   return pending;
 }
@@ -48,7 +81,11 @@ export function actionDeniedText(code) {
   return `没有权限（需要：${permissionDescription(code)}）`;
 }
 
-async function refreshAccess() {
+async function refreshAccess(epoch, serial) {
+  const current = () => currentAuthEpoch() === epoch && refreshSerial === serial;
+  if (!current()) {
+    return;
+  }
   accessReady.value = false;
   let me = null;
   try {
@@ -57,23 +94,37 @@ async function refreshAccess() {
     if (caught?.status === 401) {
       throw caught;
     }
+    if (!current()) {
+      return;
+    }
     me = null;
   }
+  if (!current()) {
+    return;
+  }
 
+  let nextRoles = [];
   try {
     const body = await getJson("/api/v1/rbac/roles");
-    roles.value = Array.isArray(body?.items) ? body.items : [];
+    nextRoles = Array.isArray(body?.items) ? body.items : [];
   } catch (caught) {
     if (caught?.status === 401) {
       throw caught;
     }
-    roles.value = [];
+    if (!current()) {
+      return;
+    }
+    nextRoles = [];
+  }
+  if (!current()) {
+    return;
   }
 
+  let labels = new Map();
   try {
     const body = await getJson("/api/v1/rbac/permissions");
     const items = Array.isArray(body?.items) ? body.items : [];
-    permissionLabels.value = new Map(
+    labels = new Map(
       items
         .filter((item) => item && typeof item.code === "string")
         .map((item) => [item.code, item.description || item.code]),
@@ -82,9 +133,17 @@ async function refreshAccess() {
     if (caught?.status === 401) {
       throw caught;
     }
-    permissionLabels.value = new Map();
+    if (!current()) {
+      return;
+    }
+    labels = new Map();
+  }
+  if (!current()) {
+    return;
   }
 
+  roles.value = nextRoles;
+  permissionLabels.value = labels;
   if (me && Array.isArray(me.permissions)) {
     const next = accountFromMe(me);
     if (next) {
@@ -93,18 +152,18 @@ async function refreshAccess() {
       clearAccount();
     }
     account.value = readAccount();
-    perms.value = permsFrom(me);
+    perms.value = permsFrom(me) || closedPerms();
     accessReady.value = true;
     return;
   }
 
   account.value = readAccount();
-  if (!account.value || roles.value.length === 0) {
-    perms.value = null;
+  if (!account.value || nextRoles.length === 0) {
+    perms.value = account.value ? closedPerms() : null;
     accessReady.value = true;
     return;
   }
-  perms.value = permsFrom({ account: account.value, roles: roles.value });
+  perms.value = permsFrom({ account: account.value, roles: nextRoles }) || closedPerms();
   accessReady.value = true;
 }
 

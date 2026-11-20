@@ -17,6 +17,7 @@ let holdPersist = false;
 const liveViews = new Set();
 const controllers = new Set();
 const identityListeners = new Set();
+const durableIdentityListeners = new Set();
 const persistJobs = [];
 const heldFlushes = [];
 const signalScopes = new WeakMap();
@@ -62,7 +63,7 @@ export function beginIdentityBoundary({ keepAuth = false, keepAttempt = false } 
   if (!keepAuth && !keepAttempt) {
     activeLoginAttempt = 0;
   }
-  for (const listener of [...identityListeners]) {
+  for (const listener of [...durableIdentityListeners, ...identityListeners]) {
     try {
       listener();
     } catch {
@@ -77,6 +78,11 @@ export function beginIdentityBoundary({ keepAuth = false, keepAttempt = false } 
 export function onIdentityBoundary(listener) {
   identityListeners.add(listener);
   return () => identityListeners.delete(listener);
+}
+
+export function onDurableIdentityBoundary(listener) {
+  durableIdentityListeners.add(listener);
+  return () => durableIdentityListeners.delete(listener);
 }
 
 export function openChatView() {
