@@ -2133,25 +2133,31 @@ test("a real browser drops Set-Cookie from a fetch aborted before headers and ke
     "--disable-gpu",
     "--no-sandbox",
     "--disable-dev-shm-usage",
+    "--disable-extensions",
+    "--no-first-run",
+    "--disable-background-networking",
     `--user-data-dir=${profile}`,
+    "--remote-debugging-address=127.0.0.1",
     "--remote-debugging-port=0",
     "about:blank",
-  ], { stdio: ["ignore", "ignore", "pipe"] });
+  ], { stdio: ["ignore", "pipe", "pipe"] });
   try {
     const portText = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("chrome did not open a debugging port")), 8000);
+      const timer = setTimeout(() => reject(new Error(`chrome did not open a debugging port\n${output.slice(-500)}`)), 25000);
       let output = "";
-      chrome.stderr.on("data", (chunk) => {
-        output += chunk;
+      const take = (chunk) => {
+        output = `${output}${chunk}`.slice(-4000);
         const match = output.match(/127\.0\.0\.1:([1-9]\d*)/);
         if (match) {
           clearTimeout(timer);
           resolve(match[1]);
         }
-      });
+      };
+      chrome.stdout.on("data", take);
+      chrome.stderr.on("data", take);
       chrome.on("exit", (code) => {
         clearTimeout(timer);
-        reject(new Error(`chrome exited before opening a debugging port (${code})`));
+        reject(new Error(`chrome exited before opening a debugging port (${code})\n${output.slice(-500)}`));
       });
     });
     const page = await new Promise((resolve, reject) => {
@@ -2235,8 +2241,20 @@ test("a real browser drops Set-Cookie from a fetch aborted before headers and ke
     socket.close();
   } finally {
     chrome.kill("SIGKILL");
+    await new Promise((resolve) => {
+      if (chrome.exitCode != null || chrome.signalCode != null) {
+        resolve();
+        return;
+      }
+      chrome.once("exit", resolve);
+      setTimeout(resolve, 1000);
+    });
     server.close();
-    rmSync(profile, { recursive: true, force: true });
+    try {
+      rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    } catch {
+      // A profile directory that is still busy does not change the cookie result.
+    }
   }
 });
 
