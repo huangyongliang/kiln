@@ -136,6 +136,7 @@ export function expiryApplies(epochAtStart, signal) {
 
 let authExchangeSerial = 0;
 let authExchange = null;
+let credentialSerial = 0;
 
 export function beginAuthExchange() {
   authExchange?.abort();
@@ -245,6 +246,7 @@ export function flushHeldChatPersist() {
 }
 
 export function acceptLogin(account) {
+  credentialSerial += 1;
   beginIdentityBoundary({ keepAttempt: true });
   clearChatStorage(window.sessionStorage);
   clearChatStorage(window.localStorage);
@@ -254,23 +256,32 @@ export function acceptLogin(account) {
 }
 
 export async function logoutSession(requestJson) {
-  const boundary = beginIdentityBoundary();
+  beginIdentityBoundary();
   const exchange = beginAuthExchange();
+  const credentials = credentialSerial;
   clearChatStorage(window.sessionStorage);
   clearChatStorage(window.localStorage);
   try {
     await requestJson("/api/v1/auth/logout", { method: "POST", signal: exchange.signal });
   } finally {
-    if (exchange.signal.aborted || authEpoch !== boundary.authEpoch) {
+    // A 401 advances the epoch and aborts this exchange without installing a
+    // credential. Only a newer login or token replacement may keep its own.
+    if (hasActiveLoginAttempt() || credentialSerial !== credentials) {
       return;
     }
     writeApiToken("");
     clearAccount();
-    window.location.assign("/login");
+    if (window.location.pathname !== "/login") {
+      window.location.assign("/login");
+    }
+    if (exchange.signal.aborted) {
+      return;
+    }
   }
 }
 
 export function replaceApiToken(nextToken) {
+  credentialSerial += 1;
   beginIdentityBoundary();
   clearChatStorage(window.sessionStorage);
   clearChatStorage(window.localStorage);
@@ -304,4 +315,5 @@ export function resetChatRuntimeForTests() {
   authExchange?.abort();
   authExchange = null;
   authExchangeSerial = 0;
+  credentialSerial = 0;
 }

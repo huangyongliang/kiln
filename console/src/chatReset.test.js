@@ -1805,6 +1805,31 @@ test("logout success or failure after a newer login does not clear that login", 
   assert.equal(assigned.length, 0);
 });
 
+test("a current 401 during logout still removes the api token when nothing replaces the session", async () => {
+  writeApiToken("logout-token");
+  writeAccount({ id: "user-1", username: "ada", role_ids: ["qa"] });
+  sessionStorage.setItem(CHAT_THREAD_KEY, JSON.stringify([{ role: "user", content: "登出中" }]));
+  sessionStorage.setItem(CHAT_MODEL_KEY, "model-b");
+  location.pathname = "/chat";
+  assigned.length = 0;
+  const loggingOut = logoutSession(requestJson);
+  const logoutCall = take("/api/v1/auth/logout", "POST");
+  const expired = getJson("/api/v1/builds");
+  const expiredCall = take("/api/v1/builds");
+  assert.equal(logoutCall.options.signal.aborted, false);
+  expiredCall.resolveWith({ status: 401, json: { detail: "登出过程中的 401" } });
+  await assert.rejects(expired, (caught) => caught.status === 401 && caught.staleAuth !== true);
+  assert.equal(logoutCall.options.signal.aborted, true);
+  await loggingOut;
+  assert.equal(readApiToken(), "");
+  assert.equal(sessionStorage.getItem("kiln.apiToken"), null);
+  assert.equal(readAccount(), null);
+  assert.equal(location.pathname, "/login");
+  assert.deepEqual(assigned, ["/login"]);
+  assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY), null);
+  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), null);
+});
+
 test("unmounting the chat page drops late success and error from the previous view", async () => {
   await mountChatView();
   await finishInitialLoad();
@@ -2101,24 +2126,20 @@ function chromeBinary() {
   return "";
 }
 
-test("a real browser drops Set-Cookie from a fetch aborted before headers and keeps one that already arrived", { skip: chromeBinary() === "" }, async () => {
+test("this document drops cookie headers written after an in-flight auth fetch is aborted", { skip: chromeBinary() === "" }, async () => {
   const pending = [];
   const server = createServer((req, res) => {
-    if (req.url === "/hold") {
-      pending.push(res);
+    const url = req.url.split("?")[0];
+    if (url === "/hold" || url === "/logout") {
+      pending.push({ url, res });
       return;
     }
-    if (req.url === "/set") {
+    if (url === "/set") {
       res.setHeader("Set-Cookie", "kiln_session=arrived; Path=/; HttpOnly");
       res.end("{}");
       return;
     }
-    if (req.url === "/clear") {
-      res.setHeader("Set-Cookie", "kiln_session=; Max-Age=0; Path=/; HttpOnly");
-      res.end("");
-      return;
-    }
-    if (req.url === "/who") {
+    if (url === "/who") {
       res.setHeader("Content-Type", "text/plain");
       res.end(req.headers.cookie || "");
       return;
@@ -2212,32 +2233,37 @@ test("a real browser drops Set-Cookie from a fetch aborted before headers and ke
       }
     }
     assert.equal(String(href).startsWith(origin), true);
-    const early = await evaluate(`(async () => {
-      const controller = new AbortController();
-      const pending = fetch("/hold", { method: "POST", signal: controller.signal }).then(() => "stored").catch((error) => error.name);
-      controller.abort();
-      return pending;
-    })()`);
+    const authFetch = (path) => `fetch("${path}", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: "{}", signal: window.authController.signal })`;
+    await evaluate(`(() => { window.authController = new AbortController(); window.authResult = ${authFetch("/hold")}.then(() => "stored").catch((error) => error.name); return "started"; })()`);
+    for (let attempt = 0; attempt < 50 && !pending.some((item) => item.url === "/hold"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(pending.some((item) => item.url === "/hold"), true);
+    const early = await evaluate(`(() => { window.authController.abort(); return window.authResult; })()`);
     assert.equal(early, "AbortError");
-    pending.forEach((response) => {
-      response.setHeader("Set-Cookie", "kiln_session=aborted; Path=/; HttpOnly");
-      response.end("{}");
+    const heldLogin = pending.splice(0, pending.length);
+    heldLogin.forEach((item) => {
+      item.res.setHeader("Set-Cookie", "kiln_session=stale-login; Path=/; HttpOnly");
+      item.res.end("{}");
     });
-    pending.length = 0;
-    const afterAbort = await evaluate(`fetch("/who").then((response) => response.text())`);
-    assert.equal(String(afterAbort).includes("kiln_session=aborted"), false);
-    await evaluate(`fetch("/set", { method: "POST" })`);
-    const afterArrive = await evaluate(`fetch("/who").then((response) => response.text())`);
-    assert.equal(String(afterArrive).includes("kiln_session=arrived"), true);
-    const visibleToScript = await evaluate(`(() => { document.cookie = "kiln_session=script-rewrite; Path=/"; return document.cookie; })()`);
-    const afterScript = await evaluate(`fetch("/who").then((response) => response.text())`);
-    assert.equal(String(visibleToScript).includes("arrived"), false);
-    assert.equal(String(afterScript), "kiln_session=arrived");
-    await evaluate(`fetch("/clear", { method: "POST" })`);
-    const restored = await evaluate(`(() => { document.cookie = "kiln_session=restored; Path=/"; return document.cookie; })()`);
-    const afterClear = await evaluate(`fetch("/who").then((response) => response.text())`);
-    assert.equal(String(restored).includes("arrived"), false);
-    assert.equal(String(afterClear).includes("kiln_session=arrived"), false);
+    const afterStale = await evaluate(`fetch("/who", { credentials: "include" }).then((response) => response.text())`);
+    assert.equal(afterStale, "");
+    await evaluate(`(() => { window.authController = new AbortController(); window.logoutResult = ${authFetch("/logout")}.then(() => "stored").catch((error) => error.name); return "started"; })()`);
+    for (let attempt = 0; attempt < 50 && !pending.some((item) => item.url === "/logout"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(pending.some((item) => item.url === "/logout"), true);
+    const logoutAbort = await evaluate(`(() => { window.authController.abort(); return window.logoutResult; })()`);
+    assert.equal(logoutAbort, "AbortError");
+    await evaluate(`fetch("/set", { method: "POST", credentials: "include" })`);
+    const afterFresh = await evaluate(`fetch("/who", { credentials: "include" }).then((response) => response.text())`);
+    assert.equal(afterFresh, "kiln_session=arrived");
+    pending.splice(0, pending.length).forEach((item) => {
+      item.res.setHeader("Set-Cookie", "kiln_session=; Max-Age=0; Path=/; HttpOnly");
+      item.res.end("");
+    });
+    const afterLateDelete = await evaluate(`fetch("/who", { credentials: "include" }).then((response) => response.text())`);
+    assert.equal(afterLateDelete, "kiln_session=arrived");
     socket.close();
   } finally {
     chrome.kill("SIGKILL");
