@@ -39,7 +39,7 @@ function applyCurrentExpiry(epochAtStart, signal) {
     return false;
   }
   const loginInFlight = hasActiveLoginAttempt();
-  beginIdentityBoundary();
+  beginIdentityBoundary({ keepAuth: loginInFlight });
   clearChatStorage(window.sessionStorage);
   clearChatStorage(window.localStorage);
   const hadAccount = Boolean(readAccount());

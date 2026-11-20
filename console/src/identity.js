@@ -34,27 +34,33 @@ export function currentChatGeneration() {
   return chatGeneration;
 }
 
-function abortControllers() {
+function abortControllers({ keepAuth = false } = {}) {
   for (const entry of controllers) {
+    if (keepAuth && authExchange && entry.controller === authExchange) {
+      continue;
+    }
     try {
       entry.controller.abort();
     } catch {
       // Already aborted controllers still leave the registry.
     }
+    controllers.delete(entry);
   }
-  controllers.clear();
 }
 
 export function advanceChatGeneration() {
   chatGeneration += 1;
-  abortControllers();
+  abortControllers({ keepAuth: true });
   return chatGeneration;
 }
 
-export function beginIdentityBoundary() {
+export function beginIdentityBoundary({ keepAuth = false, keepAttempt = false } = {}) {
   authEpoch += 1;
   chatGeneration += 1;
-  abortControllers();
+  abortControllers({ keepAuth });
+  if (!keepAuth && !keepAttempt) {
+    activeLoginAttempt = 0;
+  }
   for (const listener of [...identityListeners]) {
     try {
       listener();
@@ -89,11 +95,12 @@ export function openChatView() {
   };
 }
 
-export function registerAbortController(controller) {
+export function registerAbortController(controller, isCurrent = null) {
   const entry = { controller };
   signalScopes.set(controller.signal, {
     epoch: authEpoch,
     generation: chatGeneration,
+    isCurrent,
   });
   controllers.add(entry);
   const drop = () => controllers.delete(entry);
@@ -120,8 +127,29 @@ export function expiryApplies(epochAtStart, signal) {
     if (scope.generation !== chatGeneration || scope.epoch !== epochAtStart) {
       return false;
     }
+    if (typeof scope.isCurrent === "function" && !scope.isCurrent()) {
+      return false;
+    }
   }
   return true;
+}
+
+let authExchangeSerial = 0;
+let authExchange = null;
+
+export function beginAuthExchange() {
+  authExchange?.abort();
+  const controller = new AbortController();
+  authExchangeSerial += 1;
+  const serial = authExchangeSerial;
+  authExchange = controller;
+  registerAbortController(controller, () => authExchangeSerial === serial);
+  return {
+    signal: controller.signal,
+    abort() {
+      controller.abort();
+    },
+  };
 }
 
 export function hasActiveLoginAttempt() {
@@ -217,7 +245,7 @@ export function flushHeldChatPersist() {
 }
 
 export function acceptLogin(account) {
-  beginIdentityBoundary();
+  beginIdentityBoundary({ keepAttempt: true });
   clearChatStorage(window.sessionStorage);
   clearChatStorage(window.localStorage);
   if (account && typeof account.username === "string" && account.username) {
@@ -227,12 +255,13 @@ export function acceptLogin(account) {
 
 export async function logoutSession(requestJson) {
   const boundary = beginIdentityBoundary();
+  const exchange = beginAuthExchange();
   clearChatStorage(window.sessionStorage);
   clearChatStorage(window.localStorage);
   try {
-    await requestJson("/api/v1/auth/logout", { method: "POST" });
+    await requestJson("/api/v1/auth/logout", { method: "POST", signal: exchange.signal });
   } finally {
-    if (authEpoch !== boundary.authEpoch) {
+    if (exchange.signal.aborted || authEpoch !== boundary.authEpoch) {
       return;
     }
     writeApiToken("");
@@ -272,4 +301,7 @@ export function resetChatRuntimeForTests() {
   activeLoginView = 0;
   loginAttemptSerial = 0;
   activeLoginAttempt = 0;
+  authExchange?.abort();
+  authExchange = null;
+  authExchangeSerial = 0;
 }

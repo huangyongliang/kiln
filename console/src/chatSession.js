@@ -164,7 +164,7 @@ export function createChatSession(options = {}) {
   function issueTicket(readSerial, bumpSerial) {
     const id = bumpSerial();
     const controller = new AbortController();
-    const releaseAbort = registerAbortController(controller);
+    const releaseAbort = registerAbortController(controller, () => readSerial() === id);
     const captured = {
       id,
       generation: currentChatGeneration(),
@@ -454,9 +454,12 @@ export function createChatSession(options = {}) {
 
   function beginChatRequest() {
     const controller = new AbortController();
-    const releaseAbort = registerAbortController(controller);
     chatSerial += 1;
     const requestId = chatSerial;
+    const releaseAbort = registerAbortController(
+      controller,
+      () => activeChatRequest === requestId,
+    );
     activeChatRequest = requestId;
     const captured = {
       requestId,

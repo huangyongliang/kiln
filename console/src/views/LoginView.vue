@@ -4,7 +4,7 @@ import { useRouter } from "vue-router";
 
 import { errorText, getJson, postJson } from "../api";
 import AppIcon from "../components/AppIcon.vue";
-import { acceptLogin, beginLoginAttempt, openLoginView } from "../identity";
+import { acceptLogin, beginAuthExchange, beginLoginAttempt, openLoginView } from "../identity";
 import { clearAccount, readFlash } from "../session";
 import { pushToast, toasts } from "../toast";
 
@@ -19,6 +19,7 @@ const note =
   "使用本地账号登录。口令只以哈希保存在平台里。公司用户系统的对接是可选的；配置用户信息同步之后，这里会显示公司登录。公司系统只同步身份和在职状态，kiln 的授权仍留在平台上。";
 
 const loginView = openLoginView();
+let loginExchange = null;
 
 onMounted(async () => {
   const flash = readFlash();
@@ -42,9 +43,11 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   loginView.close();
+  loginExchange?.abort();
 });
 
 async function submit() {
+  loginExchange = beginAuthExchange();
   const attempt = beginLoginAttempt(loginView);
   if (!attempt.current()) {
     return;
@@ -52,10 +55,14 @@ async function submit() {
   error.value = "";
   submitting.value = true;
   try {
-    const body = await postJson("/api/v1/auth/login", {
-      username: username.value.trim(),
-      password: password.value,
-    });
+    const body = await postJson(
+      "/api/v1/auth/login",
+      {
+        username: username.value.trim(),
+        password: password.value,
+      },
+      { signal: loginExchange.signal },
+    );
     if (!attempt.current()) {
       return;
     }

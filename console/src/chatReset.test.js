@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { createServer, request as httpRequest } from "node:http";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -453,6 +455,22 @@ const SKILL_ID = "11111111-1111-4111-8111-111111111111";
 
 let calls = [];
 const sessions = [];
+const cookieJar = new Map();
+
+function applySetCookie(header) {
+  const parts = String(header).split(";").map((part) => part.trim());
+  const [name, ...rest] = parts[0].split("=");
+  const value = rest.join("=");
+  const expired = parts.some((part) => /^max-age=0$/i.test(part));
+  if (!name) {
+    return;
+  }
+  if (expired || value === "") {
+    cookieJar.delete(name);
+  } else {
+    cookieJar.set(name, value);
+  }
+}
 const apps = [];
 const require = createRequire(import.meta.url);
 const { parse, compileScript } = require("@vue/compiler-sfc");
@@ -494,6 +512,12 @@ function installFetch() {
         return;
       }
       call.settled = true;
+      if (payload?.setCookie) {
+        call.cookieApplied = call.options.signal?.aborted !== true;
+        if (call.cookieApplied) {
+          applySetCookie(payload.setCookie);
+        }
+      }
       resolve(httpResponse(payload));
     };
     call.rejectWith = (error) => {
@@ -594,6 +618,7 @@ afterEach(() => {
   assigned.length = 0;
   location.pathname = "/chat";
   location.reloads = 0;
+  cookieJar.clear();
   accessReady.value = false;
   perms.value = null;
   account.value = null;
@@ -1583,6 +1608,8 @@ test("replacing the API token clears the chat before reload for the same user an
       account: readAccount(),
     };
   };
+  const obsolete = getJson("/api/v1/builds");
+  const obsoleteCall = take("/api/v1/builds");
   replaceApiToken("credential-new");
   assert.equal(location.reloads, 1);
   assert.equal(seenAtReload.thread, null);
@@ -1599,12 +1626,14 @@ test("replacing the API token clears the chat before reload for the same user an
   const remounted = openSession();
   assert.equal(remounted.messages.value.length, 0);
   assert.equal(remounted.selectedModel.value, "");
-  chat.resolveWith({ status: 401, json: { detail: "旧对话未登录" } });
+  obsoleteCall.resolveWith({ status: 401, json: { detail: "旧令牌未登录" } });
+  await assert.rejects(obsolete, (caught) => caught.staleAuth === true && caught.status === 401);
   await settled();
   assert.equal(readApiToken(), "credential-new");
   assert.equal(readAccount().id, "user-1");
   assert.equal(location.reloads, 1);
   assert.equal(assigned.length, 0);
+  assert.equal(remounted.messages.value.length, 0);
 
   replaceApiToken("credential-other");
   assert.equal(readApiToken(), "credential-other");
@@ -1834,3 +1863,383 @@ test("unmounting the chat page drops late success and error from the previous vi
   assert.equal(readChatThread(sessionStorage).some((item) => item.content === "旧页面的回答"), false);
   assert.equal(readChatThread(sessionStorage).some((item) => item.interrupted === true), true);
 });
+
+test("a superseded status or sidebar 401 in the same generation does not log out", async () => {
+  const session = openSession();
+  await boot(session);
+  session.messages.value = [{ role: "user", content: "留下" }];
+  flushHeldChatPersist();
+  const threadBefore = sessionStorage.getItem(CHAT_THREAD_KEY);
+  const modelBefore = sessionStorage.getItem(CHAT_MODEL_KEY);
+  const first = session.load();
+  const firstProvider = take("/api/v1/llm/provider");
+  const firstMine = take("/api/v1/skills?scope=mine");
+  const firstUsable = take("/api/v1/skills?scope=usable");
+  const second = session.load();
+  const secondProvider = take("/api/v1/llm/provider");
+  const secondMine = take("/api/v1/skills?scope=mine");
+  const secondUsable = take("/api/v1/skills?scope=usable");
+  assert.equal(firstProvider.options.signal.aborted, false);
+  assert.equal(firstMine.options.signal.aborted, false);
+  secondProvider.resolveWith({ json: OPENAI });
+  secondMine.resolveWith({ json: { items: [{ id: SKILL_ID, name: "新的", version: "1", status: "draft" }] } });
+  secondUsable.resolveWith({ json: { items: [] } });
+  await second;
+  firstProvider.resolveWith({ status: 401, json: { detail: "过期的模型状态" } });
+  firstMine.resolveWith({ status: 401, json: { detail: "过期的侧栏" } });
+  firstUsable.resolveWith({ json: { items: [] } });
+  await first;
+  await settled();
+  flushHeldChatPersist();
+  assert.equal(readAccount().username, "ada");
+  assert.equal(assigned.length, 0);
+  assert.equal(location.pathname, "/chat");
+  assert.equal(session.messages.value[0].content, "留下");
+  assert.equal(session.mineItems.value[0].name, "新的");
+  assert.equal(session.mode.value, "ready");
+  assert.equal(session.pageError.value, "");
+  assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY), threadBefore);
+  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), modelBefore);
+
+  const staleMine = session.loadMine();
+  const staleMineCall = take("/api/v1/skills?scope=mine");
+  const currentMine = session.loadMine();
+  const currentMineCall = take("/api/v1/skills?scope=mine");
+  assert.equal(staleMineCall.options.signal.aborted, false);
+  currentMineCall.resolveWith({
+    json: { items: [{ id: SKILL_ID, name: "仍是新的", version: "1", status: "draft" }] },
+  });
+  await currentMine;
+  staleMineCall.resolveWith({ status: 401, json: { detail: "更早的侧栏" } });
+  await staleMine;
+  await settled();
+  flushHeldChatPersist();
+  assert.equal(readAccount().username, "ada");
+  assert.equal(assigned.length, 0);
+  assert.equal(session.mineItems.value[0].name, "仍是新的");
+  assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY), threadBefore);
+
+  const currentExpiry = getJson("/api/v1/builds");
+  take("/api/v1/builds").resolveWith({ status: 401, json: { detail: "当前请求未登录" } });
+  await assert.rejects(currentExpiry, (caught) => caught.staleAuth !== true && caught.status === 401);
+  assert.equal(readAccount(), null);
+  assert.deepEqual(assigned, ["/login"]);
+});
+
+test("an aborted login or logout does not apply a cookie header that has not arrived", async () => {
+  const page = await mountLogin();
+  take("/api/v1/auth/sync").resolveWith({ json: { configured: false } });
+  await settled();
+  submitLoginForm();
+  await settled();
+  const olderLogin = take("/api/v1/auth/login", "POST");
+  olderLogin.honorAbort = false;
+  submitLoginForm();
+  await settled();
+  const newerLogin = take("/api/v1/auth/login", "POST");
+  assert.equal(olderLogin.options.signal.aborted, true);
+  olderLogin.resolveWith({
+    json: { account: { id: "user-1", username: "ada", role_ids: ["qa"] } },
+    setCookie: "kiln_session=stale-login; Path=/; HttpOnly",
+  });
+  await settled();
+  assert.equal(olderLogin.cookieApplied, false);
+  assert.equal(cookieJar.has("kiln_session"), false);
+  newerLogin.resolveWith({
+    json: { account: { id: "user-2", username: "bea", role_ids: ["reader"] } },
+    setCookie: "kiln_session=current-login; Path=/; HttpOnly",
+  });
+  for (let step = 0; step < 5; step += 1) {
+    await nextTick();
+  }
+  assert.equal(cookieJar.get("kiln_session"), "current-login");
+  assert.equal(readAccount().username, "bea");
+  assert.deepEqual(page.pushes, ["/"]);
+
+  const loggingOut = logoutSession(requestJson);
+  const logoutCall = take("/api/v1/auth/logout", "POST");
+  logoutCall.honorAbort = false;
+  const replacement = await mountLogin();
+  take("/api/v1/auth/sync").resolveWith({ json: { configured: false } });
+  await settled();
+  submitLoginForm();
+  await settled();
+  const replacementLogin = take("/api/v1/auth/login", "POST");
+  assert.equal(logoutCall.options.signal.aborted, true);
+  logoutCall.resolveWith({
+    status: 204,
+    text: "",
+    setCookie: "kiln_session=; Max-Age=0; Path=/; HttpOnly",
+  });
+  await loggingOut;
+  await settled();
+  assert.equal(logoutCall.cookieApplied, false);
+  assert.equal(cookieJar.get("kiln_session"), "current-login");
+  assert.equal(assigned.length, 0);
+  replacementLogin.resolveWith({
+    json: { account: { id: "user-9", username: "bea", role_ids: ["reader"] } },
+    setCookie: "kiln_session=replacement-login; Path=/; HttpOnly",
+  });
+  await settled();
+  assert.equal(cookieJar.get("kiln_session"), "replacement-login");
+  assert.equal(readAccount().username, "bea");
+  assert.equal(readAccount().id, "user-9");
+  assert.deepEqual(replacement.pushes, ["/"]);
+
+  const racing = await mountLogin();
+  take("/api/v1/auth/sync").resolveWith({ json: { configured: false } });
+  await settled();
+  submitLoginForm();
+  await settled();
+  const racingLogin = take("/api/v1/auth/login", "POST");
+  racingLogin.honorAbort = false;
+  replaceApiToken("credential-after-login");
+  assert.equal(racingLogin.options.signal.aborted, true);
+  racingLogin.resolveWith({
+    json: { account: { id: "user-1", username: "ada", role_ids: ["qa"] } },
+    setCookie: "kiln_session=replaced-login; Path=/; HttpOnly",
+  });
+  await settled();
+  assert.equal(racingLogin.cookieApplied, false);
+  assert.equal(cookieJar.get("kiln_session"), "replacement-login");
+  assert.equal(readApiToken(), "credential-after-login");
+  assert.equal(readAccount(), null);
+  assert.equal(racing.pushes.length, 0);
+});
+
+async function mountApp() {
+  const source = resolve(dirname(fileURLToPath(import.meta.url)), "App.vue");
+  const component = (await import(pathToFileURL(compileVue(source)).href)).default;
+  const { createApp, h } = await import("vue");
+  const { createMemoryHistory, createRouter } = await import("vue-router");
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: "/", name: "overview", component: { render: () => h("div", "概览") } },
+      { path: "/login", name: "login", component: { render: () => h("div", "登录") } },
+      { path: "/chat", name: "chat", component: { render: () => h("div", "对话") } },
+    ],
+  });
+  await router.push("/");
+  await router.isReady();
+  const root = document.createElement("div");
+  document.body.appendChild(root);
+  const app = createApp(component);
+  app.use(router);
+  app.mount(root);
+  apps.push(app);
+  await nextTick();
+  const health = calls.findLast((call) => call.url === "/health" && !call.taken);
+  if (health) {
+    health.taken = true;
+    health.resolveWith({ json: { status: "ok" } });
+  }
+  await settled();
+  return app;
+}
+
+test("the developer token form clears chat before reload and a separate old 401 does not undo it", async () => {
+  writeApiToken("credential-old");
+  sessionStorage.setItem(CHAT_MODEL_KEY, "model-b");
+  const session = openSession();
+  await boot(session);
+  session.prompt.value = "表单保存前";
+  const sending = session.send();
+  const chat = take("/api/v1/llm/chat", "POST");
+  chat.honorAbort = false;
+  const obsolete = getJson("/api/v1/executor");
+  const obsoleteCall = take("/api/v1/executor");
+  await mountApp();
+  const input = document.body.querySelector("#api-token");
+  assert.ok(input);
+  input.value = "credential-from-form";
+  input.dispatchEvent({ type: "input", preventDefault() {}, stopPropagation() {} });
+  await nextTick();
+  let seenAtReload = null;
+  location.reload = function reload() {
+    this.reloads += 1;
+    seenAtReload = {
+      thread: sessionStorage.getItem(CHAT_THREAD_KEY),
+      model: sessionStorage.getItem(CHAT_MODEL_KEY),
+      token: readApiToken(),
+      account: readAccount(),
+    };
+  };
+  input.parentNode.dispatchEvent({
+    type: "submit",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  await nextTick();
+  assert.equal(location.reloads, 1);
+  assert.equal(seenAtReload.token, "credential-from-form");
+  assert.equal(seenAtReload.thread, null);
+  assert.equal(seenAtReload.model, null);
+  assert.equal(seenAtReload.account, null);
+  chat.resolveWith({ json: { content: "旧令牌回答" } });
+  await sending;
+  flushHeldChatPersist();
+  writeAccount({ id: "user-1", username: "ada", role_ids: ["qa"] });
+  const remounted = openSession();
+  obsoleteCall.resolveWith({ status: 401, json: { detail: "旧令牌未登录" } });
+  await assert.rejects(obsolete, (caught) => caught.staleAuth === true && caught.status === 401);
+  flushHeldChatPersist();
+  assert.equal(readApiToken(), "credential-from-form");
+  assert.equal(readAccount().id, "user-1");
+  assert.equal(assigned.length, 0);
+  assert.equal(remounted.messages.value.length, 0);
+  assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY), null);
+  assert.equal(readChatThread(sessionStorage).some((item) => item.content === "旧令牌回答"), false);
+});
+
+function chromeBinary() {
+  for (const candidate of ["/usr/local/bin/google-chrome", "/usr/bin/google-chrome", "/usr/bin/chromium"]) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return "";
+}
+
+test("a real browser drops Set-Cookie from a fetch aborted before headers and keeps one that already arrived", { skip: chromeBinary() === "" }, async () => {
+  const pending = [];
+  const server = createServer((req, res) => {
+    if (req.url === "/hold") {
+      pending.push(res);
+      return;
+    }
+    if (req.url === "/set") {
+      res.setHeader("Set-Cookie", "kiln_session=arrived; Path=/; HttpOnly");
+      res.end("{}");
+      return;
+    }
+    if (req.url === "/clear") {
+      res.setHeader("Set-Cookie", "kiln_session=; Max-Age=0; Path=/; HttpOnly");
+      res.end("");
+      return;
+    }
+    if (req.url === "/who") {
+      res.setHeader("Content-Type", "text/plain");
+      res.end(req.headers.cookie || "");
+      return;
+    }
+    res.end("ok");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  const profile = mkdtempSync(resolve(tmpdirPath(), "kiln-chrome-"));
+  const chrome = spawn(chromeBinary(), [
+    "--headless=new",
+    "--disable-gpu",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    `--user-data-dir=${profile}`,
+    "--remote-debugging-port=0",
+    "about:blank",
+  ], { stdio: ["ignore", "ignore", "pipe"] });
+  try {
+    const portText = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("chrome did not open a debugging port")), 8000);
+      let output = "";
+      chrome.stderr.on("data", (chunk) => {
+        output += chunk;
+        const match = output.match(/127\.0\.0\.1:([1-9]\d*)/);
+        if (match) {
+          clearTimeout(timer);
+          resolve(match[1]);
+        }
+      });
+      chrome.on("exit", (code) => {
+        clearTimeout(timer);
+        reject(new Error(`chrome exited before opening a debugging port (${code})`));
+      });
+    });
+    const page = await new Promise((resolve, reject) => {
+      const request = httpRequest(`http://127.0.0.1:${portText}/json/new?${encodeURIComponent(`http://127.0.0.1:${port}/`)}`, { method: "PUT" }, (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () => {
+          try {
+            resolve(JSON.parse(Buffer.concat(chunks).toString()));
+          } catch (error) {
+            reject(error);
+          }
+        });
+      });
+      request.setTimeout(8000, () => request.destroy(new Error("devtools target timed out")));
+      request.on("error", reject);
+      request.end();
+    });
+    const socket = new WebSocket(page.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => {
+      socket.addEventListener("open", resolve, { once: true });
+      socket.addEventListener("error", reject, { once: true });
+    });
+    let messageId = 0;
+    const evaluate = (expression) => new Promise((resolve, reject) => {
+      const id = ++messageId;
+      const onMessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.id !== id) {
+          return;
+        }
+        socket.removeEventListener("message", onMessage);
+        if (data.result?.exceptionDetails) {
+          reject(new Error(JSON.stringify(data.result.exceptionDetails)));
+          return;
+        }
+        resolve(data.result?.result?.value);
+      };
+      socket.addEventListener("message", onMessage);
+      socket.send(JSON.stringify({
+        id,
+        method: "Runtime.evaluate",
+        params: { expression, awaitPromise: true, returnByValue: true },
+      }));
+    });
+    const origin = `http://127.0.0.1:${port}`;
+    let href = "";
+    for (let attempt = 0; attempt < 50 && !String(href).startsWith(origin); attempt += 1) {
+      href = await evaluate("location.href");
+      if (!String(href).startsWith(origin)) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+    assert.equal(String(href).startsWith(origin), true);
+    const early = await evaluate(`(async () => {
+      const controller = new AbortController();
+      const pending = fetch("/hold", { method: "POST", signal: controller.signal }).then(() => "stored").catch((error) => error.name);
+      controller.abort();
+      return pending;
+    })()`);
+    assert.equal(early, "AbortError");
+    pending.forEach((response) => {
+      response.setHeader("Set-Cookie", "kiln_session=aborted; Path=/; HttpOnly");
+      response.end("{}");
+    });
+    pending.length = 0;
+    const afterAbort = await evaluate(`fetch("/who").then((response) => response.text())`);
+    assert.equal(String(afterAbort).includes("kiln_session=aborted"), false);
+    await evaluate(`fetch("/set", { method: "POST" })`);
+    const afterArrive = await evaluate(`fetch("/who").then((response) => response.text())`);
+    assert.equal(String(afterArrive).includes("kiln_session=arrived"), true);
+    const visibleToScript = await evaluate(`(() => { document.cookie = "kiln_session=script-rewrite; Path=/"; return document.cookie; })()`);
+    const afterScript = await evaluate(`fetch("/who").then((response) => response.text())`);
+    assert.equal(String(visibleToScript).includes("arrived"), false);
+    assert.equal(String(afterScript), "kiln_session=arrived");
+    await evaluate(`fetch("/clear", { method: "POST" })`);
+    const restored = await evaluate(`(() => { document.cookie = "kiln_session=restored; Path=/"; return document.cookie; })()`);
+    const afterClear = await evaluate(`fetch("/who").then((response) => response.text())`);
+    assert.equal(String(restored).includes("arrived"), false);
+    assert.equal(String(afterClear).includes("kiln_session=arrived"), false);
+    socket.close();
+  } finally {
+    chrome.kill("SIGKILL");
+    server.close();
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+function tmpdirPath() {
+  return process.env.TMPDIR || "/tmp";
+}
