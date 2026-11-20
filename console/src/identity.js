@@ -25,6 +25,7 @@ let loginViewSerial = 0;
 let activeLoginView = 0;
 let loginAttemptSerial = 0;
 let activeLoginAttempt = 0;
+let activeLoginAttemptView = 0;
 
 export function currentAuthEpoch() {
   return authEpoch;
@@ -136,25 +137,79 @@ export function expiryApplies(epochAtStart, signal) {
 
 let authExchangeSerial = 0;
 let authExchange = null;
+let authTail = Promise.resolve();
+let authDepth = 0;
 let credentialSerial = 0;
+let logoutObligation = null;
 
 export function beginAuthExchange() {
-  authExchange?.abort();
   const controller = new AbortController();
   authExchangeSerial += 1;
   const serial = authExchangeSerial;
   authExchange = controller;
   registerAbortController(controller, () => authExchangeSerial === serial);
+  const blocked = authDepth > 0;
+  authDepth += 1;
+  const ready = authTail;
+  let openGate = () => {};
+  let opened = false;
+  authTail = new Promise((resolve) => {
+    openGate = resolve;
+  });
   return {
     signal: controller.signal,
-    abort() {
-      controller.abort();
+    ready,
+    blocked,
+    finish() {
+      if (opened) {
+        return;
+      }
+      opened = true;
+      authDepth = Math.max(0, authDepth - 1);
+      openGate();
     },
   };
 }
 
+function loginAttemptPending() {
+  return activeLoginView !== 0 && activeLoginAttempt !== 0 && activeLoginAttemptView === activeLoginView;
+}
+
 export function hasActiveLoginAttempt() {
-  return activeLoginView !== 0 && activeLoginAttempt !== 0;
+  return loginAttemptPending();
+}
+
+function installCredential() {
+  credentialSerial += 1;
+  logoutObligation = null;
+}
+
+function collectLogoutObligation() {
+  if (logoutObligation == null) {
+    return;
+  }
+  if (credentialSerial !== logoutObligation) {
+    logoutObligation = null;
+    return;
+  }
+  if (loginAttemptPending()) {
+    return;
+  }
+  logoutObligation = null;
+  writeApiToken("");
+  clearAccount();
+  if (window.location.pathname !== "/login") {
+    window.location.assign("/login");
+  }
+}
+
+function rememberLogout(snapshot) {
+  if (credentialSerial !== snapshot) {
+    logoutObligation = null;
+    return;
+  }
+  logoutObligation = snapshot;
+  collectLogoutObligation();
 }
 
 export function openLoginView() {
@@ -162,15 +217,19 @@ export function openLoginView() {
   const viewId = loginViewSerial;
   activeLoginView = viewId;
   return {
+    viewId,
     alive() {
       return activeLoginView === viewId;
     },
     close() {
-      if (activeLoginView !== viewId) {
-        return;
+      if (activeLoginView === viewId) {
+        activeLoginView = 0;
       }
-      activeLoginView = 0;
-      activeLoginAttempt = 0;
+      if (activeLoginAttemptView === viewId) {
+        activeLoginAttempt = 0;
+        activeLoginAttemptView = 0;
+      }
+      collectLogoutObligation();
     },
   };
 }
@@ -180,12 +239,22 @@ export function beginLoginAttempt(view) {
   const id = loginAttemptSerial;
   if (view?.alive()) {
     activeLoginAttempt = id;
+    activeLoginAttemptView = view.viewId;
   }
   return {
+    id,
     current() {
       return Boolean(view?.alive()) && activeLoginAttempt === id;
     },
   };
+}
+
+export function finishLoginAttempt(attempt) {
+  if (attempt && activeLoginAttempt === attempt.id) {
+    activeLoginAttempt = 0;
+    activeLoginAttemptView = 0;
+  }
+  collectLogoutObligation();
 }
 
 function enqueuePersistFlush() {
@@ -246,7 +315,7 @@ export function flushHeldChatPersist() {
 }
 
 export function acceptLogin(account) {
-  credentialSerial += 1;
+  installCredential();
   beginIdentityBoundary({ keepAttempt: true });
   clearChatStorage(window.sessionStorage);
   clearChatStorage(window.localStorage);
@@ -262,18 +331,13 @@ export async function logoutSession(requestJson) {
   clearChatStorage(window.sessionStorage);
   clearChatStorage(window.localStorage);
   try {
+    if (exchange.blocked) {
+      await exchange.ready;
+    }
     await requestJson("/api/v1/auth/logout", { method: "POST", signal: exchange.signal });
   } finally {
-    // A 401 advances the epoch and aborts this exchange without installing a
-    // credential. Only a newer login or token replacement may keep its own.
-    if (hasActiveLoginAttempt() || credentialSerial !== credentials) {
-      return;
-    }
-    writeApiToken("");
-    clearAccount();
-    if (window.location.pathname !== "/login") {
-      window.location.assign("/login");
-    }
+    exchange.finish();
+    rememberLogout(credentials);
     if (exchange.signal.aborted) {
       return;
     }
@@ -281,7 +345,7 @@ export async function logoutSession(requestJson) {
 }
 
 export function replaceApiToken(nextToken) {
-  credentialSerial += 1;
+  installCredential();
   beginIdentityBoundary();
   clearChatStorage(window.sessionStorage);
   clearChatStorage(window.localStorage);
@@ -315,5 +379,9 @@ export function resetChatRuntimeForTests() {
   authExchange?.abort();
   authExchange = null;
   authExchangeSerial = 0;
+  authTail = Promise.resolve();
+  authDepth = 0;
   credentialSerial = 0;
+  logoutObligation = null;
+  activeLoginAttemptView = 0;
 }

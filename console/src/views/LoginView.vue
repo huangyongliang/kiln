@@ -4,7 +4,7 @@ import { useRouter } from "vue-router";
 
 import { errorText, getJson, postJson } from "../api";
 import AppIcon from "../components/AppIcon.vue";
-import { acceptLogin, beginAuthExchange, beginLoginAttempt, openLoginView } from "../identity";
+import { acceptLogin, beginAuthExchange, beginLoginAttempt, finishLoginAttempt, openLoginView } from "../identity";
 import { clearAccount, readFlash } from "../session";
 import { pushToast, toasts } from "../toast";
 
@@ -43,30 +43,36 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   loginView.close();
-  loginExchange?.abort();
 });
 
 async function submit() {
-  loginExchange = beginAuthExchange();
+  const exchange = beginAuthExchange();
+  loginExchange = exchange;
   const attempt = beginLoginAttempt(loginView);
   if (!attempt.current()) {
+    exchange.finish();
     return;
   }
   error.value = "";
   submitting.value = true;
   try {
+    await exchange.ready;
+    if (!attempt.current()) {
+      return;
+    }
     const body = await postJson(
       "/api/v1/auth/login",
       {
         username: username.value.trim(),
         password: password.value,
       },
-      { signal: loginExchange.signal },
+      { signal: exchange.signal },
     );
     if (!attempt.current()) {
       return;
     }
     acceptLogin(body?.account);
+    exchange.finish();
     if (!attempt.current()) {
       return;
     }
@@ -77,8 +83,10 @@ async function submit() {
     }
     error.value = errorText(caught, "登录失败");
   } finally {
+    exchange.finish();
     if (attempt.current()) {
       submitting.value = false;
+      finishLoginAttempt(attempt);
     }
   }
 }

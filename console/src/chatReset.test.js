@@ -1743,13 +1743,13 @@ test("an older login cannot overwrite a newer login, and a 401 during login does
   await settled();
   submitLoginForm();
   await settled();
+  olderCall.resolveWith({
+    json: { account: { id: "user-1", username: "ada", display_name: "Ada", role_ids: ["qa"] } },
+  });
+  await settled();
   const newerCall = take("/api/v1/auth/login", "POST");
   newerCall.resolveWith({
     json: { account: { id: "user-9", username: "bea", display_name: "Bea", role_ids: ["reader"] } },
-  });
-  await settled();
-  olderCall.resolveWith({
-    json: { account: { id: "user-1", username: "ada", display_name: "Ada", role_ids: ["qa"] } },
   });
   await settled();
   flushHeldChatPersist();
@@ -1766,9 +1766,9 @@ test("an older login cannot overwrite a newer login, and a 401 during login does
   const earlyCall = take("/api/v1/auth/login", "POST");
   submitLoginForm();
   await settled();
-  const laterCall = take("/api/v1/auth/login", "POST");
   earlyCall.resolveWith({ status: 500, json: { detail: "旧登录失败" } });
   await settled();
+  const laterCall = take("/api/v1/auth/login", "POST");
   assert.equal(document.body.textContent.includes("旧登录失败"), false);
   assert.equal(document.body.textContent.includes("正在登录"), true);
   laterCall.resolveWith({
@@ -1828,6 +1828,131 @@ test("a current 401 during logout still removes the api token when nothing repla
   assert.deepEqual(assigned, ["/login"]);
   assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY), null);
   assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), null);
+});
+
+test("logout followed by a failed login still removes the old api token", async () => {
+  const page = await mountLogin();
+  take("/api/v1/auth/sync").resolveWith({ json: { configured: false } });
+  await settled();
+  writeApiToken("old-token");
+  writeAccount({ id: "user-1", username: "ada", role_ids: ["qa"] });
+  location.pathname = "/chat";
+  assigned.length = 0;
+  const loggingOut = logoutSession(requestJson);
+  const logoutCall = take("/api/v1/auth/logout", "POST");
+  submitLoginForm();
+  await settled();
+  assert.equal(logoutCall.options.signal.aborted, false);
+  logoutCall.resolveWith({ status: 204, text: "" });
+  await loggingOut;
+  await settled();
+  assert.equal(readApiToken(), "old-token");
+  const failed = take("/api/v1/auth/login", "POST");
+  failed.resolveWith({ status: 401, json: { detail: "口令不正确" } });
+  await settled();
+  assert.equal(readApiToken(), "");
+  assert.equal(sessionStorage.getItem("kiln.apiToken"), null);
+  assert.equal(readAccount(), null);
+  assert.equal(document.body.textContent.includes("口令不正确"), true);
+  assert.equal(location.pathname, "/login");
+  assert.deepEqual(assigned, ["/login"]);
+  page.app.unmount();
+  apps.pop();
+});
+
+test("logout followed by a network failure on login still removes the old api token", async () => {
+  await mountLogin();
+  take("/api/v1/auth/sync").resolveWith({ json: { configured: false } });
+  await settled();
+  writeApiToken("old-token");
+  writeAccount({ id: "user-1", username: "ada", role_ids: ["qa"] });
+  location.pathname = "/chat";
+  assigned.length = 0;
+  const loggingOut = logoutSession(requestJson);
+  const logoutCall = take("/api/v1/auth/logout", "POST");
+  submitLoginForm();
+  await settled();
+  logoutCall.resolveWith({ status: 204, text: "" });
+  await loggingOut;
+  await settled();
+  const dropped = take("/api/v1/auth/login", "POST");
+  dropped.rejectWith(new TypeError("socket hang up"));
+  await settled();
+  assert.equal(readApiToken(), "");
+  assert.equal(readAccount(), null);
+  assert.equal(document.body.textContent.includes("无法连接 API"), true);
+  assert.equal(location.pathname, "/login");
+});
+
+test("unmounting a login that replaced logout removes the old api token", async () => {
+  const page = await mountLogin();
+  take("/api/v1/auth/sync").resolveWith({ json: { configured: false } });
+  await settled();
+  writeApiToken("old-token");
+  writeAccount({ id: "user-1", username: "ada", role_ids: ["qa"] });
+  location.pathname = "/chat";
+  assigned.length = 0;
+  const loggingOut = logoutSession(requestJson);
+  const logoutCall = take("/api/v1/auth/logout", "POST");
+  submitLoginForm();
+  await settled();
+  logoutCall.resolveWith({ status: 204, text: "" });
+  await loggingOut;
+  await settled();
+  const hanging = take("/api/v1/auth/login", "POST");
+  assert.equal(readApiToken(), "old-token");
+  page.app.unmount();
+  apps.pop();
+  assert.equal(readApiToken(), "");
+  assert.equal(readAccount(), null);
+  assert.equal(location.pathname, "/login");
+  hanging.resolveWith({
+    json: { account: { id: "user-8", username: "ghost", role_ids: ["reader"] } },
+  });
+  await settled();
+  assert.equal(readAccount(), null);
+  assert.equal(readApiToken(), "");
+});
+
+test("a successful login after logout keeps that account and a newer token", async () => {
+  await mountLogin();
+  take("/api/v1/auth/sync").resolveWith({ json: { configured: false } });
+  await settled();
+  writeApiToken("old-token");
+  location.pathname = "/chat";
+  assigned.length = 0;
+  const loggingOut = logoutSession(requestJson);
+  const logoutCall = take("/api/v1/auth/logout", "POST");
+  submitLoginForm();
+  await settled();
+  logoutCall.resolveWith({ status: 204, text: "" });
+  await loggingOut;
+  await settled();
+  writeApiToken("newer-token");
+  const succeeded = take("/api/v1/auth/login", "POST");
+  succeeded.resolveWith({
+    json: { account: { id: "user-2", username: "bea", role_ids: ["reader"] } },
+  });
+  await settled();
+  assert.equal(readAccount().username, "bea");
+  assert.equal(readApiToken(), "newer-token");
+  assert.equal(assigned.length, 0);
+  assert.equal(location.pathname, "/chat");
+});
+
+test("a failed login without logout leaves the stored api token", async () => {
+  await mountLogin();
+  take("/api/v1/auth/sync").resolveWith({ json: { configured: false } });
+  await settled();
+  writeApiToken("kept-token");
+  writeAccount({ id: "user-1", username: "ada", role_ids: ["qa"] });
+  submitLoginForm();
+  await settled();
+  take("/api/v1/auth/login", "POST").resolveWith({ status: 500, json: { detail: "登录失败" } });
+  await settled();
+  assert.equal(readApiToken(), "kept-token");
+  assert.equal(readAccount().username, "ada");
+  assert.equal(document.body.textContent.includes("登录失败"), true);
 });
 
 test("unmounting the chat page drops late success and error from the previous view", async () => {
@@ -1951,25 +2076,23 @@ test("a superseded status or sidebar 401 in the same generation does not log out
   assert.deepEqual(assigned, ["/login"]);
 });
 
-test("an aborted login or logout does not apply a cookie header that has not arrived", async () => {
+test("the next login is sent after the previous auth response, and its cookie is the one kept", async () => {
   const page = await mountLogin();
   take("/api/v1/auth/sync").resolveWith({ json: { configured: false } });
   await settled();
   submitLoginForm();
   await settled();
   const olderLogin = take("/api/v1/auth/login", "POST");
-  olderLogin.honorAbort = false;
   submitLoginForm();
   await settled();
-  const newerLogin = take("/api/v1/auth/login", "POST");
-  assert.equal(olderLogin.options.signal.aborted, true);
+  assert.equal(olderLogin.options.signal.aborted, false);
   olderLogin.resolveWith({
     json: { account: { id: "user-1", username: "ada", role_ids: ["qa"] } },
     setCookie: "kiln_session=stale-login; Path=/; HttpOnly",
   });
   await settled();
-  assert.equal(olderLogin.cookieApplied, false);
-  assert.equal(cookieJar.has("kiln_session"), false);
+  assert.equal(olderLogin.cookieApplied, true);
+  const newerLogin = take("/api/v1/auth/login", "POST");
   newerLogin.resolveWith({
     json: { account: { id: "user-2", username: "bea", role_ids: ["reader"] } },
     setCookie: "kiln_session=current-login; Path=/; HttpOnly",
@@ -1983,14 +2106,12 @@ test("an aborted login or logout does not apply a cookie header that has not arr
 
   const loggingOut = logoutSession(requestJson);
   const logoutCall = take("/api/v1/auth/logout", "POST");
-  logoutCall.honorAbort = false;
   const replacement = await mountLogin();
   take("/api/v1/auth/sync").resolveWith({ json: { configured: false } });
   await settled();
   submitLoginForm();
   await settled();
-  const replacementLogin = take("/api/v1/auth/login", "POST");
-  assert.equal(logoutCall.options.signal.aborted, true);
+  assert.equal(logoutCall.options.signal.aborted, false);
   logoutCall.resolveWith({
     status: 204,
     text: "",
@@ -1998,8 +2119,8 @@ test("an aborted login or logout does not apply a cookie header that has not arr
   });
   await loggingOut;
   await settled();
-  assert.equal(logoutCall.cookieApplied, false);
-  assert.equal(cookieJar.get("kiln_session"), "current-login");
+  const replacementLogin = take("/api/v1/auth/login", "POST");
+  assert.equal(logoutCall.cookieApplied, true);
   assert.equal(assigned.length, 0);
   replacementLogin.resolveWith({
     json: { account: { id: "user-9", username: "bea", role_ids: ["reader"] } },
@@ -2126,7 +2247,7 @@ function chromeBinary() {
   return "";
 }
 
-test("this document sends the completed login cookie after an older in-flight auth fetch is aborted", { skip: chromeBinary() === "" }, async () => {
+test("this document's fetch seam checks auth cookie order, not the Vue login screen", { skip: chromeBinary() === "" }, async (t) => {
   const pending = [];
   const server = createServer((req, res) => {
     const url = req.url.split("?")[0];
@@ -2136,6 +2257,16 @@ test("this document sends the completed login cookie after an older in-flight au
     }
     if (url === "/set") {
       res.setHeader("Set-Cookie", "kiln_session=arrived; Path=/; HttpOnly");
+      res.end("{}");
+      return;
+    }
+    if (url === "/fresh") {
+      res.setHeader("Set-Cookie", "kiln_session=fresh-login; Path=/; HttpOnly");
+      res.end("{}");
+      return;
+    }
+    if (url === "/fresh-final") {
+      res.setHeader("Set-Cookie", "kiln_session=fresh-final; Path=/; HttpOnly");
       res.end("{}");
       return;
     }
@@ -2267,6 +2398,40 @@ test("this document sends the completed login cookie after an older in-flight au
       "kiln_session=arrived",
       `cookie after the aborted logout header was ${JSON.stringify(afterLateDelete)}; completed login saw ${JSON.stringify(afterFresh)}; aborted login saw ${JSON.stringify(afterStale)}`,
     );
+    await evaluate(`(() => { window.authController = new AbortController(); window.lateLogin = fetch("/hold", { method: "POST", credentials: "include", signal: window.authController.signal }).then(() => "stored").catch((error) => error.name); return "started"; })()`);
+    for (let attempt = 0; attempt < 50 && !pending.some((item) => item.url === "/hold"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(pending.some((item) => item.url === "/hold"), true);
+    const lateAbort = await evaluate(`(() => { window.authController.abort(); return window.lateLogin; })()`);
+    assert.equal(lateAbort, "AbortError");
+    await evaluate(`fetch("/fresh", { method: "POST", credentials: "include" })`);
+    const beforeLateLoginHeader = await evaluate(`fetch("/who", { credentials: "include" }).then((response) => response.text())`);
+    assert.equal(beforeLateLoginHeader, "kiln_session=fresh-login");
+    pending.splice(0, pending.length).forEach((item) => {
+      item.res.setHeader("Set-Cookie", "kiln_session=stale-after; Path=/; HttpOnly");
+      item.res.end("{}");
+    });
+    const afterLateLoginHeader = await evaluate(`fetch("/who", { credentials: "include" }).then((response) => response.text())`);
+    t.diagnostic(`stale login header after a completed login read back ${JSON.stringify(afterLateLoginHeader)}`);
+    assert.equal(
+      afterLateLoginHeader === "kiln_session=fresh-login" || afterLateLoginHeader === "kiln_session=stale-after",
+      true,
+      `stale login header released after the newer login left ${JSON.stringify(afterLateLoginHeader)}`,
+    );
+    await evaluate(`(() => { window.ordered = fetch("/hold", { method: "POST", credentials: "include" }).then(() => "stored").catch((error) => error.name); return "started"; })()`);
+    for (let attempt = 0; attempt < 50 && !pending.some((item) => item.url === "/hold"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(pending.some((item) => item.url === "/hold"), true);
+    pending.splice(0, pending.length).forEach((item) => {
+      item.res.setHeader("Set-Cookie", "kiln_session=stale-first; Path=/; HttpOnly");
+      item.res.end("{}");
+    });
+    assert.equal(await evaluate("window.ordered"), "stored");
+    await evaluate(`fetch("/fresh-final", { method: "POST", credentials: "include" })`);
+    const ordered = await evaluate(`fetch("/who", { credentials: "include" }).then((response) => response.text())`);
+    assert.equal(ordered, "kiln_session=fresh-final");
     socket.close();
   } finally {
     chrome.kill("SIGKILL");
