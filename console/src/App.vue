@@ -10,14 +10,13 @@ import {
   showOwnPassword,
 } from "./accountLifecycle";
 import { errorText, postJson, requestJson } from "./api";
-import { clearChatStorage } from "./chat";
+import { logoutSession, replaceApiToken } from "./identity";
 import AppIcon from "./components/AppIcon.vue";
 import FormDialog from "./components/FormDialog.vue";
 import { pageCrumb } from "./crumb";
 import { canSee } from "./permissions";
-import { clearAccount } from "./session";
 import { toasts } from "./toast";
-import { readApiToken, writeApiToken } from "./token";
+import { readApiToken } from "./token";
 
 const route = useRoute();
 const token = ref("");
@@ -116,9 +115,7 @@ async function loadHealth() {
 }
 
 function saveToken() {
-  writeApiToken(token.value);
-  clearAccount();
-  window.location.reload();
+  replaceApiToken(token.value);
 }
 
 function openOwnPassword() {
@@ -156,16 +153,8 @@ async function submitOwnPassword() {
   }
 }
 
-async function logout() {
-  try {
-    await requestJson("/api/v1/auth/logout", { method: "POST" });
-  } finally {
-    clearChatStorage(window.sessionStorage);
-    clearChatStorage(window.localStorage);
-    writeApiToken("");
-    clearAccount();
-    window.location.assign("/login");
-  }
+function logout() {
+  return logoutSession(requestJson);
 }
 </script>
 

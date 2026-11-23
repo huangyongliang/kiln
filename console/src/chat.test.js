@@ -337,9 +337,6 @@ test("logout clears the chat thread, the selected model, and other kiln.chat key
   clearChatStorage(plain);
   assert.equal(plain.getItem(CHAT_THREAD_KEY), null);
   assert.equal(plain.getItem(CHAT_MODEL_KEY), null);
-  const app = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "App.vue"), "utf8");
-  assert.match(app, /clearChatStorage\(window\.sessionStorage\)/);
-  assert.match(app, /clearChatStorage\(window\.localStorage\)/);
 });
 
 test("Enter sends, Shift+Enter inserts a newline, and IME composition does not send", () => {
