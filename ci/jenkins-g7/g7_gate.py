@@ -1643,11 +1643,13 @@ done
             raise GateError(f"anonymous api returned {code}")
         for user in ("feas-admin", "feas-lifecycle", "feas-build"):
             self.load_crumb(user)
+        # A literal plus is a space in this content type, so the expression must be percent-encoded.
+        script_form = b"script=println%281%2B1%29"
         no_crumb, no_body = self.http(
             "/scriptText",
             user="feas-admin",
             method="POST",
-            body=b"script=println(1+1)",
+            body=script_form,
             content_type="application/x-www-form-urlencoded",
             use_crumb=False,
         )
@@ -1657,18 +1659,18 @@ done
             "/scriptText",
             user="feas-admin",
             method="POST",
-            body=b"script=println(1+1)",
+            body=script_form,
             content_type="application/x-www-form-urlencoded",
             use_crumb=True,
         )
         if admin != 200 or admin_body.decode().strip() != "2":
-            raise GateError(f"admin script returned {admin}")
+            raise GateError(f"admin script status {admin} body_len {len(admin_body.strip())}")
         for user in ("feas-lifecycle", "feas-build"):
             status, payload = self.http(
                 "/scriptText",
                 user=user,
                 method="POST",
-                body=b"script=println(1+1)",
+                body=script_form,
                 content_type="application/x-www-form-urlencoded",
                 use_crumb=True,
             )
