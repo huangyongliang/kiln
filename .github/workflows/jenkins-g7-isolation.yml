@@ -177,7 +177,7 @@ jobs:
             local home uid
             home="$(getent passwd "$user" | cut -d: -f6)"
             uid="$(id -u "$user")"
-            sudo -u "$user" --chdir "$home" -- env -i \
+            sudo -u "$user" -- env -i \
               HOME="$home" \
               USER="$user" \
               LOGNAME="$user" \
@@ -202,7 +202,7 @@ jobs:
               KILN_G7_DEB_DIR="$KILN_G7_DEB_DIR" \
               KILN_G7_PRIVATE="/home/kiln-g7/private" \
               KILN_G7_PEER_DIR="/tmp/kiln-g7-peer" \
-              "$@"
+              bash -c 'cd "$HOME" && exec "$@"' bash "$@"
           }
           sudo install -d -m 0700 -o kiln-g7 -g kiln-g7 /home/kiln-g7/fixture
           sudo install -m 0400 -o kiln-g7 -g kiln-g7 "${GITHUB_WORKSPACE}/ci/jenkins-g7/g7_gate.py" /home/kiln-g7/fixture/g7_gate.py
@@ -266,18 +266,18 @@ jobs:
           if id kiln-g7 >/dev/null 2>&1; then
             uid="$(id -u kiln-g7)"
             if command -v podman >/dev/null 2>&1; then
-              sudo -u kiln-g7 --chdir /home/kiln-g7 -- env -i HOME=/home/kiln-g7 USER=kiln-g7 LOGNAME=kiln-g7 \
+              sudo -u kiln-g7 -- env -i HOME=/home/kiln-g7 USER=kiln-g7 LOGNAME=kiln-g7 \
                 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
                 XDG_RUNTIME_DIR="/run/user/${uid}" \
-                podman rm -f kiln-g7-controller kiln-g7-agent kiln-g7-neg kiln-g7-cleanup
+                bash -c 'cd "$HOME" && exec podman rm -f kiln-g7-controller kiln-g7-agent kiln-g7-neg kiln-g7-cleanup'
               if [[ "$?" -ne 0 ]]; then
                 echo "podman rm failed"
                 status=1
               fi
-              names="$(sudo -u kiln-g7 --chdir /home/kiln-g7 -- env -i HOME=/home/kiln-g7 USER=kiln-g7 LOGNAME=kiln-g7 \
+              names="$(sudo -u kiln-g7 -- env -i HOME=/home/kiln-g7 USER=kiln-g7 LOGNAME=kiln-g7 \
                 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
                 XDG_RUNTIME_DIR="/run/user/${uid}" \
-                podman ps -a --format '{{.Names}}')"
+                bash -c 'cd "$HOME" && exec podman ps -a --format "{{.Names}}"')"
               ps_rc="$?"
               if [[ "$ps_rc" -ne 0 ]]; then
                 echo "podman ps failed"

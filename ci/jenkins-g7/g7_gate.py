@@ -1005,17 +1005,58 @@ println("g7-auth-ready")
         return cmdline.stdout + b"\n" + environ.stdout
 
     def child_surfaces(self, name: str, secret: str) -> dict:
-        listing = self.exec(name, ["sh", "-c", "ls -d /proc/[0-9]*"], 10)
-        if listing.returncode != 0:
-            raise GateError("process listing failed")
+        script = r"""
+probe=$$
+for dir in /proc/[0-9]*; do
+  pid=${dir##*/}
+  [ "$pid" = "$probe" ] && continue
+  [ "$pid" = 1 ] && continue
+  ppid=$(sed -n 's/^PPid:[[:space:]]*//p' "$dir/status") || continue
+  [ -n "$ppid" ] || continue
+  [ "$ppid" = "$probe" ] && continue
+  parent=$(sed -n 's/^Name:[[:space:]]*//p' "/proc/${ppid}/status") || continue
+  case "$parent" in
+    java|sh|bash) ;;
+    *) continue ;;
+  esac
+  pname=$(sed -n 's/^Name:[[:space:]]*//p' "$dir/status") || continue
+  case "$pname" in
+    sh|bash|sleep|tee) ;;
+    *) continue ;;
+  esac
+  printf 'CHILD %s %s %s\n' "$pid" "$ppid" "$pname"
+  printf 'CMDLINE '
+  base64 -w 0 < "$dir/cmdline" || { printf '\nREADFAIL %s\n' "$pid"; exit 0; }
+  printf '\nENVIRON '
+  base64 -w 0 < "$dir/environ" || { printf '\nREADFAIL %s\n' "$pid"; exit 0; }
+  printf '\n'
+done
+"""
+        proc = self.exec(name, ["sh", "-c", script], 15)
+        if proc.returncode != 0:
+            raise GateError("build-child scan failed")
+        text = proc.stdout.decode("utf-8", "replace")
+        if "READFAIL " in text:
+            raise GateError("build-child surface read failed")
         child_pids = []
         secret_present = False
-        for entry in listing.stdout.decode().split():
-            pid = entry.rsplit("/", 1)[-1]
-            if not pid.isdigit() or pid == "1":
-                continue
-            surface = self.read_proc_surface(name, pid)
-            child_pids.append(int(pid))
+        import base64
+
+        for block in text.split("CHILD ")[1:]:
+            header, _, rest = block.partition("\n")
+            pid_text = header.split()[0]
+            if not pid_text.isdigit():
+                raise GateError("build-child scan returned an invalid pid")
+            child_pids.append(int(pid_text))
+            if "CMDLINE " not in rest or "\nENVIRON " not in rest:
+                raise GateError("build-child surface was incomplete")
+            cmdline_b64, _, after = rest.partition("\nENVIRON ")
+            cmdline_b64 = cmdline_b64.removeprefix("CMDLINE ").strip()
+            environ_b64 = after.split("\n", 1)[0].strip()
+            try:
+                surface = base64.b64decode(cmdline_b64, validate=True) + b"\n" + base64.b64decode(environ_b64, validate=True)
+            except ValueError as exc:
+                raise GateError("build-child surface decode failed") from exc
             if secret.encode() in surface:
                 secret_present = True
         return {"child_pids": child_pids, "secret_present": secret_present}
@@ -1661,7 +1702,15 @@ println("g7-auth-ready")
         }
 
     def tmpfs_spec(self, destination: str) -> dict:
-        return {"destination": destination, "type": "tmpfs", "rw": True, "source": "", "mode": 0}
+        return {
+            "destination": destination,
+            "type": "tmpfs",
+            "rw": True,
+            "source": "",
+            "mode": 0o1777,
+            "container_uid": 0,
+            "container_gid": 0,
+        }
 
     def controller_mount_specs(self) -> list[dict]:
         etc = self.private / "etc"
@@ -1739,6 +1788,18 @@ println("g7-auth-ready")
                         and row["host_stat"]["uid"] == os.getuid()
                         and row["host_stat"]["mode"] == spec["mode"]
                     )
+                elif spec["type"] == "tmpfs":
+                    measured = self.exec(name, ["stat", "-c", "%u %g %a", spec["destination"]], 10)
+                    if measured.returncode != 0:
+                        stat_ok = False
+                    else:
+                        observed = measured.stdout.decode().split()
+                        row["container_stat"] = observed
+                        stat_ok = observed == [
+                            str(spec["container_uid"]),
+                            str(spec["container_gid"]),
+                            format(spec["mode"], "o"),
+                        ]
                 if (
                     row["type"] == spec["type"]
                     and row["rw"] is spec["rw"]
