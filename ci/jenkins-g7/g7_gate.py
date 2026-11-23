@@ -953,9 +953,19 @@ println("g7-auth-ready")
         if proc.returncode != 0:
             raise GateError("controller start failed: " + tail(self.guard, proc.stderr))
 
-    def start_java(self, name: str, image_args: list[str], network: str, userns: str, mounts: list[str]) -> None:
+    def start_java(
+        self,
+        name: str,
+        image_args: list[str],
+        network: str,
+        userns: str,
+        mounts: list[str],
+        extra_env: list[str] | None = None,
+    ) -> None:
         cmd = self.podman_base(name, self.inbound_image, network, userns)
         cmd += ["-e", "HOME=/home/jenkins/agent"]
+        for item in extra_env or []:
+            cmd += ["-e", item]
         for mount in mounts:
             cmd += ["--mount", mount]
         for mount in self.common_mounts(self.private / "etc" / "hostname-agent"):
@@ -1653,7 +1663,28 @@ done
                 else:
                     kind = "blank"
                 break
-        return f"queue={kind} offline={offline} idle={idle} executors={executors} node_http={code} queue_http={queue_code}"
+        agent = self.agent_state()
+        return (
+            f"queue={kind} offline={offline} idle={idle} executors={executors} "
+            f"node_http={code} queue_http={queue_code} {agent}"
+        )
+
+    def agent_state(self) -> str:
+        proc = self.run(
+            ["podman", "inspect", "--format", "{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}", self.agent],
+            20,
+        )
+        if proc.returncode != 0:
+            return "agent=inspect_failed"
+        parts = proc.stdout.decode().split()
+        if len(parts) < 3:
+            return "agent=inspect_bad"
+        status, exit_code, oom = parts[0], parts[1], parts[2]
+        java = "unread"
+        if status == "running":
+            cmd = self.exec(self.agent, ["cat", "/proc/1/cmdline"], 10)
+            java = "yes" if cmd.returncode == 0 and b"java" in cmd.stdout else "no"
+        return f"agent={status} exit={exit_code} oom={oom} java={java}"
 
     def artifact(self, name: str) -> bytes:
         code, body = self.http(f"/job/{name}/lastSuccessfulBuild/artifact/marker.txt", user="feas-admin")
@@ -1872,6 +1903,7 @@ done
             "container:kiln-g7-controller",
             "container:kiln-g7-controller",
             mounts,
+            ["BUILD_ID=dontKillMe"],
         )
         return path
 
