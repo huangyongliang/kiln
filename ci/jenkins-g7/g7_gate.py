@@ -1617,7 +1617,43 @@ done
                         "clean": saw_child_pid and not secret_seen and not read_failed,
                     }
             time.sleep(1)
-        raise GateError(f"{name} timed out")
+        raise GateError(f"{name} timed out {self.schedule_class(name)}")
+
+    def schedule_class(self, name: str) -> str:
+        code, body = self.http("/computer/kiln-managed-1/api/json?tree=offline,idle,numExecutors", user="feas-admin")
+        offline = None
+        idle = None
+        executors = None
+        if code == 200:
+            data = json.loads(body)
+            offline = data.get("offline")
+            idle = data.get("idle")
+            executors = data.get("numExecutors")
+        queue_code, queue_body = self.http("/queue/api/json?tree=items[why,task[name]]", user="feas-admin")
+        kind = "unread"
+        if queue_code == 200:
+            kind = "empty"
+            for item in json.loads(queue_body).get("items") or []:
+                task = item.get("task") or {}
+                if task.get("name") != name:
+                    continue
+                why = str(item.get("why") or "").lower()
+                if "offline" in why:
+                    kind = "offline"
+                elif "quiet" in why:
+                    kind = "quiet"
+                elif "executor" in why:
+                    kind = "executor"
+                elif "reserved" in why:
+                    kind = "reserved"
+                elif "label" in why:
+                    kind = "label"
+                elif why:
+                    kind = "other"
+                else:
+                    kind = "blank"
+                break
+        return f"queue={kind} offline={offline} idle={idle} executors={executors} node_http={code} queue_http={queue_code}"
 
     def artifact(self, name: str) -> bytes:
         code, body = self.http(f"/job/{name}/lastSuccessfulBuild/artifact/marker.txt", user="feas-admin")
@@ -2046,8 +2082,11 @@ done
 
     def remove_owned(self) -> dict:
         errors = []
-        for name in self.containers:
+        # The agent, negative probe, and cleanup containers share the controller network namespace.
+        for name in (self.agent, self.neg, self.cleanup_name, self.controller):
             proc = self.run(["podman", "rm", "-f", name], 30)
+            if proc.returncode != 0 and name == self.controller:
+                proc = self.run(["podman", "rm", "-f", name], 30)
             if proc.returncode != 0:
                 errors.append(f"rm {name} rc={proc.returncode}")
         proc = self.run(["podman", "ps", "-a", "--format", "{{.Names}}"], 20)

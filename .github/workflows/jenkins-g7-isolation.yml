@@ -269,7 +269,7 @@ jobs:
               sudo -u kiln-g7 -- env -i HOME=/home/kiln-g7 USER=kiln-g7 LOGNAME=kiln-g7 \
                 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
                 XDG_RUNTIME_DIR="/run/user/${uid}" \
-                bash -c 'cd "$HOME" && exec podman rm -f kiln-g7-controller kiln-g7-agent kiln-g7-neg kiln-g7-cleanup'
+                bash -c 'cd "$HOME" && podman rm -f kiln-g7-agent kiln-g7-neg kiln-g7-cleanup && exec podman rm -f kiln-g7-controller'
               if [[ "$?" -ne 0 ]]; then
                 echo "podman rm failed"
                 status=1
