@@ -154,8 +154,41 @@ class Ledger:
                     "teardown": "owned resources removed in finally",
                 }
 
-    def failed(self) -> bool:
-        return any(row["status"] in {"FAIL", "BLOCKED"} for row in self.rows.values())
+    def force(
+        self,
+        test_id: str,
+        status: str,
+        expected: str,
+        observed: str,
+        command_shape: str = "",
+        teardown: str = "",
+    ) -> None:
+        if test_id in self.locked:
+            return
+        observed = self.guard.redact(observed)
+        self.guard.assert_clean(test_id, observed)
+        self.rows[test_id] = {
+            "testID": test_id,
+            "status": status,
+            "expected": expected,
+            "observed": observed,
+            "command_shape": command_shape,
+            "teardown": teardown,
+        }
+
+    def failed(self, aborted: str) -> bool:
+        if aborted:
+            return True
+        explicit = {"G7-RUNNER-API": "NOT RUN", "G7-EGRESS": "NOT CLAIMED"}
+        for test_id in TEST_ORDER:
+            row = self.rows.get(test_id)
+            if test_id in explicit:
+                if not row or row["status"] != explicit[test_id]:
+                    return True
+                continue
+            if not row or row["status"] != "PASS":
+                return True
+        return False
 
     def document(self, context: dict) -> dict:
         ordered = [self.rows[item] for item in TEST_ORDER if item in self.rows]
@@ -173,6 +206,34 @@ def run_cmd(cmd: list[str], timeout: int, guard: Guard) -> subprocess.CompletedP
     blob = "\0".join(cmd)
     guard.assert_clean("command", blob)
     return subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
+
+
+def elf_build_id(path: Path) -> str:
+    data = path.read_bytes()
+    if data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        raise GateError("java is not a little-endian ELF64")
+    section_off = int.from_bytes(data[40:48], "little")
+    section_size = int.from_bytes(data[58:60], "little")
+    section_count = int.from_bytes(data[60:62], "little")
+    for index in range(section_count):
+        offset = section_off + index * section_size
+        if int.from_bytes(data[offset + 4 : offset + 8], "little") != 7:
+            continue
+        note_off = int.from_bytes(data[offset + 24 : offset + 32], "little")
+        note_size = int.from_bytes(data[offset + 32 : offset + 40], "little")
+        note = data[note_off : note_off + note_size]
+        cursor = 0
+        while cursor + 12 <= len(note):
+            namesz = int.from_bytes(note[cursor : cursor + 4], "little")
+            descsz = int.from_bytes(note[cursor + 4 : cursor + 8], "little")
+            ntype = int.from_bytes(note[cursor + 8 : cursor + 12], "little")
+            name = note[cursor + 12 : cursor + 12 + namesz].split(b"\x00", 1)[0]
+            desc_off = cursor + 12 + ((namesz + 3) & ~3)
+            desc = note[desc_off : desc_off + descsz]
+            if name == b"GNU" and ntype == 3 and desc:
+                return desc.hex()
+            cursor = desc_off + ((descsz + 3) & ~3)
+    raise GateError("java GNU BuildID note not found")
 
 
 def tail(guard: Guard, blob: bytes, limit: int = 400) -> str:
@@ -193,11 +254,18 @@ def write_private(path: Path, data: bytes, mode: int = 0o600, exclusive: bool = 
         os.fchmod(fd, mode)
     finally:
         os.close(fd)
+    parent = os.lstat(path.parent)
     info = os.lstat(path)
+    if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode):
+        raise GateError(f"{path.parent.name} is not a private directory")
+    if parent.st_uid != os.getuid() or (parent.st_mode & 0o777) != 0o700:
+        raise GateError(f"{path.parent.name} owner/mode is {parent.st_uid}:{oct(parent.st_mode & 0o777)}")
     if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
         raise GateError(f"{path.name} is not a regular file")
-    if (info.st_mode & 0o777) != mode:
-        raise GateError(f"{path.name} mode is {oct(info.st_mode & 0o777)}")
+    if info.st_uid != os.getuid() or info.st_gid != os.getgid() or (info.st_mode & 0o777) != mode:
+        raise GateError(
+            f"{path.name} owner/mode is {info.st_uid}:{info.st_gid}:{oct(info.st_mode & 0o777)}"
+        )
 
 
 def destroy(path: Path) -> None:
@@ -370,12 +438,47 @@ def host_ipv4() -> tuple[str, str]:
     return device, found.group(1)
 
 
+def host_gateway() -> str:
+    route = subprocess.run(["ip", "-4", "route", "show", "default"], capture_output=True, text=True, check=False)
+    match = re.search(r"\bvia\s+(\d+\.\d+\.\d+\.\d+)", route.stdout)
+    if not match:
+        raise GateError("no host default gateway")
+    return match.group(1)
+
+
+def host_ipv6() -> tuple[str, int]:
+    proc = subprocess.run(["ip", "-6", "-o", "addr", "show"], capture_output=True, text=True, check=False)
+    global_address = ""
+    link_address = ""
+    link_device = ""
+    for line in proc.stdout.splitlines():
+        match = re.search(r"\binet6\s+([0-9a-f:]+)/", line)
+        if not match or match.group(1) == "::1":
+            continue
+        if " scope global " in line and not global_address:
+            global_address = match.group(1)
+        elif " scope link " in line and not link_address:
+            link_address = match.group(1)
+            link_device = line.split()[1]
+    if global_address:
+        return global_address, 0
+    if link_address and link_device:
+        return link_address, socket.if_nametoindex(link_device)
+    raise GateError("no host non-loopback IPv6 address for the closed-namespace control")
+
+
 class OutsideListener:
-    def __init__(self, ip: str) -> None:
+    def __init__(self, ip: str, family: int = socket.AF_INET, scope: int = 0) -> None:
         self.ip = ip
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.family = family
+        self.scope = scope
+        self.sock = socket.socket(family, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind((ip, 0))
+        if family == socket.AF_INET6:
+            self.sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            self.sock.bind((ip, 0, 0, scope))
+        else:
+            self.sock.bind((ip, 0))
         self.sock.listen(16)
         self.port = self.sock.getsockname()[1]
         self.alive = True
@@ -397,7 +500,12 @@ class OutsideListener:
                 conn.close()
 
     def host_ok(self) -> bool:
-        with socket.create_connection((self.ip, self.port), 2) as conn:
+        with socket.socket(self.family, socket.SOCK_STREAM) as conn:
+            conn.settimeout(2)
+            if self.family == socket.AF_INET6:
+                conn.connect((self.ip, self.port, 0, self.scope))
+            else:
+                conn.connect((self.ip, self.port))
             return conn.recv(64) == b"kiln-g7-outside-ok\n"
 
     def close(self) -> None:
@@ -536,12 +644,15 @@ class Gate:
                 amd64 = item["digest"]
         if amd64 != spec["amd64_digest"]:
             raise GateError(f"{kind} amd64 digest mismatch")
-        verify_manifest(
+        manifest = verify_manifest(
             self.lock,
             spec["repository"],
             spec["amd64_digest"],
             "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json",
         )
+        linked = (manifest.get("config") or {}).get("digest")
+        if linked != spec["config_digest"]:
+            raise GateError(f"{kind} manifest config link mismatch")
         verify_blob(self.lock, spec["repository"], spec["config_digest"])
 
     def pull(self, repository: str, digest: str) -> str:
@@ -624,7 +735,37 @@ class Gate:
                 build = line.split(":", 1)[1].strip()
         if version != self.lock["inbound"]["remoting_version"] or build != self.lock["inbound"]["remoting_build"]:
             raise GateError(f"remoting identity {version} {build}")
-        return {"java": java_text.strip().splitlines()[0], "uid": 1000, "remoting": version, "build": build}
+        java_copy = self.private / "java.elf"
+        created_java = self.run(
+            [
+                "podman",
+                "create",
+                "--pull=never",
+                "--entrypoint",
+                "/bin/true",
+                "--userns=keep-id:uid=1000,gid=1000",
+                image,
+            ],
+            30,
+        )
+        if created_java.returncode != 0:
+            raise GateError("unable to read inbound java ELF")
+        java_cid = created_java.stdout.decode().strip()
+        try:
+            copied_java = self.run(["podman", "cp", f"{java_cid}:{self.java_elf}", str(java_copy)], 30)
+            if copied_java.returncode != 0:
+                raise GateError("inbound java ELF path missing")
+            build_id = elf_build_id(java_copy)
+        finally:
+            self.run(["podman", "rm", java_cid], 20)
+            destroy(java_copy)
+        return {
+            "java": java_text.strip().splitlines()[0],
+            "uid": 1000,
+            "remoting": version,
+            "build": build,
+            "java_build_id": build_id,
+        }
 
     def measure_controller_war(self) -> None:
         proc = self.run(
@@ -790,12 +931,16 @@ println("g7-auth-ready")
         content_type: str | None = None,
         use_crumb: bool = False,
     ) -> tuple[int, bytes]:
+        account = user or "anonymous"
+        jar = f"/var/jenkins_home/.g7-private/cookies-{account}"
         lines = [
             "silent",
             "show-error",
             "max-time = 20",
             'output = "/var/jenkins_home/.g7-private/resp-body"',
             'write-out = "%{http_code}"',
+            f'cookie = "{jar}"',
+            f'cookie-jar = "{jar}"',
             f'url = "http://127.0.0.1:8080{path}"',
         ]
         if user:
@@ -894,52 +1039,60 @@ println("g7-auth-ready")
 
         secret = secrets.token_hex(32)
         self.guard.add(secret)
+        self.create_node("kiln-cleanup-fail", "/home/jenkins/agent-cleanup", "kiln-cleanup-slot")
         directory = self.private / "cleanup-args"
         work = self.private / "work-cleanup"
         work.mkdir(parents=True, exist_ok=True)
-        tokens = [
-            "-jar",
-            self.agent_jar,
-            "-url",
-            "http://127.0.0.1:9/",
-            "-secret",
-            secret,
-            "-name",
-            "kiln-cleanup-fail",
-            "-webSocket",
-            "-workDir",
-            "/home/jenkins/agent",
-        ]
         path = directory / "agent.argv"
-        write_private(path, ("\n".join(tokens) + "\n").encode(), exclusive=True)
-        mounts = [
-            f"type=bind,src={directory},dst=/run/kiln-g7-args,ro",
-            f"type=bind,src={work},dst=/home/jenkins/agent",
-        ]
-        self.start_java(
-            self.cleanup_name,
-            ["@/run/kiln-g7-args/agent.argv"],
-            "none",
-            "keep-id:uid=1000,gid=1000",
-            mounts,
-        )
-        visible = False
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            exists = self.exec(self.cleanup_name, ["test", "-f", "/run/kiln-g7-args/agent.argv"], 10)
-            cmdline = self.exec(self.cleanup_name, ["cat", "/proc/1/cmdline"], 10)
-            parts = [item for item in cmdline.stdout.split(b"\0") if item]
-            if exists.returncode == 0 and len(parts) == 2 and parts[1] == b"@/run/kiln-g7-args/agent.argv":
-                visible = True
-                break
-            time.sleep(1)
-        time.sleep(8)
-        destroy(path)
-        inside = self.exec(self.cleanup_name, ["test", "!", "-e", "/run/kiln-g7-args/agent.argv"], 10)
-        gone = (not path.exists()) and inside.returncode == 0
-        self.run(["podman", "rm", "-f", self.cleanup_name], 20)
-        if not visible or not gone:
-            raise GateError(f"cleanup projection visible={visible} gone={gone}")
+        try:
+            write_private(
+                path,
+                self.argfile_tokens(secret, "kiln-cleanup-fail", "http://127.0.0.1:8080/").replace(
+                    b"/home/jenkins/agent\n",
+                    b"/home/jenkins/agent-cleanup\n",
+                ),
+                exclusive=True,
+            )
+            mounts = [
+                f"type=bind,src={directory},dst=/run/kiln-g7-args,ro",
+                f"type=bind,src={work},dst=/home/jenkins/agent-cleanup",
+            ]
+            self.start_java(
+                self.cleanup_name,
+                ["@/run/kiln-g7-args/agent.argv"],
+                "container:kiln-g7-controller",
+                "container:kiln-g7-controller",
+                mounts,
+            )
+            visible = False
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                exists = self.exec(self.cleanup_name, ["test", "-f", "/run/kiln-g7-args/agent.argv"], 10)
+                cmdline = self.exec(self.cleanup_name, ["cat", "/proc/1/cmdline"], 10)
+                parts = [item for item in cmdline.stdout.split(b"\0") if item]
+                if exists.returncode == 0 and len(parts) == 2 and parts[1] == b"@/run/kiln-g7-args/agent.argv":
+                    visible = True
+                    break
+                time.sleep(1)
+            time.sleep(8)
+            code, body = self.http("/computer/kiln-cleanup-fail/api/json?tree=offline", user="feas-admin")
+            offline = code == 200 and json.loads(body).get("offline") is True
+            secret_in_cmd = secret.encode() in cmdline.stdout
+            destroy(path)
+            inside = self.exec(self.cleanup_name, ["test", "!", "-e", "/run/kiln-g7-args/agent.argv"], 10)
+            code_after, body_after = self.http("/computer/kiln-cleanup-fail/api/json?tree=offline", user="feas-admin")
+            still_offline = code_after == 200 and json.loads(body_after).get("offline") is True
+            gone = (not path.exists()) and inside.returncode == 0
+            if not visible or not gone or not offline or not still_offline or secret_in_cmd:
+                raise GateError(
+                    f"cleanup visible={visible} gone={gone} offline={offline} still_offline={still_offline} secret_in_cmdline={secret_in_cmd}"
+                )
+        finally:
+            destroy(path)
+            removed = self.run(["podman", "rm", "-f", self.cleanup_name], 20)
+            if removed.returncode != 0:
+                raise GateError("cleanup container removal failed")
+        self.delete_node("kiln-cleanup-fail")
 
     def rootfs(self, name: str, allow: set[str], home_probe: str) -> dict:
         proc = self.exec(name, ["cat", "/proc/mounts"], 15)
@@ -982,24 +1135,27 @@ println("g7-auth-ready")
             "mounts": [{"dest": item["dest"], "fstype": item["fstype"], "rw": item["rw"]} for item in mounts],
         }
 
-    def network_sample(self, name: str, listener: OutsideListener) -> dict:
-        host_before = listener.host_ok()
-        inside = self.exec(
+    def curl_outside(self, name: str, target: str) -> subprocess.CompletedProcess[bytes]:
+        return self.exec(
             name,
-            [
-                "curl",
-                "--connect-timeout",
-                "2",
-                "--max-time",
-                "3",
-                "--silent",
-                "--output",
-                "/dev/null",
-                f"http://{listener.ip}:{listener.port}/",
-            ],
+            ["curl", "--connect-timeout", "2", "--max-time", "3", "--silent", "--output", "/dev/null", target],
             10,
         )
+
+    def network_sample(
+        self,
+        name: str,
+        listener: OutsideListener,
+        listener6: OutsideListener,
+        gateway: str,
+    ) -> dict:
+        host_before = listener.host_ok()
+        inside = self.curl_outside(name, f"http://{listener.ip}:{listener.port}/")
         host_after = listener.host_ok()
+        host6_before = listener6.host_ok()
+        inside6 = self.curl_outside(name, f"http://[{listener6.ip}]:{listener6.port}/")
+        host6_after = listener6.host_ok()
+        gateway_probe = self.curl_outside(name, f"http://{gateway}:9/")
         local = self.exec(
             name,
             ["curl", "--silent", "--max-time", "5", "-o", "/dev/null", "-w", "%{http_code}", "http://127.0.0.1:8080/login"],
@@ -1008,44 +1164,80 @@ println("g7-auth-ready")
         ws = self.exec(
             name,
             [
-                "bash",
-                "-c",
-                "exec 3<>/dev/tcp/127.0.0.1/8080 || exit 2; "
-                "printf 'GET / HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\n"
-                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\\r\\nSec-WebSocket-Version: 13\\r\\n\\r\\n' >&3; "
-                "IFS= read -r -t 3 line <&3 || true; printf '%s' \"$line\"",
+                "curl",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "5",
+                "--include",
+                "--http1.1",
+                "-H",
+                "Connection: Upgrade",
+                "-H",
+                "Upgrade: websocket",
+                "-H",
+                "Sec-WebSocket-Version: 13",
+                "-H",
+                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+                "http://127.0.0.1:8080/wsagents/",
             ],
             15,
         )
+        ws_text = ws.stdout.decode("utf-8", "replace")
+        ws_status = ws_text.splitlines()[0].strip() if ws_text else ""
+        ws_sentence = "This endpoint is only for use from agent.jar in WebSocket mode"
         tcp = self.exec(name, ["cat", "/proc/net/tcp"], 10).stdout.decode()
         tcp6 = self.exec(name, ["cat", "/proc/net/tcp6"], 10).stdout.decode()
         route = self.exec(name, ["cat", "/proc/net/route"], 10).stdout.decode()
         route6 = self.exec(name, ["cat", "/proc/net/ipv6_route"], 10)
         resolv = self.exec(name, ["cat", "/etc/resolv.conf"], 10).stdout.decode()
-        ports = listen_ports(tcp) | listen_ports(tcp6)
-        ws_line = ws.stdout.decode("utf-8", "replace").strip()
+        devs = self.exec(name, ["ls", "/sys/class/net"], 10).stdout.decode().split()
+        foreign4 = [
+            line.split()[0]
+            for line in route.splitlines()[1:]
+            if line.split() and line.split()[0] != "lo"
+        ]
+        foreign6 = []
+        if route6.returncode == 0:
+            for line in route6.stdout.decode().splitlines():
+                parts = line.split()
+                if parts and parts[-1] != "lo":
+                    foreign6.append(parts[-1])
         return {
             "host_positive": host_before and host_after,
             "inside_negative": inside.returncode != 0,
-            "local_http": local.stdout.decode().strip() == "200",
-            "websocket_status": ws_line[:80],
-            "ports": sorted(ports),
+            "ipv6_host_positive": host6_before and host6_after,
+            "ipv6_inside_negative": inside6.returncode != 0,
+            "gateway_negative": gateway_probe.returncode != 0,
+            "local_http": local.stdout.decode().strip(),
+            "websocket_status": ws_status[:80],
+            "websocket_endpoint": ws_status.startswith("HTTP/1.1 400") and ws_sentence in ws_text,
+            "ports": sorted(listen_ports(tcp) | listen_ports(tcp6)),
+            "interfaces": devs,
             "ipv4_default": ipv4_default(route),
             "ipv6_default": ipv6_default(route6.stdout.decode()) if route6.returncode == 0 else False,
+            "foreign_ipv4": foreign4,
+            "foreign_ipv6": foreign6,
             "nameserver": "nameserver" in resolv,
         }
 
-    def safe_network(self, sample: dict, require_8080: bool) -> bool:
-        ports_ok = sample["ports"] == [8080] if require_8080 else sample["ports"] in ([], [8080])
+    def safe_network(self, sample: dict) -> bool:
         return bool(
             sample["host_positive"]
             and sample["inside_negative"]
-            and sample["local_http"]
-            and sample["websocket_status"].startswith("HTTP/")
+            and sample["ipv6_host_positive"]
+            and sample["ipv6_inside_negative"]
+            and sample["gateway_negative"]
+            and sample["local_http"] == "200"
+            and sample["websocket_endpoint"]
+            and not sample["websocket_status"].startswith(("HTTP/1.1 403", "HTTP/1.1 404"))
+            and sample["interfaces"] == ["lo"]
+            and not sample["foreign_ipv4"]
+            and not sample["foreign_ipv6"]
             and not sample["ipv4_default"]
             and not sample["ipv6_default"]
             and not sample["nameserver"]
-            and ports_ok
+            and sample["ports"] == [8080]
         )
 
     def node_xml(self, name: str, remote_fs: str, label: str) -> bytes:
@@ -1154,15 +1346,23 @@ println("g7-auth-ready")
         if code not in {200, 201, 302, 303}:
             raise GateError(f"trigger {name} returned {code}")
 
-    def wait_build(self, name: str) -> dict:
+    def secret_in_procs(self, name: str, secret: str) -> bool:
+        return secret.encode() in self.proc_blob(name)
+
+    def wait_build(self, name: str, secret: str) -> tuple[dict, bool]:
         deadline = time.time() + 90
+        saw_running_child = False
+        child_clean = False
         while time.time() < deadline:
             code, body = self.http(f"/job/{name}/lastBuild/api/json?tree=building,result,builtOn,number", user="feas-admin")
             if code == 200:
                 data = json.loads(body)
+                if data.get("building") is True:
+                    saw_running_child = True
+                    child_clean = not self.secret_in_procs(self.agent, secret)
                 if data.get("building") is False and data.get("result"):
-                    return data
-            time.sleep(2)
+                    return data, saw_running_child and child_clean
+            time.sleep(1)
         raise GateError(f"{name} timed out")
 
     def artifact(self, name: str) -> bytes:
@@ -1300,24 +1500,37 @@ println("g7-auth-ready")
             mounts,
         )
         time.sleep(20)
-        blob = self.proc_blob(self.neg) + self.logs_blob(self.neg)
-        secret_present = secret.encode() in blob
-        at_path = b"@/run/kiln-g7-neg/secret" in blob
+        cmdline = self.exec(self.neg, ["cat", "/proc/1/cmdline"], 10).stdout
+        environ = self.exec(self.neg, ["cat", "/proc/1/environ"], 10).stdout
+        parts = [item for item in cmdline.split(b"\0") if item]
+        secret_present = secret.encode() in cmdline or secret.encode() in environ
+        expected = [
+            b"-jar",
+            self.agent_jar.encode(),
+            b"-url",
+            b"http://127.0.0.1:8080/",
+            b"-secret",
+            b"@/run/kiln-g7-neg/secret",
+            b"-name",
+            b"kiln-remoting-neg",
+            b"-webSocket",
+            b"-workDir",
+            b"/home/jenkins/agent-neg",
+        ]
+        shape_ok = len(parts) == 12 and parts[0].endswith(b"/bin/java") and parts[1:] == expected
         code, body = self.http(
             "/computer/kiln-remoting-neg/api/json?tree=offline",
             user="feas-admin",
         )
-        offline = json.loads(body).get("offline") is True if code == 200 else None
+        offline = json.loads(body).get("offline") is True if code == 200 else False
         self.run(["podman", "rm", "-f", self.neg], 20)
         destroy(secret_path)
         self.delete_node("kiln-remoting-neg")
-        if secret_present:
-            raise GateError("remoting negative cmdline contained the secret")
-        if offline is True and at_path:
-            return "3386 behavior: -secret @path stayed offline and cmdline kept @path"
-        if offline is False and at_path:
-            return "native -secret @file connected; recorded honestly and not used as the primary path"
-        raise GateError(f"remoting negative offline={offline} at_path={at_path}")
+        if secret_present or not shape_ok or not offline:
+            raise GateError(
+                f"remoting negative secret_in_argv={secret_present} argc={len(parts)} shape_ok={shape_ok} offline={offline}"
+            )
+        return "pinned 3386 kept -secret @path in argv, stayed offline, and did not expose the secret"
 
     def argfile_tokens(self, secret: str, name: str, url: str) -> bytes:
         tokens = [
@@ -1371,15 +1584,43 @@ println("g7-auth-ready")
         argc_ok = len(parts) == 2 and parts[1] == b"@/run/kiln-g7-args/agent.argv"
         return (not present), len(parts), argc_ok
 
-    def mounts_ok(self) -> bool:
-        raw = self.run(["podman", "inspect", self.agent], 20)
+    def mount_inventory(self, name: str, approved: set[str]) -> dict:
+        raw = self.run(["podman", "inspect", name], 20)
+        if raw.returncode != 0:
+            raise GateError(f"inspect failed for {name}")
         meta = json.loads(raw.stdout)[0]
-        mounts = meta.get("Mounts") or []
-        blob = json.dumps(mounts).lower()
-        env = self.exec(self.agent, ["env"], 10).stdout
-        forbidden = ("docker.sock", "podman.sock", "github_token", "actions_runtime_token")
-        env_bad = any(item.encode() in env.lower() for item in ("GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "AWS_SECRET_ACCESS_KEY"))
-        return not any(item in blob for item in forbidden) and not env_bad
+        rows = []
+        unexpected = []
+        runtime_ro = {"/run/.containerenv"}
+        for item in meta.get("Mounts") or []:
+            source = str(item.get("Source") or "")
+            destination = str(item.get("Destination") or "")
+            host_stat = None
+            if source:
+                try:
+                    info = os.lstat(source)
+                    host_stat = {"uid": info.st_uid, "mode": oct(info.st_mode & 0o777)}
+                except OSError:
+                    host_stat = {"uid": None, "mode": None}
+            row = {
+                "type": item.get("Type"),
+                "source": source,
+                "destination": destination,
+                "mode": item.get("Mode"),
+                "rw": item.get("RW"),
+                "options": item.get("Options"),
+                "propagation": item.get("Propagation"),
+                "host_stat": host_stat,
+            }
+            rows.append(row)
+            lowered = source.lower()
+            control_socket = lowered.endswith("docker.sock") or lowered.endswith("podman.sock") or "/var/run/docker.sock" in lowered
+            allowed = destination in approved or (destination in runtime_ro and item.get("RW") is False)
+            if control_socket or not allowed:
+                unexpected.append(destination or source)
+        env = self.exec(name, ["env"], 10).stdout.lower()
+        env_bad = any(item.encode() in env for item in ("github_token", "actions_runtime_token", "aws_secret_access_key"))
+        return {"ok": not unexpected and not env_bad, "unexpected": unexpected, "mounts": rows, "env_bad": env_bad}
 
     def queue_case(self) -> dict:
         self.create_job("kiln-g7-roam", self.freestyle("echo roam-not-expected", None, True, False))
@@ -1411,10 +1652,10 @@ println("g7-auth-ready")
             "not_built": running == 404,
         }
 
-    def pinned_job(self, name: str, command: str, assigned: str, marker: bytes) -> dict:
+    def pinned_job(self, name: str, command: str, assigned: str, marker: bytes, secret: str) -> dict:
         self.create_job(name, self.freestyle(command, assigned, False, True))
         self.trigger(name)
-        result = self.wait_build(name)
+        result, child_clean = self.wait_build(name, secret)
         artifact = self.artifact(name)
         console_code, console = self.http(f"/job/{name}/lastBuild/consoleText", user="feas-admin")
         self.guard.assert_clean("console", console.decode("utf-8", "replace"))
@@ -1424,17 +1665,34 @@ println("g7-auth-ready")
             "artifact": artifact.strip() == marker,
             "console": console_code == 200 and marker in console,
             "workspace": self.workspace_marker(name, marker),
+            "child_secret_absent": child_clean,
         }
 
-    def remove_owned(self) -> None:
+    def remove_owned(self) -> dict:
+        errors = []
         for name in self.containers:
-            self.run(["podman", "rm", "-f", name], 30)
+            proc = self.run(["podman", "rm", "-f", name], 30)
+            if proc.returncode != 0:
+                errors.append(f"rm {name} rc={proc.returncode}")
+        proc = self.run(["podman", "ps", "-a", "--format", "{{.Names}}"], 20)
+        if proc.returncode != 0:
+            errors.append("podman ps failed")
+            names = ["ps-failed"]
+        else:
+            names = [item for item in proc.stdout.decode().split() if item.startswith("kiln-g7-")]
+        secret_left = []
         for relative in ("auth", "args", "neg-args", "cleanup-args", "jnlp", "jenkins-home", "work", "work-neg", "work-cleanup"):
             path = self.private / relative
-            if path.is_dir():
-                shutil.rmtree(path, ignore_errors=True)
-            elif path.exists():
-                destroy(path)
+            try:
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                elif path.exists() or path.is_symlink():
+                    destroy(path)
+            except OSError as exc:
+                errors.append(f"{relative}: {exc}")
+            if path.exists() or path.is_symlink():
+                secret_left.append(relative)
+        return {"remaining_containers": names, "secret_dirs_left": secret_left, "errors": errors}
 
     def execute(self) -> int:
         os.umask(0o077)
@@ -1488,36 +1746,41 @@ println("g7-auth-ready")
                         "java": inbound["java"],
                         "remoting": inbound["remoting"],
                         "remoting_build": inbound["build"],
+                        "java_build_id": inbound["java_build_id"],
                     }
                 ),
                 "registry manifest hash, podman pull by digest, war sha256",
             )
-            self.phase = "G7-CLEANUP-FAIL"
-            self.check_time("cleanup")
-            self.cleanup_fail()
-            self.ledger.record(
-                "G7-CLEANUP-FAIL",
-                "PASS",
-                "failed start removes the container-visible private file",
-                "projection was visible, then the timeout path removed it inside and on the host",
-                "direct java @argfile; destroy on timeout",
-            )
+            self.phase = "G7-ROOTLESS-START"
             self.write_auth()
             self.write_controller_home()
-            self.phase = "G7-ROOTLESS-START"
             self.check_time("controller")
             self.start_controller()
             self.wait_ready()
             self.wait_security()
             device, ip = host_ipv4()
+            gateway = host_gateway()
+            ipv6, ipv6_scope = host_ipv6()
             listener = OutsideListener(ip)
+            listener6 = OutsideListener(ipv6, socket.AF_INET6, ipv6_scope)
             try:
                 self.phase = "G7-NET-CLOSED"
-                before = self.network_sample(self.controller, listener)
+                before = self.network_sample(self.controller, listener, listener6, gateway)
+                if not self.safe_network(before):
+                    raise GateError("closed-network precondition failed before secret injection")
                 controller_fs = self.rootfs(
                     self.controller,
                     {"/var/jenkins_home", "/tmp", "/dev/shm"},
                     "/var/jenkins_home/.g7-private/probe",
+                )
+                self.phase = "G7-CLEANUP-FAIL"
+                self.cleanup_fail()
+                self.ledger.record(
+                    "G7-CLEANUP-FAIL",
+                    "PASS",
+                    "bounded failed start stays offline and removes the private file",
+                    "wrong-secret node stayed offline before and after container-visible unlink",
+                    "direct java @argfile on kiln-cleanup-fail; destroy on the failure path",
                 )
                 self.phase = "G7-API"
                 self.create_node("kiln-managed-1", "/home/jenkins/agent", "kiln-slot-jdk-maven")
@@ -1547,7 +1810,7 @@ println("g7-auth-ready")
                     destroy(path)
                     raise GateError("positive agent did not come online")
                 clean, argc, argc_ok = self.surfaces_clean(self.agent, secret)
-                after = self.network_sample(self.agent, listener)
+                after = self.network_sample(self.agent, listener, listener6, gateway)
                 agent_fs = self.rootfs(self.agent, {"/home/jenkins/agent", "/tmp", "/dev/shm"}, "/home/jenkins/agent/probe")
                 existed = self.exec(self.agent, ["test", "-f", "/run/kiln-g7-args/agent.argv"], 10).returncode == 0
                 destroy(path)
@@ -1560,16 +1823,19 @@ println("g7-auth-ready")
                     "echo pinned-ok | tee marker.txt\nsleep 3",
                     "kiln-managed-1",
                     b"pinned-ok",
+                    secret,
                 )
                 extra = self.pinned_job(
                     "kiln-g7-extra",
                     "echo extra-label-ok | tee marker.txt\nsleep 3",
                     "kiln-slot-jdk-maven",
                     b"extra-label-ok",
+                    secret,
                 )
             finally:
                 listener.close()
-            net_ok = self.safe_network(before, True) and self.safe_network(after, True)
+                listener6.close()
+            net_ok = self.safe_network(before) and self.safe_network(after)
             self.ledger.record(
                 "G7-NET-CLOSED",
                 "PASS" if net_ok else "FAIL",
@@ -1592,12 +1858,20 @@ println("g7-auth-ready")
                 json.dumps({"controller_uid": controller_fs["uid"], "agent_uid": agent_fs["uid"]}),
                 "podman --userns=keep-id:uid=1000,gid=1000 --user 1000:1000",
             )
+            controller_mounts = self.mount_inventory(
+                self.controller,
+                {"/var/jenkins_home", "/run/kiln-g7-auth", "/etc/hosts", "/etc/resolv.conf", "/etc/hostname", "/tmp", "/dev/shm"},
+            )
+            agent_mounts = self.mount_inventory(
+                self.agent,
+                {"/home/jenkins/agent", "/run/kiln-g7-args", "/etc/hosts", "/etc/resolv.conf", "/etc/hostname", "/tmp", "/dev/shm"},
+            )
             self.ledger.record(
                 "G7-MOUNTS",
-                "PASS" if self.mounts_ok() else "FAIL",
-                "no Podman, Docker, or Actions credential mounts",
-                "safe mount and environment names were checked",
-                "podman inspect Mounts names and env key presence",
+                "PASS" if controller_mounts["ok"] and agent_mounts["ok"] else "FAIL",
+                "exact controller and agent mount inventory",
+                json.dumps({"controller": controller_mounts, "agent": agent_mounts}),
+                "podman inspect Mounts source, destination, type, options, owner, and mode",
             )
             arg_ok = (
                 stat_text.startswith("1000 600")
@@ -1610,6 +1884,8 @@ println("g7-auth-ready")
                 and still
                 and exact["result"] == "SUCCESS"
                 and exact["builtOn"] == "kiln-managed-1"
+                and exact["child_secret_absent"]
+                and extra["child_secret_absent"]
             )
             self.ledger.record(
                 "G7-ARGFILE",
@@ -1653,7 +1929,13 @@ println("g7-auth-ready")
                 ),
                 "queue API as feas-build and feas-lifecycle; assignedNode exact and extra label",
             )
-            capability_ok = exact["artifact"] and exact["console"] and exact["workspace"] and exact["result"] == "SUCCESS"
+            capability_ok = (
+                exact["artifact"]
+                and exact["console"]
+                and exact["workspace"]
+                and exact["result"] == "SUCCESS"
+                and exact["child_secret_absent"]
+            )
             self.phase = "G7-CAPABILITY"
             self.ledger.record(
                 "G7-CAPABILITY",
@@ -1673,25 +1955,26 @@ println("g7-auth-ready")
             message = tail(self.guard, str(exc).encode(), 500)
             self.note(f"gate stopped during {self.phase}: {message}")
             self.aborted = message
-            if self.phase and self.phase not in self.ledger.rows and self.phase not in FIXED:
+            if self.phase and self.phase not in FIXED:
                 status = "BLOCKED" if "rootless" in message or "Docker socket" in message else "FAIL"
-                self.ledger.record(self.phase, status, "completed measurement", message)
+                self.ledger.force(self.phase, status, "completed measurement", message)
         finally:
             try:
-                self.remove_owned()
-                proc = self.run(["podman", "ps", "-a", "--format", "{{.Names}}"], 20)
-                names = [item for item in proc.stdout.decode().split() if item.startswith("kiln-g7-")]
-                secret_left = any((self.private / name).exists() for name in ("auth", "args", "jnlp", "jenkins-home"))
-                self.ledger.record(
+                removed = self.remove_owned()
+                teardown_ok = not removed["remaining_containers"] and not removed["secret_dirs_left"] and not removed["errors"]
+                self.ledger.force(
                     "G7-TEARDOWN",
-                    "PASS" if not names and not secret_left else "FAIL",
+                    "PASS" if teardown_ok else "FAIL",
                     "owned containers and private secret files are gone",
-                    json.dumps({"remaining_containers": names, "secret_dirs_left": secret_left}),
-                    "podman rm -f named containers; unlink private files",
-                    "workflow always-step also removes the test user",
+                    json.dumps(removed),
+                    "podman rm -f and podman ps must both succeed",
+                    "workflow always-step rechecks the same names and exits non-zero on failure",
                 )
+                if not teardown_ok:
+                    self.aborted = self.aborted or "teardown failed"
             except Exception as exc:  # noqa: BLE001
-                self.ledger.record("G7-TEARDOWN", "FAIL", "teardown", tail(self.guard, str(exc).encode()))
+                self.aborted = self.aborted or "teardown failed"
+                self.ledger.force("G7-TEARDOWN", "FAIL", "teardown", tail(self.guard, str(exc).encode()))
             self.phase = "G7-PEER-UID"
             self.peer_result()
             self.ledger.fill_missing(self.aborted or "not reached")
@@ -1714,7 +1997,7 @@ println("g7-auth-ready")
             os.chmod(ledger_path, 0o644)
             for row in body["tests"]:
                 self.note(f"{row['testID']} {row['status']} {str(row.get('observed', ''))[:240]}")
-        return 1 if self.ledger.failed() else 0
+        return 1 if self.ledger.failed(self.aborted) else 0
 
     def host_and_privilege(self) -> None:
         groups = set(subprocess.run(["id", "-nG"], capture_output=True, text=True, check=False).stdout.split())
