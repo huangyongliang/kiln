@@ -1,0 +1,238 @@
+name: jenkins-g7-isolation
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jenkins-g7-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  g7-isolation:
+    name: g7-isolation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Trusted setup
+        run: |
+          set -euo pipefail
+          # Trusted sudo boundary: this workflow file only. Checked-out scripts
+          # are never executed as root. G7-EGRESS is not configured here.
+          export DEBIAN_FRONTEND=noninteractive
+          umask 022
+          sudo install -d -m 0755 /var/lib/kiln-g7-apt-empty /tmp/kiln-g7-debs
+          sudo tee /etc/apt/sources.list.d/kiln-g7-official.list >/dev/null << 'EOF'
+          deb http://archive.ubuntu.com/ubuntu noble main universe
+          deb http://archive.ubuntu.com/ubuntu noble-updates main universe
+          deb http://security.ubuntu.com/ubuntu noble-security main universe
+          EOF
+          apt_opts=(
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/kiln-g7-official.list
+            -o Dir::Etc::sourceparts=/var/lib/kiln-g7-apt-empty
+            -o APT::Install-Recommends=false
+          )
+          sudo apt-get update "${apt_opts[@]}"
+          (
+            cd /tmp/kiln-g7-debs
+            sudo apt-get download "${apt_opts[@]}" \
+              podman=4.9.3+ds1-1ubuntu0.2 \
+              conmon=2.1.10+ds1-1build2 \
+              crun=1.14.1-1 \
+              golang-github-containers-common=0.57.4+ds1-2ubuntu0.2 \
+              uidmap=1:4.13+dfsg1-4ubuntu3.2 \
+              libsubid4=1:4.13+dfsg1-4ubuntu3.2 \
+              slirp4netns=1.2.1-1build2 \
+              containernetworking-plugins=1.1.1+ds1-3ubuntu0.24.04.3 \
+              iptables=1.8.10-3ubuntu2 \
+              catatonit=0.1.7-1
+            sha256sum -c << 'EOF'
+          e5c1c37e387ed14c352a744a75fbb79fb2f82573ca7bf36886e3b7333fc9ef1a  podman_4.9.3+ds1-1ubuntu0.2_amd64.deb
+          4bf1eebadfd32246d01e35ccd96d4c73af5103dfa4384a851b7b9b25401802db  conmon_2.1.10+ds1-1build2_amd64.deb
+          2263368dabe3d126189dffd9da7cc31159d8766c9a9a2e3ca8231ad3fcc11109  crun_1.14.1-1_amd64.deb
+          dae82b120f8a1b429c0a63a2ccd2ff3c91563f97e2188b1fbaf78ba76f7fb89c  golang-github-containers-common_0.57.4+ds1-2ubuntu0.2_all.deb
+          a80cb7f72dd18c73cbb0b07b7fbe855504f26bfafae072a9b3d125c89d499b9e  uidmap_4.13+dfsg1-4ubuntu3.2_amd64.deb
+          ba97fd28c53560a8d2a2261e8f75a7ab4112535b12f9fe1d50970c30051da0da  libsubid4_4.13+dfsg1-4ubuntu3.2_amd64.deb
+          3fc72a72a376a3ad3b439434bc87d89d245f9d54a1d540e8a06b74d4e2385e0a  slirp4netns_1.2.1-1build2_amd64.deb
+          0ffc31ebfa430615d2e35ad7cea6b3717faa8fdbc02debd773625cad83fcdd65  containernetworking-plugins_1.1.1+ds1-3ubuntu0.24.04.3_amd64.deb
+          d341e8ffc42ca035f5aa0fd9a798c8d2b2edb019225dc11f4dac16edf9c57840  iptables_1.8.10-3ubuntu2_amd64.deb
+          fb815ec9de328c7e36c7a98354882160693af92d9f00ecaf9028ce8862622d3d  catatonit_0.1.7-1_amd64.deb
+          EOF
+          )
+          sudo apt-get install -y --no-install-recommends "${apt_opts[@]}" /tmp/kiln-g7-debs/*.deb
+          if [[ ! -u /usr/bin/newuidmap || ! -u /usr/bin/newgidmap ]]; then
+            echo "uidmap helpers are not setuid; refusing to change their mode"
+            exit 1
+          fi
+          id kiln-g7 >/dev/null 2>&1 || sudo useradd --create-home --shell /usr/sbin/nologin --user-group kiln-g7
+          id kiln-g7-peer-bad >/dev/null 2>&1 || sudo useradd --create-home --shell /usr/sbin/nologin --user-group kiln-g7-peer-bad
+          for user in kiln-g7 kiln-g7-peer-bad; do
+            if id -nG "$user" | tr ' ' '\n' | grep -qx docker; then
+              echo "$user is in the docker group"
+              exit 1
+            fi
+            if sudo -u "$user" -- sudo -n true; then
+              echo "$user has general sudo"
+              exit 1
+            fi
+          done
+          sudo python3 - << 'PY'
+          from pathlib import Path
+          path = Path("/etc/subuid")
+          gid_path = Path("/etc/subgid")
+          ranges = []
+          if path.exists():
+              for line in path.read_text().splitlines():
+                  parts = line.split(":")
+                  if len(parts) != 3:
+                      continue
+                  base, length = int(parts[1]), int(parts[2])
+                  ranges.append((base, base + length))
+          start = 200000
+          while True:
+              end = start + 65536
+              if all(end <= base or start >= stop for base, stop in ranges):
+                  break
+              start = max(stop for base, stop in ranges if not (end <= base or start >= stop))
+          line = f"kiln-g7:{start}:65536\n"
+          existing = path.read_text() if path.exists() else ""
+          if not any(item.startswith("kiln-g7:") for item in existing.splitlines()):
+              path.write_text(existing + line)
+          existing_gid = gid_path.read_text() if gid_path.exists() else ""
+          if not any(item.startswith("kiln-g7:") for item in existing_gid.splitlines()):
+              gid_path.write_text(existing_gid + line)
+          print(f"subuid {line.strip()}")
+          PY
+          uid="$(id -u kiln-g7)"
+          sudo install -d -m 700 -o kiln-g7 -g kiln-g7 "/run/user/${uid}"
+          sudo install -d -m 700 -o kiln-g7 -g kiln-g7 /home/kiln-g7/private /home/kiln-g7/private/tmp
+          sudo install -d -m 1777 /tmp/kiln-g7-peer
+          sudo -u kiln-g7 -- python3 - << 'PY'
+          import json
+          from pathlib import Path
+          Path("/home/kiln-g7/private/setup.json").write_text(json.dumps({
+              "sudo_used_for": ["apt-get", "useradd", "subuid", "runtime-dir", "user-switch"],
+              "workload_user": "kiln-g7",
+              "peer_user": "kiln-g7-peer-bad",
+              "general_sudo": False,
+              "docker_group": False,
+          }) + "\n")
+          PY
+          echo "runner_kernel=$(uname -r)"
+
+      - name: Isolation gate
+        env:
+          KILN_G7_LOCK: ${{ github.workspace }}/ci/jenkins-g7/input.lock.json
+          KILN_G7_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          KILN_G7_GITHUB_SHA: ${{ github.sha }}
+          KILN_G7_REF: ${{ github.ref }}
+          KILN_G7_RUN_ID: ${{ github.run_id }}
+          KILN_G7_RUN_ATTEMPT: ${{ github.run_attempt }}
+          KILN_G7_REPOSITORY: ${{ github.repository }}
+          KILN_G7_RUNNER_NAME: ${{ runner.name }}
+          KILN_G7_RUNNER_OS: ${{ runner.os }}
+          KILN_G7_RUNNER_ARCH: ${{ runner.arch }}
+          KILN_G7_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          KILN_G7_DEB_DIR: /tmp/kiln-g7-debs
+        run: |
+          set -euo pipefail
+          as_user() {
+            local user="$1"
+            shift
+            local home uid
+            home="$(getent passwd "$user" | cut -d: -f6)"
+            uid="$(id -u "$user")"
+            sudo -u "$user" -- env -i \
+              HOME="$home" \
+              USER="$user" \
+              LOGNAME="$user" \
+              PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+              LANG="C.UTF-8" \
+              XDG_RUNTIME_DIR="/run/user/${uid}" \
+              TMPDIR="${home}/private/tmp" \
+              KILN_G7_LOCK="$KILN_G7_LOCK" \
+              KILN_G7_HEAD_SHA="$KILN_G7_HEAD_SHA" \
+              KILN_G7_GITHUB_SHA="$KILN_G7_GITHUB_SHA" \
+              KILN_G7_REF="$KILN_G7_REF" \
+              KILN_G7_RUN_ID="$KILN_G7_RUN_ID" \
+              KILN_G7_RUN_ATTEMPT="$KILN_G7_RUN_ATTEMPT" \
+              KILN_G7_REPOSITORY="$KILN_G7_REPOSITORY" \
+              KILN_G7_RUNNER_NAME="$KILN_G7_RUNNER_NAME" \
+              KILN_G7_RUNNER_OS="$KILN_G7_RUNNER_OS" \
+              KILN_G7_RUNNER_ARCH="$KILN_G7_RUNNER_ARCH" \
+              KILN_G7_RUNNER_ENVIRONMENT="$KILN_G7_RUNNER_ENVIRONMENT" \
+              KILN_G7_IMAGE_VERSION="${ImageVersion:-}" \
+              KILN_G7_IMAGE_OS="${ImageOS:-}" \
+              KILN_G7_DEB_DIR="$KILN_G7_DEB_DIR" \
+              KILN_G7_PRIVATE="/home/kiln-g7/private" \
+              KILN_G7_PEER_DIR="/tmp/kiln-g7-peer" \
+              "$@"
+          }
+          sudo install -d -m 700 -o kiln-g7-peer-bad -g kiln-g7-peer-bad /home/kiln-g7-peer-bad/private /home/kiln-g7-peer-bad/private/tmp
+          set +e
+          as_user kiln-g7 python3 -B ci/jenkins-g7/g7_gate.py peer-serve &
+          peer_pid=$!
+          ready=0
+          for _ in $(seq 1 50); do
+            if [[ -f /tmp/kiln-g7-peer/ready ]]; then
+              ready=1
+              break
+            fi
+            sleep 0.1
+          done
+          if [[ "$ready" -ne 1 ]]; then
+            echo "peer socket was not ready"
+            kill "$peer_pid" >/dev/null 2>&1 || true
+            wait "$peer_pid" >/dev/null 2>&1 || true
+            exit 1
+          fi
+          as_user kiln-g7 python3 -B ci/jenkins-g7/g7_gate.py peer-client authorized
+          as_user kiln-g7-peer-bad python3 -B ci/jenkins-g7/g7_gate.py peer-client unauthorized
+          as_user kiln-g7-peer-bad python3 -B ci/jenkins-g7/g7_gate.py peer-client dac
+          wait "$peer_pid"
+          as_user kiln-g7 python3 -B ci/jenkins-g7/g7_gate.py run
+          rc=$?
+          set -e
+          if [[ -f /home/kiln-g7/private/ledger.json ]]; then
+            sudo -u kiln-g7 -- cat /home/kiln-g7/private/ledger.json > "${RUNNER_TEMP}/kiln-g7-ledger.json"
+            chmod 644 "${RUNNER_TEMP}/kiln-g7-ledger.json"
+          fi
+          exit "$rc"
+
+      - name: Upload sanitized ledger
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kiln-g7-ledger
+          path: ${{ runner.temp }}/kiln-g7-ledger.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Teardown owned resources
+        if: always()
+        run: |
+          set +e
+          if id kiln-g7 >/dev/null 2>&1; then
+            uid="$(id -u kiln-g7)"
+            sudo -u kiln-g7 -- env -i HOME=/home/kiln-g7 USER=kiln-g7 LOGNAME=kiln-g7 \
+              PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+              XDG_RUNTIME_DIR="/run/user/${uid}" \
+              podman rm -f kiln-g7-controller kiln-g7-agent kiln-g7-neg kiln-g7-cleanup >/dev/null 2>&1
+            sudo rm -rf "/run/user/${uid}" /home/kiln-g7/private
+            sudo pkill -u kiln-g7 >/dev/null 2>&1 || true
+            sudo userdel --remove kiln-g7 >/dev/null 2>&1 || true
+          fi
+          if id kiln-g7-peer-bad >/dev/null 2>&1; then
+            sudo pkill -u kiln-g7-peer-bad >/dev/null 2>&1 || true
+            sudo userdel --remove kiln-g7-peer-bad >/dev/null 2>&1 || true
+          fi
+          sudo rm -rf /tmp/kiln-g7-peer /tmp/kiln-g7-debs /etc/apt/sources.list.d/kiln-g7-official.list
+          exit 0
