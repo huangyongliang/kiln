@@ -1684,8 +1684,10 @@ done
             content_type="application/xml",
             use_crumb=True,
         )
-        if form != 400 or b"This page expects a form submission" not in form_body:
-            raise GateError(f"doCreateItem returned {form}")
+        # XML is not a form field, so Stapler reports that nothing was submitted.
+        if form != 400 or b"Nothing is submitted" not in form_body:
+            kind = "nothing_submitted" if b"Nothing is submitted" in form_body else "other"
+            raise GateError(f"doCreateItem status {form} rejection {kind} body_len {len(form_body)}")
         code, body = self.http("/computer/kiln-managed-1/config.xml", user="feas-lifecycle")
         if code != 200:
             raise GateError(f"config.xml returned {code}")
