@@ -953,19 +953,9 @@ println("g7-auth-ready")
         if proc.returncode != 0:
             raise GateError("controller start failed: " + tail(self.guard, proc.stderr))
 
-    def start_java(
-        self,
-        name: str,
-        image_args: list[str],
-        network: str,
-        userns: str,
-        mounts: list[str],
-        extra_env: list[str] | None = None,
-    ) -> None:
+    def start_java(self, name: str, image_args: list[str], network: str, userns: str, mounts: list[str]) -> None:
         cmd = self.podman_base(name, self.inbound_image, network, userns)
         cmd += ["-e", "HOME=/home/jenkins/agent"]
-        for item in extra_env or []:
-            cmd += ["-e", item]
         for mount in mounts:
             cmd += ["--mount", mount]
         for mount in self.common_mounts(self.private / "etc" / "hostname-agent"):
@@ -1664,9 +1654,10 @@ done
                     kind = "blank"
                 break
         agent = self.agent_state()
+        cause = self.offline_class()
         return (
             f"queue={kind} offline={offline} idle={idle} executors={executors} "
-            f"node_http={code} queue_http={queue_code} {agent}"
+            f"node_http={code} queue_http={queue_code} cause={cause} {agent}"
         )
 
     def agent_state(self) -> str:
@@ -1903,7 +1894,6 @@ done
             "container:kiln-g7-controller",
             "container:kiln-g7-controller",
             mounts,
-            ["BUILD_ID=dontKillMe"],
         )
         return path
 
@@ -1926,18 +1916,6 @@ done
             if token in lowered:
                 return token
         return "text" if description else "empty"
-
-    def reconnect_agent(self, secret: str) -> str:
-        if self.wait_online("kiln-managed-1", 5):
-            return "kept"
-        kind = self.offline_class()
-        removed = self.run(["podman", "rm", "-f", self.agent], 30)
-        if removed.returncode != 0:
-            raise GateError(f"agent reconnect remove failed rc={removed.returncode} {kind}")
-        self.start_positive(secret)
-        if not self.wait_online("kiln-managed-1", 90):
-            raise GateError(f"agent reconnect failed {kind} {self.agent_state()}")
-        return f"restarted:{kind}"
 
     def wait_online(self, name: str, timeout: int) -> bool:
         deadline = time.time() + timeout
@@ -2308,7 +2286,6 @@ done
                     b"pinned-ok",
                     secret,
                 )
-                self.agent_channel = self.reconnect_agent(secret)
                 extra = self.pinned_job(
                     "kiln-g7-extra",
                     "echo extra-label-ok | tee marker.txt\nsleep 3",
@@ -2403,7 +2380,6 @@ done
                         "exact": exact["builtOn"],
                         "extra": extra["builtOn"],
                         "builtin_executors": "0 as fixture technique only",
-                        "agent_channel": getattr(self, "agent_channel", "unread"),
                     }
                 ),
                 "queue API as feas-build and feas-lifecycle; assignedNode exact and extra label",
