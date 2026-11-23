@@ -1907,6 +1907,38 @@ done
         )
         return path
 
+    def offline_class(self) -> str:
+        code, body = self.http(
+            "/computer/kiln-managed-1/api/json?tree=offline,offlineCause[description]",
+            user="feas-admin",
+        )
+        if code != 200:
+            return f"http{code}"
+        data = json.loads(body)
+        if data.get("offline") is not True:
+            return "online"
+        description = str((data.get("offlineCause") or {}).get("description") or "")
+        match = re.search(r"([A-Za-z_][A-Za-z0-9_]*Exception)", description)
+        if match:
+            return match.group(1)
+        lowered = description.lower()
+        for token in ("broken", "terminated", "disconnect", "offline"):
+            if token in lowered:
+                return token
+        return "text" if description else "empty"
+
+    def reconnect_agent(self, secret: str) -> str:
+        if self.wait_online("kiln-managed-1", 5):
+            return "kept"
+        kind = self.offline_class()
+        removed = self.run(["podman", "rm", "-f", self.agent], 30)
+        if removed.returncode != 0:
+            raise GateError(f"agent reconnect remove failed rc={removed.returncode} {kind}")
+        self.start_positive(secret)
+        if not self.wait_online("kiln-managed-1", 90):
+            raise GateError(f"agent reconnect failed {kind} {self.agent_state()}")
+        return f"restarted:{kind}"
+
     def wait_online(self, name: str, timeout: int) -> bool:
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -2276,6 +2308,7 @@ done
                     b"pinned-ok",
                     secret,
                 )
+                self.agent_channel = self.reconnect_agent(secret)
                 extra = self.pinned_job(
                     "kiln-g7-extra",
                     "echo extra-label-ok | tee marker.txt\nsleep 3",
@@ -2370,6 +2403,7 @@ done
                         "exact": exact["builtOn"],
                         "extra": extra["builtOn"],
                         "builtin_executors": "0 as fixture technique only",
+                        "agent_channel": getattr(self, "agent_channel", "unread"),
                     }
                 ),
                 "queue API as feas-build and feas-lifecycle; assignedNode exact and extra label",
