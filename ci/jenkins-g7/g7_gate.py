@@ -331,15 +331,19 @@ def ipv4_default(text: str) -> bool:
 
 
 def ipv6_default(text: str) -> bool:
+    # RTF_REJECT marks the kernel's unreachable ::/0 sink. A closed namespace has
+    # that route on lo and no forwardable default route.
+    reject = 0x0200
     for line in text.splitlines():
         parts = line.split()
-        if len(parts) < 2:
+        if len(parts) < 10:
             continue
         try:
             prefix = int(parts[1], 16)
+            flags = int(parts[8], 16)
         except ValueError:
             continue
-        if set(parts[0]) <= {"0"} and prefix == 0:
+        if set(parts[0]) <= {"0"} and prefix == 0 and not flags & reject:
             return True
     return False
 
@@ -1196,15 +1200,25 @@ done
         )
         error = proc.stderr.decode("utf-8", "replace").lower()
         http_code = proc.stdout.decode().strip()
-        isolated = proc.returncode in {7, 28} and http_code in {"", "000"} and any(
-            phrase in error
-            for phrase in (
-                "network is unreachable",
-                "no route to host",
-                "connection timed out",
-            )
+        unreachable = (
+            "network is unreachable",
+            "network unreachable",
+            "no route to host",
+            "host is unreachable",
         )
-        return {"isolated": isolated, "returncode": proc.returncode, "http_code": http_code}
+        timed_out = ("connection timed out", "operation timed out")
+        reason = "other"
+        if proc.returncode in {7, 28} and http_code in {"", "000"}:
+            if any(phrase in error for phrase in unreachable):
+                reason = "unreachable"
+            elif any(phrase in error for phrase in timed_out):
+                reason = "timeout"
+        return {
+            "isolated": reason in {"unreachable", "timeout"},
+            "returncode": proc.returncode,
+            "http_code": http_code,
+            "reason": reason,
+        }
 
     def network_sample(
         self,
@@ -1305,6 +1319,52 @@ done
             "foreign_ipv6": foreign6,
             "nameserver": (not resolv_read_ok) or ("nameserver" in resolv),
         }
+
+    def network_gap(self, sample: dict) -> str:
+        failed = []
+        for name in (
+            "host_positive",
+            "inside_negative",
+            "ipv6_host_positive",
+            "ipv6_inside_negative",
+            "gateway_absent",
+            "route_read_ok",
+            "route6_read_ok",
+            "resolv_read_ok",
+            "listeners_read_ok",
+            "interfaces_read_ok",
+            "websocket_endpoint",
+        ):
+            if not sample[name]:
+                failed.append(name)
+        if sample["local_http"] != "200":
+            failed.append("local_http")
+        if sample["websocket_status"].startswith(("HTTP/1.1 403", "HTTP/1.1 404")):
+            failed.append("websocket_forbidden")
+        if sample["interfaces"] != ["lo"]:
+            failed.append("interfaces")
+        if sample["foreign_ipv4"] or sample["foreign_ipv6"]:
+            failed.append("foreign_route")
+        if sample["ipv4_default"] or sample["ipv6_default"]:
+            failed.append("default_route")
+        if sample["nameserver"]:
+            failed.append("nameserver")
+        if sample["ports"] != [8080]:
+            failed.append("ports")
+        return json.dumps(
+            {
+                "failed": failed,
+                "inside": sample["inside_negative_detail"],
+                "inside6": sample["ipv6_negative_detail"],
+                "local_http": sample["local_http"],
+                "websocket_status": sample["websocket_status"],
+                "interfaces": sample["interfaces"],
+                "ports": sample["ports"],
+                "foreign_ipv4": sample["foreign_ipv4"],
+                "foreign_ipv6": sample["foreign_ipv6"],
+            },
+            sort_keys=True,
+        )
 
     def safe_network(self, sample: dict) -> bool:
         return bool(
@@ -1978,7 +2038,9 @@ done
                 self.phase = "G7-NET-CLOSED"
                 before = self.network_sample(self.controller, listener, listener6, gateway)
                 if not self.safe_network(before):
-                    raise GateError("closed-network precondition failed before secret injection")
+                    raise GateError(
+                        "closed-network precondition failed before secret injection: " + self.network_gap(before)
+                    )
                 controller_fs = self.rootfs(
                     self.controller,
                     {"/var/jenkins_home", "/tmp", "/dev/shm"},
