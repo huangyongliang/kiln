@@ -367,7 +367,9 @@ def classify_connect(returncode: int, http_code: str, error: str, direct: bool) 
     proxy = "proxy" in text
     reason = "other"
     if direct and not proxy and returncode in {7, 28} and http_code in {"", "000"}:
-        if any(
+        # Curl's non-verbose line is the generic "Couldn't connect to server".
+        # The verbose "Immediate connect fail" line carries the OS errno text.
+        if "immediate connect fail" in text and any(
             phrase in text
             for phrase in (
                 "network is unreachable",
@@ -1263,6 +1265,7 @@ done
         proc = self.direct_curl(
             name,
             [
+                "--verbose",
                 "--connect-timeout",
                 "2",
                 "--max-time",
