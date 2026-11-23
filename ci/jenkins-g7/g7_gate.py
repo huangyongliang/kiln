@@ -330,6 +330,65 @@ def ipv4_default(text: str) -> bool:
     return False
 
 
+PROXY_ENV = (
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "ftp_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "FTP_PROXY",
+    "NO_PROXY",
+    "socks_proxy",
+    "SOCKS_PROXY",
+    "socks5_proxy",
+    "SOCKS5_PROXY",
+)
+
+
+def direct_curl_argv(args: list[str]) -> list[str]:
+    # -q is curl's first argument, so a curlrc cannot set a proxy. An empty
+    # --proxy and --noproxy * are repeated after the caller arguments so a
+    # config file cannot turn the probe back into a proxied request. env -u
+    # removes proxy variables for this process only.
+    command = ["env"]
+    for name in PROXY_ENV:
+        command.extend(["-u", name])
+    command.extend(["curl", "-q", "--proxy", "", "--noproxy", "*"])
+    command.extend(args)
+    command.extend(["--proxy", "", "--noproxy", "*"])
+    return command
+
+
+def classify_connect(returncode: int, http_code: str, error: str, direct: bool) -> dict:
+    text = error.lower()
+    proxy = "proxy" in text
+    reason = "other"
+    if direct and not proxy and returncode in {7, 28} and http_code in {"", "000"}:
+        if any(
+            phrase in text
+            for phrase in (
+                "network is unreachable",
+                "network unreachable",
+                "no route to host",
+                "host is unreachable",
+            )
+        ):
+            reason = "unreachable"
+        elif any(phrase in text for phrase in ("connection timed out", "operation timed out")):
+            reason = "timeout"
+    return {
+        "isolated": reason in {"unreachable", "timeout"},
+        "returncode": returncode,
+        "http_code": http_code,
+        "reason": reason,
+        "direct": direct,
+        "proxy": proxy,
+    }
+
+
 def ipv6_default(text: str) -> bool:
     # RTF_REJECT marks the kernel's unreachable ::/0 sink. A closed namespace has
     # that route on lo and no forwardable default route.
@@ -559,6 +618,7 @@ class Gate:
             "--unsetenv=JAVA_TOOL_OPTIONS",
             "--unsetenv=JDK_JAVA_OPTIONS",
             "--unsetenv=_JAVA_OPTIONS",
+            *[f"--unsetenv={name}" for name in PROXY_ENV],
             "--tmpfs",
             "/tmp:rw,nosuid,nodev,mode=1777,size=268435456",
             "--tmpfs",
@@ -921,6 +981,7 @@ println("g7-auth-ready")
         lines = [
             "silent",
             "show-error",
+            "noproxy = \"*\"",
             "max-time = 20",
             'output = "/var/jenkins_home/.g7-private/resp-body"',
             'write-out = "%{http_code}"',
@@ -945,7 +1006,11 @@ println("g7-auth-ready")
             lines.append('data-binary = "@/var/jenkins_home/.g7-private/req-body"')
         write_private(private / "curl.cfg", ("\n".join(lines) + "\n").encode())
         try:
-            proc = self.exec(self.controller, ["curl", "--config", "/var/jenkins_home/.g7-private/curl.cfg"], 30)
+            proc = self.exec(
+                self.controller,
+                direct_curl_argv(["--config", "/var/jenkins_home/.g7-private/curl.cfg"]),
+                30,
+            )
             code_text = proc.stdout.decode().strip()
             code = int(code_text) if code_text.isdigit() else 0
             resp_path = private / "resp-body"
@@ -973,7 +1038,19 @@ println("g7-auth-ready")
         while time.time() < deadline:
             proc = self.exec(
                 self.controller,
-                ["curl", "--silent", "--show-error", "--max-time", "5", "-o", "/dev/null", "-w", "%{http_code}", "http://127.0.0.1:8080/login"],
+                direct_curl_argv(
+                    [
+                        "--silent",
+                        "--show-error",
+                        "--max-time",
+                        "5",
+                        "-o",
+                        "/dev/null",
+                        "-w",
+                        "%{http_code}",
+                        "http://127.0.0.1:8080/login",
+                    ]
+                ),
                 15,
             )
             if proc.stdout.decode().strip() == "200":
@@ -1179,11 +1256,13 @@ done
             "mounts": [{"dest": item["dest"], "fstype": item["fstype"], "rw": item["rw"]} for item in mounts],
         }
 
+    def direct_curl(self, name: str, args: list[str], timeout: int) -> subprocess.CompletedProcess[bytes]:
+        return self.exec(name, direct_curl_argv(args), timeout)
+
     def connect_negative(self, name: str, target: str) -> dict:
-        proc = self.exec(
+        proc = self.direct_curl(
             name,
             [
-                "curl",
                 "--connect-timeout",
                 "2",
                 "--max-time",
@@ -1198,27 +1277,12 @@ done
             ],
             10,
         )
-        error = proc.stderr.decode("utf-8", "replace").lower()
-        http_code = proc.stdout.decode().strip()
-        unreachable = (
-            "network is unreachable",
-            "network unreachable",
-            "no route to host",
-            "host is unreachable",
+        return classify_connect(
+            proc.returncode,
+            proc.stdout.decode().strip(),
+            proc.stderr.decode("utf-8", "replace"),
+            True,
         )
-        timed_out = ("connection timed out", "operation timed out")
-        reason = "other"
-        if proc.returncode in {7, 28} and http_code in {"", "000"}:
-            if any(phrase in error for phrase in unreachable):
-                reason = "unreachable"
-            elif any(phrase in error for phrase in timed_out):
-                reason = "timeout"
-        return {
-            "isolated": reason in {"unreachable", "timeout"},
-            "returncode": proc.returncode,
-            "http_code": http_code,
-            "reason": reason,
-        }
 
     def network_sample(
         self,
@@ -1233,15 +1297,14 @@ done
         host6_before = listener6.host_ok()
         inside6 = self.connect_negative(name, f"http://[{listener6.ip}]:{listener6.port}/")
         host6_after = listener6.host_ok()
-        local = self.exec(
+        local = self.direct_curl(
             name,
-            ["curl", "--silent", "--max-time", "5", "-o", "/dev/null", "-w", "%{http_code}", "http://127.0.0.1:8080/login"],
+            ["--silent", "--max-time", "5", "-o", "/dev/null", "-w", "%{http_code}", "http://127.0.0.1:8080/login"],
             15,
         )
-        ws = self.exec(
+        ws = self.direct_curl(
             name,
             [
-                "curl",
                 "--silent",
                 "--show-error",
                 "--max-time",
@@ -1296,10 +1359,23 @@ done
         return {
             "host_positive": host_before and host_after,
             "inside_negative": inside["isolated"],
-            "inside_negative_detail": {"returncode": inside["returncode"], "http_code": inside["http_code"]},
+            "inside_negative_detail": {
+                "returncode": inside["returncode"],
+                "http_code": inside["http_code"],
+                "reason": inside["reason"],
+                "direct": inside["direct"],
+                "proxy": inside["proxy"],
+            },
             "ipv6_host_positive": host6_before and host6_after,
             "ipv6_inside_negative": inside6["isolated"],
-            "ipv6_negative_detail": {"returncode": inside6["returncode"], "http_code": inside6["http_code"]},
+            "ipv6_negative_detail": {
+                "returncode": inside6["returncode"],
+                "http_code": inside6["http_code"],
+                "reason": inside6["reason"],
+                "direct": inside6["direct"],
+                "proxy": inside6["proxy"],
+            },
+            "positive_direct": True,
             "gateway_absent": route_read_ok and not gateway_present,
             "local_http": local.stdout.decode().strip() if local.returncode == 0 else "",
             "websocket_status": ws_status[:80],
@@ -1334,9 +1410,15 @@ done
             "listeners_read_ok",
             "interfaces_read_ok",
             "websocket_endpoint",
+            "positive_direct",
         ):
             if not sample[name]:
                 failed.append(name)
+        for label, detail in (("inside", sample["inside_negative_detail"]), ("ipv6", sample["ipv6_negative_detail"])):
+            if not detail.get("direct"):
+                failed.append(f"{label}_direct")
+            if detail.get("proxy"):
+                failed.append(f"{label}_proxy")
         if sample["local_http"] != "200":
             failed.append("local_http")
         if sample["websocket_status"].startswith(("HTTP/1.1 403", "HTTP/1.1 404")):
@@ -1369,9 +1451,14 @@ done
     def safe_network(self, sample: dict) -> bool:
         return bool(
             sample["host_positive"]
-            and             sample["inside_negative"]
+            and sample["inside_negative"]
+            and sample["inside_negative_detail"].get("direct") is True
+            and sample["inside_negative_detail"].get("proxy") is False
             and sample["ipv6_host_positive"]
             and sample["ipv6_inside_negative"]
+            and sample["ipv6_negative_detail"].get("direct") is True
+            and sample["ipv6_negative_detail"].get("proxy") is False
+            and sample["positive_direct"]
             and sample["gateway_absent"]
             and sample["route_read_ok"]
             and sample["route6_read_ok"]
