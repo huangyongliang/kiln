@@ -446,27 +446,6 @@ def host_gateway() -> str:
     return match.group(1)
 
 
-def host_ipv6() -> tuple[str, int]:
-    proc = subprocess.run(["ip", "-6", "-o", "addr", "show"], capture_output=True, text=True, check=False)
-    global_address = ""
-    link_address = ""
-    link_device = ""
-    for line in proc.stdout.splitlines():
-        match = re.search(r"\binet6\s+([0-9a-f:]+)/", line)
-        if not match or match.group(1) == "::1":
-            continue
-        if " scope global " in line and not global_address:
-            global_address = match.group(1)
-        elif " scope link " in line and not link_address:
-            link_address = match.group(1)
-            link_device = line.split()[1]
-    if global_address:
-        return global_address, 0
-    if link_address and link_device:
-        return link_address, socket.if_nametoindex(link_device)
-    raise GateError("no host non-loopback IPv6 address for the closed-namespace control")
-
-
 class OutsideListener:
     def __init__(self, ip: str, family: int = socket.AF_INET, scope: int = 0) -> None:
         self.ip = ip
@@ -812,6 +791,8 @@ class Gate:
         plugins = self.home / "plugins"
         init = self.home / "init.groovy.d"
         private = self.home / ".g7-private"
+        self.home.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.home, 0o700)
         for path in (plugins, init, private):
             path.mkdir(parents=True, exist_ok=True)
             os.chmod(path, 0o700)
@@ -1016,16 +997,33 @@ println("g7-auth-ready")
             time.sleep(2)
         raise GateError("controller security did not become ready")
 
-    def proc_blob(self, name: str) -> bytes:
-        script = (
-            "for f in /proc/[0-9]*/cmdline /proc/[0-9]*/environ; do "
-            "printf '\\n== %s\\n' \"$f\"; cat \"$f\" 2>/dev/null || true; done"
-        )
-        proc = self.exec(name, ["sh", "-c", script], 20)
-        return proc.stdout + proc.stderr
+    def read_proc_surface(self, name: str, pid: str) -> bytes:
+        cmdline = self.exec(name, ["cat", f"/proc/{pid}/cmdline"], 10)
+        environ = self.exec(name, ["cat", f"/proc/{pid}/environ"], 10)
+        if cmdline.returncode != 0 or environ.returncode != 0:
+            raise GateError(f"unreadable process surface pid={pid}")
+        return cmdline.stdout + b"\n" + environ.stdout
+
+    def child_surfaces(self, name: str, secret: str) -> dict:
+        listing = self.exec(name, ["sh", "-c", "ls -d /proc/[0-9]*"], 10)
+        if listing.returncode != 0:
+            raise GateError("process listing failed")
+        child_pids = []
+        secret_present = False
+        for entry in listing.stdout.decode().split():
+            pid = entry.rsplit("/", 1)[-1]
+            if not pid.isdigit() or pid == "1":
+                continue
+            surface = self.read_proc_surface(name, pid)
+            child_pids.append(int(pid))
+            if secret.encode() in surface:
+                secret_present = True
+        return {"child_pids": child_pids, "secret_present": secret_present}
 
     def logs_blob(self, name: str) -> bytes:
         proc = self.run(["podman", "logs", name], 20)
+        if proc.returncode != 0:
+            raise GateError(f"log read failed for {name}")
         return proc.stdout + proc.stderr
 
     def file_stat(self, name: str, path: str) -> str:
@@ -1043,6 +1041,7 @@ println("g7-auth-ready")
         directory = self.private / "cleanup-args"
         work = self.private / "work-cleanup"
         work.mkdir(parents=True, exist_ok=True)
+        os.chmod(work, 0o700)
         path = directory / "agent.argv"
         try:
             write_private(
@@ -1135,12 +1134,36 @@ println("g7-auth-ready")
             "mounts": [{"dest": item["dest"], "fstype": item["fstype"], "rw": item["rw"]} for item in mounts],
         }
 
-    def curl_outside(self, name: str, target: str) -> subprocess.CompletedProcess[bytes]:
-        return self.exec(
+    def connect_negative(self, name: str, target: str) -> dict:
+        proc = self.exec(
             name,
-            ["curl", "--connect-timeout", "2", "--max-time", "3", "--silent", "--output", "/dev/null", target],
+            [
+                "curl",
+                "--connect-timeout",
+                "2",
+                "--max-time",
+                "3",
+                "--silent",
+                "--show-error",
+                "--output",
+                "/dev/null",
+                "--write-out",
+                "%{http_code}",
+                target,
+            ],
             10,
         )
+        error = proc.stderr.decode("utf-8", "replace").lower()
+        http_code = proc.stdout.decode().strip()
+        isolated = proc.returncode in {7, 28} and http_code in {"", "000"} and any(
+            phrase in error
+            for phrase in (
+                "network is unreachable",
+                "no route to host",
+                "connection timed out",
+            )
+        )
+        return {"isolated": isolated, "returncode": proc.returncode, "http_code": http_code}
 
     def network_sample(
         self,
@@ -1150,12 +1173,11 @@ println("g7-auth-ready")
         gateway: str,
     ) -> dict:
         host_before = listener.host_ok()
-        inside = self.curl_outside(name, f"http://{listener.ip}:{listener.port}/")
+        inside = self.connect_negative(name, f"http://{listener.ip}:{listener.port}/")
         host_after = listener.host_ok()
         host6_before = listener6.host_ok()
-        inside6 = self.curl_outside(name, f"http://[{listener6.ip}]:{listener6.port}/")
+        inside6 = self.connect_negative(name, f"http://[{listener6.ip}]:{listener6.port}/")
         host6_after = listener6.host_ok()
-        gateway_probe = self.curl_outside(name, f"http://{gateway}:9/")
         local = self.exec(
             name,
             ["curl", "--silent", "--max-time", "5", "-o", "/dev/null", "-w", "%{http_code}", "http://127.0.0.1:8080/login"],
@@ -1186,48 +1208,75 @@ println("g7-auth-ready")
         ws_text = ws.stdout.decode("utf-8", "replace")
         ws_status = ws_text.splitlines()[0].strip() if ws_text else ""
         ws_sentence = "This endpoint is only for use from agent.jar in WebSocket mode"
-        tcp = self.exec(name, ["cat", "/proc/net/tcp"], 10).stdout.decode()
-        tcp6 = self.exec(name, ["cat", "/proc/net/tcp6"], 10).stdout.decode()
-        route = self.exec(name, ["cat", "/proc/net/route"], 10).stdout.decode()
-        route6 = self.exec(name, ["cat", "/proc/net/ipv6_route"], 10)
-        resolv = self.exec(name, ["cat", "/etc/resolv.conf"], 10).stdout.decode()
-        devs = self.exec(name, ["ls", "/sys/class/net"], 10).stdout.decode().split()
+        tcp_proc = self.exec(name, ["cat", "/proc/net/tcp"], 10)
+        tcp6_proc = self.exec(name, ["cat", "/proc/net/tcp6"], 10)
+        route_proc = self.exec(name, ["cat", "/proc/net/route"], 10)
+        route6_proc = self.exec(name, ["cat", "/proc/net/ipv6_route"], 10)
+        resolv_proc = self.exec(name, ["cat", "/etc/resolv.conf"], 10)
+        dev_proc = self.exec(name, ["ls", "/sys/class/net"], 10)
+        route_text = route_proc.stdout.decode()
+        route6_text = route6_proc.stdout.decode()
+        route_read_ok = route_proc.returncode == 0 and route_text.startswith("Iface")
+        route6_read_ok = route6_proc.returncode == 0
+        resolv_read_ok = resolv_proc.returncode == 0
+        devs = dev_proc.stdout.decode().split() if dev_proc.returncode == 0 else []
+        gateway_hex = "".join(f"{int(part):02X}" for part in reversed(gateway.split(".")))
+        gateway_present = route_read_ok and any(
+            len(line.split()) > 2 and line.split()[2] == gateway_hex for line in route_text.splitlines()[1:]
+        )
         foreign4 = [
             line.split()[0]
-            for line in route.splitlines()[1:]
+            for line in route_text.splitlines()[1:]
             if line.split() and line.split()[0] != "lo"
-        ]
+        ] if route_read_ok else ["unreadable"]
         foreign6 = []
-        if route6.returncode == 0:
-            for line in route6.stdout.decode().splitlines():
+        if route6_read_ok:
+            for line in route6_text.splitlines():
                 parts = line.split()
                 if parts and parts[-1] != "lo":
                     foreign6.append(parts[-1])
+        else:
+            foreign6 = ["unreadable"]
+        resolv = resolv_proc.stdout.decode() if resolv_read_ok else ""
         return {
             "host_positive": host_before and host_after,
-            "inside_negative": inside.returncode != 0,
+            "inside_negative": inside["isolated"],
+            "inside_negative_detail": {"returncode": inside["returncode"], "http_code": inside["http_code"]},
             "ipv6_host_positive": host6_before and host6_after,
-            "ipv6_inside_negative": inside6.returncode != 0,
-            "gateway_negative": gateway_probe.returncode != 0,
-            "local_http": local.stdout.decode().strip(),
+            "ipv6_inside_negative": inside6["isolated"],
+            "ipv6_negative_detail": {"returncode": inside6["returncode"], "http_code": inside6["http_code"]},
+            "gateway_absent": route_read_ok and not gateway_present,
+            "local_http": local.stdout.decode().strip() if local.returncode == 0 else "",
             "websocket_status": ws_status[:80],
-            "websocket_endpoint": ws_status.startswith("HTTP/1.1 400") and ws_sentence in ws_text,
-            "ports": sorted(listen_ports(tcp) | listen_ports(tcp6)),
+            "websocket_endpoint": ws.returncode == 0 and ws_status.startswith("HTTP/1.1 400") and ws_sentence in ws_text,
+            "ports": sorted(listen_ports(tcp_proc.stdout.decode()) | listen_ports(tcp6_proc.stdout.decode()))
+            if tcp_proc.returncode == 0 and tcp6_proc.returncode == 0
+            else [],
+            "listeners_read_ok": tcp_proc.returncode == 0 and tcp6_proc.returncode == 0,
             "interfaces": devs,
-            "ipv4_default": ipv4_default(route),
-            "ipv6_default": ipv6_default(route6.stdout.decode()) if route6.returncode == 0 else False,
+            "interfaces_read_ok": dev_proc.returncode == 0,
+            "ipv4_default": ipv4_default(route_text) if route_read_ok else True,
+            "ipv6_default": ipv6_default(route6_text) if route6_read_ok else True,
+            "route_read_ok": route_read_ok,
+            "route6_read_ok": route6_read_ok,
+            "resolv_read_ok": resolv_read_ok,
             "foreign_ipv4": foreign4,
             "foreign_ipv6": foreign6,
-            "nameserver": "nameserver" in resolv,
+            "nameserver": (not resolv_read_ok) or ("nameserver" in resolv),
         }
 
     def safe_network(self, sample: dict) -> bool:
         return bool(
             sample["host_positive"]
-            and sample["inside_negative"]
+            and             sample["inside_negative"]
             and sample["ipv6_host_positive"]
             and sample["ipv6_inside_negative"]
-            and sample["gateway_negative"]
+            and sample["gateway_absent"]
+            and sample["route_read_ok"]
+            and sample["route6_read_ok"]
+            and sample["resolv_read_ok"]
+            and sample["listeners_read_ok"]
+            and sample["interfaces_read_ok"]
             and sample["local_http"] == "200"
             and sample["websocket_endpoint"]
             and not sample["websocket_status"].startswith(("HTTP/1.1 403", "HTTP/1.1 404"))
@@ -1346,22 +1395,35 @@ println("g7-auth-ready")
         if code not in {200, 201, 302, 303}:
             raise GateError(f"trigger {name} returned {code}")
 
-    def secret_in_procs(self, name: str, secret: str) -> bool:
-        return secret.encode() in self.proc_blob(name)
-
-    def wait_build(self, name: str, secret: str) -> tuple[dict, bool]:
+    def wait_build(self, name: str, secret: str) -> tuple[dict, dict]:
         deadline = time.time() + 90
-        saw_running_child = False
-        child_clean = False
+        saw_child_pid = False
+        secret_seen = False
+        read_failed = False
+        child_pids: list[int] = []
         while time.time() < deadline:
             code, body = self.http(f"/job/{name}/lastBuild/api/json?tree=building,result,builtOn,number", user="feas-admin")
             if code == 200:
                 data = json.loads(body)
                 if data.get("building") is True:
-                    saw_running_child = True
-                    child_clean = not self.secret_in_procs(self.agent, secret)
+                    try:
+                        sample = self.child_surfaces(self.agent, secret)
+                    except GateError:
+                        read_failed = True
+                    else:
+                        if sample["child_pids"]:
+                            saw_child_pid = True
+                            child_pids = sample["child_pids"]
+                        if sample["secret_present"]:
+                            secret_seen = True
                 if data.get("building") is False and data.get("result"):
-                    return data, saw_running_child and child_clean
+                    return data, {
+                        "saw_child_pid": saw_child_pid,
+                        "child_pids": child_pids,
+                        "secret_seen": secret_seen,
+                        "read_failed": read_failed,
+                        "clean": saw_child_pid and not secret_seen and not read_failed,
+                    }
             time.sleep(1)
         raise GateError(f"{name} timed out")
 
@@ -1474,6 +1536,7 @@ println("g7-auth-ready")
         directory = self.private / "neg-args"
         work = self.private / "work-neg"
         work.mkdir(parents=True, exist_ok=True)
+        os.chmod(work, 0o700)
         secret_path = directory / "secret"
         write_private(secret_path, secret.encode(), exclusive=True)
         mounts = [
@@ -1552,6 +1615,7 @@ println("g7-auth-ready")
         directory = self.private / "args"
         work = self.private / "work"
         work.mkdir(parents=True, exist_ok=True)
+        os.chmod(work, 0o700)
         path = directory / "agent.argv"
         write_private(path, self.argfile_tokens(secret, "kiln-managed-1", "http://127.0.0.1:8080/"), exclusive=True)
         mounts = [
@@ -1577,50 +1641,131 @@ println("g7-auth-ready")
         return False
 
     def surfaces_clean(self, name: str, secret: str) -> tuple[bool, int, bool]:
-        blob = self.proc_blob(name) + self.logs_blob(name)
-        cmdline = self.exec(name, ["cat", "/proc/1/cmdline"], 10).stdout
-        parts = [item for item in cmdline.split(b"\0") if item]
-        present = secret.encode() in blob
+        surface = self.read_proc_surface(name, "1")
+        cmdline = self.exec(name, ["cat", "/proc/1/cmdline"], 10)
+        logs = self.logs_blob(name)
+        if cmdline.returncode != 0:
+            raise GateError("agent process surface read failed")
+        parts = [item for item in cmdline.stdout.split(b"\0") if item]
+        present = secret.encode() in surface or secret.encode() in logs
         argc_ok = len(parts) == 2 and parts[1] == b"@/run/kiln-g7-args/agent.argv"
         return (not present), len(parts), argc_ok
 
-    def mount_inventory(self, name: str, approved: set[str]) -> dict:
+    def bind_spec(self, source: Path, destination: str, rw: bool, mode: int) -> dict:
+        return {
+            "destination": destination,
+            "type": "bind",
+            "rw": rw,
+            "source": os.path.realpath(source),
+            "mode": mode,
+        }
+
+    def tmpfs_spec(self, destination: str) -> dict:
+        return {"destination": destination, "type": "tmpfs", "rw": True, "source": "", "mode": 0}
+
+    def controller_mount_specs(self) -> list[dict]:
+        etc = self.private / "etc"
+        return [
+            self.bind_spec(self.home, "/var/jenkins_home", True, 0o700),
+            self.bind_spec(self.private / "auth", "/run/kiln-g7-auth", False, 0o700),
+            self.bind_spec(etc / "hosts", "/etc/hosts", False, 0o644),
+            self.bind_spec(etc / "resolv.conf", "/etc/resolv.conf", False, 0o644),
+            self.bind_spec(etc / "hostname-controller", "/etc/hostname", False, 0o644),
+            self.tmpfs_spec("/tmp"),
+            self.tmpfs_spec("/dev/shm"),
+        ]
+
+    def agent_mount_specs(self) -> list[dict]:
+        etc = self.private / "etc"
+        return [
+            self.bind_spec(self.private / "work", "/home/jenkins/agent", True, 0o700),
+            self.bind_spec(self.private / "args", "/run/kiln-g7-args", False, 0o700),
+            self.bind_spec(etc / "hosts", "/etc/hosts", False, 0o644),
+            self.bind_spec(etc / "resolv.conf", "/etc/resolv.conf", False, 0o644),
+            self.bind_spec(etc / "hostname-agent", "/etc/hostname", False, 0o644),
+            self.tmpfs_spec("/tmp"),
+            self.tmpfs_spec("/dev/shm"),
+        ]
+
+    def mount_inventory(self, name: str, required: list[dict]) -> dict:
         raw = self.run(["podman", "inspect", name], 20)
         if raw.returncode != 0:
             raise GateError(f"inspect failed for {name}")
         meta = json.loads(raw.stdout)[0]
         rows = []
-        unexpected = []
-        runtime_ro = {"/run/.containerenv"}
         for item in meta.get("Mounts") or []:
             source = str(item.get("Source") or "")
-            destination = str(item.get("Destination") or "")
             host_stat = None
             if source:
                 try:
                     info = os.lstat(source)
-                    host_stat = {"uid": info.st_uid, "mode": oct(info.st_mode & 0o777)}
+                    host_stat = {"uid": info.st_uid, "mode": info.st_mode & 0o777, "is_dir": stat.S_ISDIR(info.st_mode)}
                 except OSError:
-                    host_stat = {"uid": None, "mode": None}
-            row = {
-                "type": item.get("Type"),
-                "source": source,
-                "destination": destination,
-                "mode": item.get("Mode"),
-                "rw": item.get("RW"),
-                "options": item.get("Options"),
-                "propagation": item.get("Propagation"),
-                "host_stat": host_stat,
-            }
-            rows.append(row)
-            lowered = source.lower()
-            control_socket = lowered.endswith("docker.sock") or lowered.endswith("podman.sock") or "/var/run/docker.sock" in lowered
-            allowed = destination in approved or (destination in runtime_ro and item.get("RW") is False)
-            if control_socket or not allowed:
-                unexpected.append(destination or source)
-        env = self.exec(name, ["env"], 10).stdout.lower()
-        env_bad = any(item.encode() in env for item in ("github_token", "actions_runtime_token", "aws_secret_access_key"))
-        return {"ok": not unexpected and not env_bad, "unexpected": unexpected, "mounts": rows, "env_bad": env_bad}
+                    host_stat = None
+            rows.append(
+                {
+                    "type": item.get("Type"),
+                    "source": source,
+                    "destination": str(item.get("Destination") or ""),
+                    "mode": item.get("Mode"),
+                    "rw": item.get("RW"),
+                    "options": item.get("Options"),
+                    "propagation": item.get("Propagation"),
+                    "host_stat": host_stat,
+                }
+            )
+        missing = []
+        matched = set()
+        for spec in required:
+            found = None
+            for index, row in enumerate(rows):
+                if index in matched or row["destination"] != spec["destination"]:
+                    continue
+                source_ok = (
+                    row["source"] == spec["source"]
+                    if spec["type"] == "bind"
+                    else row["source"] in {"", "tmpfs", spec["destination"]}
+                )
+                mode_text = str(row["mode"] or "")
+                mode_ok = True if not mode_text else mode_text.startswith("rw" if spec["rw"] else "ro")
+                options = row["options"] or []
+                if isinstance(options, str):
+                    options = [item for item in options.split(",") if item]
+                options_ok = not any(str(option) in {"shared", "rshared", "master", "rslave"} for option in options)
+                stat_ok = True
+                if spec["type"] == "bind":
+                    stat_ok = (
+                        row["host_stat"] is not None
+                        and row["host_stat"]["uid"] == os.getuid()
+                        and row["host_stat"]["mode"] == spec["mode"]
+                    )
+                if (
+                    row["type"] == spec["type"]
+                    and row["rw"] is spec["rw"]
+                    and source_ok
+                    and mode_ok
+                    and options_ok
+                    and stat_ok
+                ):
+                    found = index
+                    break
+            if found is None:
+                missing.append(spec["destination"])
+            else:
+                matched.add(found)
+        unexpected = [rows[index]["destination"] for index in range(len(rows)) if index not in matched]
+        env_proc = self.exec(name, ["env"], 10)
+        env_bad = env_proc.returncode != 0 or any(
+            item.encode() in env_proc.stdout.lower()
+            for item in ("github_token", "actions_runtime_token", "aws_secret_access_key")
+        )
+        return {
+            "ok": not missing and not unexpected and not env_bad,
+            "missing": missing,
+            "unexpected": unexpected,
+            "mounts": rows,
+            "env_bad": env_bad,
+        }
 
     def queue_case(self) -> dict:
         self.create_job("kiln-g7-roam", self.freestyle("echo roam-not-expected", None, True, False))
@@ -1655,7 +1800,7 @@ println("g7-auth-ready")
     def pinned_job(self, name: str, command: str, assigned: str, marker: bytes, secret: str) -> dict:
         self.create_job(name, self.freestyle(command, assigned, False, True))
         self.trigger(name)
-        result, child_clean = self.wait_build(name, secret)
+        result, children = self.wait_build(name, secret)
         artifact = self.artifact(name)
         console_code, console = self.http(f"/job/{name}/lastBuild/consoleText", user="feas-admin")
         self.guard.assert_clean("console", console.decode("utf-8", "replace"))
@@ -1665,7 +1810,10 @@ println("g7-auth-ready")
             "artifact": artifact.strip() == marker,
             "console": console_code == 200 and marker in console,
             "workspace": self.workspace_marker(name, marker),
-            "child_secret_absent": child_clean,
+            "child_secret_absent": children["clean"],
+            "child_pids": children["child_pids"],
+            "child_secret_seen": children["secret_seen"],
+            "child_read_failed": children["read_failed"],
         }
 
     def remove_owned(self) -> dict:
@@ -1760,9 +1908,11 @@ println("g7-auth-ready")
             self.wait_security()
             device, ip = host_ipv4()
             gateway = host_gateway()
-            ipv6, ipv6_scope = host_ipv6()
+            ipv6 = os.environ.get("KILN_G7_IPV6", "")
+            if ipv6 != "fd7c:67::1":
+                raise GateError("controlled IPv6 target is not configured")
             listener = OutsideListener(ip)
-            listener6 = OutsideListener(ipv6, socket.AF_INET6, ipv6_scope)
+            listener6 = OutsideListener(ipv6, socket.AF_INET6)
             try:
                 self.phase = "G7-NET-CLOSED"
                 before = self.network_sample(self.controller, listener, listener6, gateway)
@@ -1858,14 +2008,8 @@ println("g7-auth-ready")
                 json.dumps({"controller_uid": controller_fs["uid"], "agent_uid": agent_fs["uid"]}),
                 "podman --userns=keep-id:uid=1000,gid=1000 --user 1000:1000",
             )
-            controller_mounts = self.mount_inventory(
-                self.controller,
-                {"/var/jenkins_home", "/run/kiln-g7-auth", "/etc/hosts", "/etc/resolv.conf", "/etc/hostname", "/tmp", "/dev/shm"},
-            )
-            agent_mounts = self.mount_inventory(
-                self.agent,
-                {"/home/jenkins/agent", "/run/kiln-g7-args", "/etc/hosts", "/etc/resolv.conf", "/etc/hostname", "/tmp", "/dev/shm"},
-            )
+            controller_mounts = self.mount_inventory(self.controller, self.controller_mount_specs())
+            agent_mounts = self.mount_inventory(self.agent, self.agent_mount_specs())
             self.ledger.record(
                 "G7-MOUNTS",
                 "PASS" if controller_mounts["ok"] and agent_mounts["ok"] else "FAIL",
@@ -1980,17 +2124,20 @@ println("g7-auth-ready")
             self.ledger.fill_missing(self.aborted or "not reached")
             try:
                 body = self.ledger.document(context)
-            except GateError as exc:
+            except GateError:
+                self.aborted = self.aborted or "ledger sanitization failed"
+                self.ledger.rows["G7-LEDGER"] = {
+                    "testID": "G7-LEDGER",
+                    "status": "FAIL",
+                    "expected": "sanitized ledger",
+                    "observed": "sanitized ledger rejected; raw content not written",
+                    "command_shape": "in-process redaction",
+                    "teardown": "owned resources removed in finally",
+                }
                 body = {
                     "schema": "kiln-g7-ledger-1",
-                    "context": context,
-                    "tests": [
-                        {
-                            "testID": "G7-LEDGER",
-                            "status": "FAIL",
-                            "observed": str(exc),
-                        }
-                    ],
+                    "context": {"head_sha": context.get("head_sha", ""), "lock_sha256": context.get("lock_sha256", "")},
+                    "tests": [self.ledger.rows["G7-LEDGER"]],
                 }
             ledger_path = self.private / "ledger.json"
             ledger_path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n")

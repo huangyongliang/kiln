@@ -150,6 +150,9 @@ jobs:
               "docker_group": False,
           }) + "\n")
           PY
+          sudo ip link add kiln-g7-v6 type dummy
+          sudo ip addr add fd7c:67::1/128 dev kiln-g7-v6
+          sudo ip link set kiln-g7-v6 up
           echo "runner_kernel=$(uname -r)"
 
       - name: Isolation gate
@@ -174,7 +177,7 @@ jobs:
             local home uid
             home="$(getent passwd "$user" | cut -d: -f6)"
             uid="$(id -u "$user")"
-            sudo -u "$user" -- env -i \
+            sudo -u "$user" --chdir "$home" -- env -i \
               HOME="$home" \
               USER="$user" \
               LOGNAME="$user" \
@@ -182,7 +185,8 @@ jobs:
               LANG="C.UTF-8" \
               XDG_RUNTIME_DIR="/run/user/${uid}" \
               TMPDIR="${home}/private/tmp" \
-              KILN_G7_LOCK="$KILN_G7_LOCK" \
+              KILN_G7_LOCK="/home/kiln-g7/fixture/input.lock.json" \
+              KILN_G7_IPV6="fd7c:67::1" \
               KILN_G7_HEAD_SHA="$KILN_G7_HEAD_SHA" \
               KILN_G7_GITHUB_SHA="$KILN_G7_GITHUB_SHA" \
               KILN_G7_REF="$KILN_G7_REF" \
@@ -200,9 +204,13 @@ jobs:
               KILN_G7_PEER_DIR="/tmp/kiln-g7-peer" \
               "$@"
           }
-          sudo install -d -m 700 -o kiln-g7-peer-bad -g kiln-g7-peer-bad /home/kiln-g7-peer-bad/private /home/kiln-g7-peer-bad/private/tmp
+          sudo install -d -m 0700 -o kiln-g7 -g kiln-g7 /home/kiln-g7/fixture
+          sudo install -m 0400 -o kiln-g7 -g kiln-g7 "${GITHUB_WORKSPACE}/ci/jenkins-g7/g7_gate.py" /home/kiln-g7/fixture/g7_gate.py
+          sudo install -m 0400 -o kiln-g7 -g kiln-g7 "${GITHUB_WORKSPACE}/ci/jenkins-g7/input.lock.json" /home/kiln-g7/fixture/input.lock.json
+          sudo install -d -m 0700 -o kiln-g7-peer-bad -g kiln-g7-peer-bad /home/kiln-g7-peer-bad/private /home/kiln-g7-peer-bad/private/tmp /home/kiln-g7-peer-bad/fixture
+          sudo install -m 0400 -o kiln-g7-peer-bad -g kiln-g7-peer-bad "${GITHUB_WORKSPACE}/ci/jenkins-g7/g7_gate.py" /home/kiln-g7-peer-bad/fixture/g7_gate.py
           set +e
-          as_user kiln-g7 python3 -B ci/jenkins-g7/g7_gate.py peer-serve &
+          as_user kiln-g7 python3 -B /home/kiln-g7/fixture/g7_gate.py peer-serve &
           peer_pid=$!
           ready=0
           for _ in $(seq 1 50); do
@@ -218,11 +226,11 @@ jobs:
             wait "$peer_pid" >/dev/null 2>&1 || true
             exit 1
           fi
-          as_user kiln-g7 python3 -B ci/jenkins-g7/g7_gate.py peer-client authorized
-          as_user kiln-g7-peer-bad python3 -B ci/jenkins-g7/g7_gate.py peer-client unauthorized
-          as_user kiln-g7-peer-bad python3 -B ci/jenkins-g7/g7_gate.py peer-client dac
+          as_user kiln-g7 python3 -B /home/kiln-g7/fixture/g7_gate.py peer-client authorized
+          as_user kiln-g7-peer-bad python3 -B /home/kiln-g7-peer-bad/fixture/g7_gate.py peer-client unauthorized
+          as_user kiln-g7-peer-bad python3 -B /home/kiln-g7-peer-bad/fixture/g7_gate.py peer-client dac
           wait "$peer_pid"
-          as_user kiln-g7 python3 -B ci/jenkins-g7/g7_gate.py run
+          as_user kiln-g7 python3 -B /home/kiln-g7/fixture/g7_gate.py run
           rc=$?
           set -e
           ledger_ok=0
@@ -258,7 +266,7 @@ jobs:
           if id kiln-g7 >/dev/null 2>&1; then
             uid="$(id -u kiln-g7)"
             if command -v podman >/dev/null 2>&1; then
-              sudo -u kiln-g7 -- env -i HOME=/home/kiln-g7 USER=kiln-g7 LOGNAME=kiln-g7 \
+              sudo -u kiln-g7 --chdir /home/kiln-g7 -- env -i HOME=/home/kiln-g7 USER=kiln-g7 LOGNAME=kiln-g7 \
                 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
                 XDG_RUNTIME_DIR="/run/user/${uid}" \
                 podman rm -f kiln-g7-controller kiln-g7-agent kiln-g7-neg kiln-g7-cleanup
@@ -266,7 +274,7 @@ jobs:
                 echo "podman rm failed"
                 status=1
               fi
-              names="$(sudo -u kiln-g7 -- env -i HOME=/home/kiln-g7 USER=kiln-g7 LOGNAME=kiln-g7 \
+              names="$(sudo -u kiln-g7 --chdir /home/kiln-g7 -- env -i HOME=/home/kiln-g7 USER=kiln-g7 LOGNAME=kiln-g7 \
                 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
                 XDG_RUNTIME_DIR="/run/user/${uid}" \
                 podman ps -a --format '{{.Names}}')"
@@ -292,11 +300,21 @@ jobs:
             done
             sudo rm -rf "/run/user/${uid}" || status=1
             sudo pkill -u kiln-g7 >/dev/null 2>&1 || true
-            sudo userdel --remove kiln-g7 || status=1
+            sudo userdel --remove kiln-g7 || true
+            if id kiln-g7 >/dev/null 2>&1; then
+              status=1
+            fi
           fi
           if id kiln-g7-peer-bad >/dev/null 2>&1; then
             sudo pkill -u kiln-g7-peer-bad >/dev/null 2>&1 || true
-            sudo userdel --remove kiln-g7-peer-bad || status=1
+            sudo userdel --remove kiln-g7-peer-bad || true
+            if id kiln-g7-peer-bad >/dev/null 2>&1; then
+              status=1
+            fi
+          fi
+          sudo ip link del kiln-g7-v6 >/dev/null 2>&1 || true
+          if ip link show kiln-g7-v6 >/dev/null 2>&1; then
+            status=1
           fi
           sudo rm -rf /tmp/kiln-g7-peer /tmp/kiln-g7-debs /etc/apt/sources.list.d/kiln-g7-official.list || status=1
           exit "$status"
