@@ -1676,18 +1676,30 @@ done
             )
             if status != 403 or payload.decode().strip() == "2":
                 raise GateError(f"{user} script returned {status}")
+        probe_name = "kiln-g7-form-probe"
         form, form_body = self.http(
-            "/computer/doCreateItem",
+            f"/computer/doCreateItem?name={probe_name}",
             user="feas-lifecycle",
             method="POST",
             body=b"<slave></slave>",
             content_type="application/xml",
             use_crumb=True,
         )
-        # XML is not a form field, so Stapler reports that nothing was submitted.
-        if form != 400 or b"Nothing is submitted" not in form_body:
-            kind = "nothing_submitted" if b"Nothing is submitted" in form_body else "other"
-            raise GateError(f"doCreateItem status {form} rejection {kind} body_len {len(form_body)}")
+        # The owned name passes checkName. It is a query parameter, so the parameter map is not
+        # empty, and the XML body is not the json form field. Stapler then refuses the form.
+        if b"This page expects a form submission" in form_body:
+            rejection = "expects_form"
+        elif b"Nothing is submitted" in form_body:
+            rejection = "nothing_submitted"
+        elif b"Query parameter 'name' is required" in form_body:
+            rejection = "name_required"
+        else:
+            rejection = "other"
+        if form != 400 or rejection != "expects_form":
+            raise GateError(f"doCreateItem status {form} rejection {rejection} body_len {len(form_body)}")
+        absent, _ = self.http(f"/computer/{probe_name}/api/json", user="feas-lifecycle")
+        if absent != 404:
+            raise GateError(f"form probe name status {absent}")
         code, body = self.http("/computer/kiln-managed-1/config.xml", user="feas-lifecycle")
         if code != 200:
             raise GateError(f"config.xml returned {code}")
