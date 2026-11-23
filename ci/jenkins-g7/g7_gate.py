@@ -983,6 +983,7 @@ println("g7-auth-ready")
         lines = [
             "silent",
             "show-error",
+            "globoff",
             "noproxy = \"*\"",
             "max-time = 20",
             'output = "/var/jenkins_home/.g7-private/resp-body"',
