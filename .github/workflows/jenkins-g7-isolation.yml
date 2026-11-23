@@ -44,21 +44,46 @@ jobs:
             -o Dir::Etc::sourceparts=/var/lib/kiln-g7-apt-empty
             -o APT::Install-Recommends=false
           )
-          sudo apt-get update "${apt_opts[@]}"
-          (
-            cd /tmp/kiln-g7-debs
-            sudo apt-get download "${apt_opts[@]}" \
-              podman=4.9.3+ds1-1ubuntu0.2 \
-              conmon=2.1.10+ds1-1build2 \
-              crun=1.14.1-1 \
-              golang-github-containers-common=0.57.4+ds1-2ubuntu0.2 \
-              uidmap=1:4.13+dfsg1-4ubuntu3.2 \
-              libsubid4=1:4.13+dfsg1-4ubuntu3.2 \
-              slirp4netns=1.2.1-1build2 \
-              containernetworking-plugins=1.1.1+ds1-3ubuntu0.24.04.3 \
-              iptables=1.8.10-3ubuntu2 \
-              catatonit=0.1.7-1
-          )
+          update_ok=0
+          for attempt in 1 2 3 4; do
+            if sudo apt-get update -o APT::Update::Error-Mode=any "${apt_opts[@]}"; then
+              update_ok=1
+              break
+            fi
+            echo "pinned Ubuntu index fetch failed, attempt ${attempt}"
+            sleep $((attempt * 10))
+          done
+          if [[ "$update_ok" -ne 1 ]]; then
+            echo "pinned Ubuntu indexes were not fetched"
+            exit 1
+          fi
+          download_ok=0
+          for attempt in 1 2 3; do
+            sudo rm -f /tmp/kiln-g7-debs/*.deb
+            if (
+              cd /tmp/kiln-g7-debs
+              sudo apt-get download "${apt_opts[@]}" \
+                podman=4.9.3+ds1-1ubuntu0.2 \
+                conmon=2.1.10+ds1-1build2 \
+                crun=1.14.1-1 \
+                golang-github-containers-common=0.57.4+ds1-2ubuntu0.2 \
+                uidmap=1:4.13+dfsg1-4ubuntu3.2 \
+                libsubid4=1:4.13+dfsg1-4ubuntu3.2 \
+                slirp4netns=1.2.1-1build2 \
+                containernetworking-plugins=1.1.1+ds1-3ubuntu0.24.04.3 \
+                iptables=1.8.10-3ubuntu2 \
+                catatonit=0.1.7-1
+            ); then
+              download_ok=1
+              break
+            fi
+            echo "pinned deb download failed, attempt ${attempt}"
+            sleep $((attempt * 10))
+          done
+          if [[ "$download_ok" -ne 1 ]]; then
+            echo "pinned debs were not downloaded"
+            exit 1
+          fi
           sudo python3 - << 'PY'
           import hashlib
           from pathlib import Path
