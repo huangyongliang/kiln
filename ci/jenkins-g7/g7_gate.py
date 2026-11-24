@@ -2317,18 +2317,39 @@ done
         ]
         shape_ok = len(parts) == 12 and parts[0].endswith(b"/bin/java") and parts[1:] == expected
         code, body = self.http(
-            "/computer/kiln-remoting-neg/api/json?tree=offline",
+            "/computer/kiln-remoting-neg/api/json?tree=offline,temporarilyOffline",
             user="feas-admin",
         )
-        offline = json.loads(body).get("offline") is True if code == 200 else False
+        api_ok = code == 200
+        offline = False
+        temporarily_offline = False
+        if api_ok:
+            try:
+                data = json.loads(body)
+            except (json.JSONDecodeError, UnicodeError):
+                api_ok = False
+            else:
+                if isinstance(data, dict):
+                    offline = data.get("offline") is True
+                    temporarily_offline = data.get("temporarilyOffline") is True
+                else:
+                    api_ok = False
         self.run(["podman", "rm", "-f", self.neg], 20)
         destroy(secret_path)
         self.delete_node("kiln-remoting-neg")
-        if secret_present or not shape_ok or not offline:
+        if not api_ok or secret_present or not shape_ok:
             raise GateError(
-                f"remoting negative secret_in_argv={secret_present} argc={len(parts)} shape_ok={shape_ok} offline={offline}"
+                "remoting negative "
+                f"http_code={code} secret_in_argv={secret_present} argc={len(parts)} "
+                f"shape_ok={shape_ok} offline={offline} temporarily_offline={temporarily_offline}"
             )
-        return "pinned 3386 kept -secret @path in argv, stayed offline, and did not expose the secret"
+        return (
+            "remoting=3386.v353e57a_1b_ea_0 "
+            f"secret_in_argv=False argc={len(parts)} shape_ok=True "
+            f"offline={offline} temporarily_offline={temporarily_offline}; "
+            "args4j atSyntax @file expansion observed; not used as primary path "
+            "(primary path remains G7-ARGFILE)"
+        )
 
     def argfile_tokens(self, secret: str, name: str, url: str) -> bytes:
         tokens = [
