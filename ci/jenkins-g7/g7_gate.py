@@ -314,6 +314,145 @@ def unexpected_writable(mounts: list[dict], allow: set[str]) -> list[str]:
     return bad
 
 
+def parse_proc_net_dev(text: str) -> list[str]:
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) < 3 or "Inter-" not in lines[0] or "face" not in lines[1]:
+        raise ValueError("proc_net_dev header")
+    names = []
+    for line in lines[2:]:
+        if ":" not in line:
+            raise ValueError("proc_net_dev row")
+        name = line.split(":", 1)[0].strip()
+        if not name or not re.fullmatch(r"[A-Za-z0-9_.:-]+", name):
+            raise ValueError("proc_net_dev name")
+        names.append(name)
+    if not names:
+        raise ValueError("proc_net_dev empty")
+    return names
+
+
+def parse_netns_link(text: str) -> str:
+    value = text.strip()
+    if not re.fullmatch(r"net:\[\d+\]", value):
+        raise ValueError("netns link")
+    return value
+
+
+def parse_mountinfo(text: str) -> list[dict]:
+    if not text.strip():
+        raise ValueError("mountinfo empty")
+    rows = []
+    for line in text.splitlines():
+        if " - " not in line:
+            raise ValueError("mountinfo separator")
+        left, right = line.split(" - ", 1)
+        left_parts = left.split()
+        right_parts = right.split()
+        if len(left_parts) < 6 or not right_parts:
+            raise ValueError("mountinfo fields")
+        options = left_parts[5].split(",")
+        super_options = right_parts[2].split(",") if len(right_parts) >= 3 else []
+        merged = options + [item for item in super_options if item not in options]
+        rows.append(
+            {
+                "dest": left_parts[4].replace("\\040", " "),
+                "fstype": right_parts[0],
+                "rw": "rw" in options,
+                "options": merged,
+            }
+        )
+    if not rows:
+        raise ValueError("mountinfo empty")
+    return rows
+
+
+def mount_option_set(value: object) -> set[str] | None:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        return {item for item in value.split(",") if item}
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return {item for item in value if item}
+    return None
+
+
+def tmpfs_flags_ok(options: set[str], size: int, mode: int) -> bool:
+    return (
+        "rw" in options
+        and "nosuid" in options
+        and "nodev" in options
+        and f"mode={format(mode, 'o')}" in options
+        and f"size={size}" in options
+    )
+
+
+def merge_host_tmpfs(rows: list[dict], tmpfs_map: dict) -> str:
+    for dest, raw in tmpfs_map.items():
+        if not isinstance(dest, str) or not dest.startswith("/"):
+            return "malformed"
+        tokens = mount_option_set(raw)
+        if tokens is None:
+            return "malformed"
+        matches = [row for row in rows if row["destination"] == dest and row["type"] == "tmpfs"]
+        if len(matches) > 1:
+            return "malformed"
+        if not matches:
+            rows.append(
+                {
+                    "type": "tmpfs",
+                    "source": "",
+                    "destination": dest,
+                    "mode": "rw" if "rw" in tokens else "",
+                    "rw": "rw" in tokens,
+                    "options": sorted(tokens),
+                    "propagation": "",
+                    "host_stat": None,
+                }
+            )
+            continue
+        existing = mount_option_set(matches[0].get("options"))
+        if existing is None:
+            return "malformed"
+        for prefix in ("size=", "mode="):
+            old = {item for item in existing if item.startswith(prefix)}
+            new = {item for item in tokens if item.startswith(prefix)}
+            if old and new and old != new:
+                return "malformed"
+        merged = existing | tokens
+        matches[0]["options"] = sorted(merged)
+        if "rw" in merged:
+            matches[0]["rw"] = True
+    return ""
+
+
+def effective_writable(mounts: list[dict], allow: set[str], covered_by: dict[str, str]) -> list[str]:
+    by_dest = {}
+    for item in mounts:
+        by_dest.setdefault(item["dest"], item)
+    bad = []
+    seen = set()
+    for item in mounts:
+        if not item["rw"] or item["fstype"] in PSEUDO_FS or item["dest"] in allow:
+            continue
+        covered = covered_by.get(item["dest"])
+        if not isinstance(covered, str) or not covered:
+            token = f"{item['dest']} unreadable"
+        elif covered != item["dest"]:
+            upper = by_dest.get(covered)
+            if upper is None:
+                token = f"{item['dest']} malformed"
+            elif not upper["rw"] or upper["fstype"] in PSEUDO_FS or covered in allow:
+                continue
+            else:
+                token = f"{covered} {upper['fstype']}"
+        else:
+            token = f"{item['dest']} {item['fstype']}"
+        if token not in seen:
+            seen.add(token)
+            bad.append(token)
+    return bad
+
+
 def listen_ports(text: str) -> set[int]:
     ports = set()
     for line in text.splitlines()[1:]:
@@ -1339,10 +1478,22 @@ println("g7-auth-ready")
         if proc.returncode != 0:
             raise GateError("controller start failed: " + tail(self.guard, proc.stderr))
 
+    def jenkins_dot(self) -> Path:
+        path = self.private / "jenkins-dot"
+        path.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(path, 0o700)
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise GateError("jenkins dot dir is not a directory")
+        if info.st_uid != os.getuid() or (info.st_mode & 0o777) != 0o700 or any(path.iterdir()):
+            raise GateError("jenkins dot dir is not an empty 0700 directory of this user")
+        return path
+
     def start_java(self, name: str, image_args: list[str], network: str, userns: str, mounts: list[str]) -> None:
         # 1536 MiB stays bounded and sits above the 1 GiB TemporarySpaceMonitor default.
         cmd = self.podman_base(name, self.inbound_image, network, userns, tmp_size=1610612736)
         cmd += ["-e", "HOME=/home/jenkins/agent"]
+        cmd += ["--mount", f"type=bind,src={self.jenkins_dot()},dst=/home/jenkins/.jenkins,ro"]
         for mount in mounts:
             cmd += ["--mount", mount]
         for mount in self.common_mounts(self.private / "etc" / "hostname-agent"):
@@ -1606,9 +1757,31 @@ done
         self.delete_node("kiln-cleanup-fail")
 
     def rootfs(self, name: str, allow: set[str], home_probe: str) -> dict:
-        proc = self.exec(name, ["cat", "/proc/mounts"], 15)
-        mounts = parse_mounts(proc.stdout.decode())
-        bad = unexpected_writable(mounts, allow)
+        proc = self.exec(name, ["cat", "/proc/self/mountinfo"], 15)
+        mounts: list[dict] = []
+        bad = ["mountinfo unreadable"]
+        if proc.returncode == 0:
+            try:
+                mounts = parse_mountinfo(proc.stdout.decode())
+            except ValueError:
+                mounts = []
+                bad = ["mountinfo malformed"]
+            else:
+                covered: dict[str, str] = {}
+                probe_failed = False
+                for item in mounts:
+                    if not item["rw"] or item["fstype"] in PSEUDO_FS or item["dest"] in allow:
+                        continue
+                    measured = self.exec(name, ["stat", "-c", "%m", item["dest"]], 10)
+                    text = measured.stdout.decode().strip()
+                    if measured.returncode != 0 or not text.startswith("/"):
+                        probe_failed = True
+                        covered[item["dest"]] = ""
+                    else:
+                        covered[item["dest"]] = text
+                bad = effective_writable(mounts, allow, covered)
+                if probe_failed and not bad:
+                    bad = ["mount probe unreadable"]
         inspect = self.run(
             [
                 "podman",
@@ -1722,13 +1895,31 @@ done
         route_proc = self.exec(name, ["cat", "/proc/net/route"], 10)
         route6_proc = self.exec(name, ["cat", "/proc/net/ipv6_route"], 10)
         resolv_proc = self.exec(name, ["cat", "/etc/resolv.conf"], 10)
-        dev_proc = self.exec(name, ["ls", "/sys/class/net"], 10)
+        dev_proc = self.exec(name, ["cat", "/proc/net/dev"], 10)
+        netns_proc = self.exec(name, ["readlink", "/proc/1/ns/net"], 10)
         route_text = route_proc.stdout.decode()
         route6_text = route6_proc.stdout.decode()
         route_read_ok = route_proc.returncode == 0 and route_text.startswith("Iface")
         route6_read_ok = route6_proc.returncode == 0
         resolv_read_ok = resolv_proc.returncode == 0
-        devs = dev_proc.stdout.decode().split() if dev_proc.returncode == 0 else []
+        devs: list[str] = []
+        interfaces_read_ok = False
+        if dev_proc.returncode == 0:
+            try:
+                devs = parse_proc_net_dev(dev_proc.stdout.decode())
+            except ValueError:
+                devs = []
+            else:
+                interfaces_read_ok = True
+        netns = ""
+        netns_ok = False
+        if netns_proc.returncode == 0:
+            try:
+                netns = parse_netns_link(netns_proc.stdout.decode())
+            except ValueError:
+                netns = ""
+            else:
+                netns_ok = True
         gateway_hex = "".join(f"{int(part):02X}" for part in reversed(gateway.split(".")))
         gateway_present = route_read_ok and any(
             len(line.split()) > 2 and line.split()[2] == gateway_hex for line in route_text.splitlines()[1:]
@@ -1776,7 +1967,9 @@ done
             else [],
             "listeners_read_ok": tcp_proc.returncode == 0 and tcp6_proc.returncode == 0,
             "interfaces": devs,
-            "interfaces_read_ok": dev_proc.returncode == 0,
+            "interfaces_read_ok": interfaces_read_ok,
+            "netns": netns,
+            "netns_ok": netns_ok,
             "ipv4_default": ipv4_default(route_text) if route_read_ok else True,
             "ipv6_default": ipv6_default(route6_text) if route6_read_ok else True,
             "route_read_ok": route_read_ok,
@@ -1800,6 +1993,7 @@ done
             "resolv_read_ok",
             "listeners_read_ok",
             "interfaces_read_ok",
+            "netns_ok",
             "websocket_endpoint",
             "positive_direct",
         ):
@@ -1832,6 +2026,7 @@ done
                 "local_http": sample["local_http"],
                 "websocket_status": sample["websocket_status"],
                 "interfaces": sample["interfaces"],
+                "netns": sample.get("netns", ""),
                 "ports": sample["ports"],
                 "foreign_ipv4": sample["foreign_ipv4"],
                 "foreign_ipv6": sample["foreign_ipv6"],
@@ -1856,6 +2051,7 @@ done
             and sample["resolv_read_ok"]
             and sample["listeners_read_ok"]
             and sample["interfaces_read_ok"]
+            and sample["netns_ok"]
             and sample["local_http"] == "200"
             and sample["websocket_endpoint"]
             and not sample["websocket_status"].startswith(("HTTP/1.1 403", "HTTP/1.1 404"))
@@ -2431,13 +2627,16 @@ done
             "mode": mode,
         }
 
-    def tmpfs_spec(self, destination: str) -> dict:
+    def tmpfs_spec(self, destination: str, size: int) -> dict:
         return {
             "destination": destination,
             "type": "tmpfs",
             "rw": True,
             "source": "",
             "mode": 0o1777,
+            "size": size,
+            "nosuid": True,
+            "nodev": True,
             "container_uid": 0,
             "container_gid": 0,
         }
@@ -2450,20 +2649,21 @@ done
             self.bind_spec(etc / "hosts", "/etc/hosts", False, 0o644),
             self.bind_spec(etc / "resolv.conf", "/etc/resolv.conf", False, 0o644),
             self.bind_spec(etc / "hostname-controller", "/etc/hostname", False, 0o644),
-            self.tmpfs_spec("/tmp"),
-            self.tmpfs_spec("/dev/shm"),
+            self.tmpfs_spec("/tmp", 268435456),
+            self.tmpfs_spec("/dev/shm", 67108864),
         ]
 
     def agent_mount_specs(self) -> list[dict]:
         etc = self.private / "etc"
         return [
             self.bind_spec(self.private / "work", "/home/jenkins/agent", True, 0o700),
+            self.bind_spec(self.jenkins_dot(), "/home/jenkins/.jenkins", False, 0o700),
             self.bind_spec(self.private / "args", "/run/kiln-g7-args", False, 0o700),
             self.bind_spec(etc / "hosts", "/etc/hosts", False, 0o644),
             self.bind_spec(etc / "resolv.conf", "/etc/resolv.conf", False, 0o644),
             self.bind_spec(etc / "hostname-agent", "/etc/hostname", False, 0o644),
-            self.tmpfs_spec("/tmp"),
-            self.tmpfs_spec("/dev/shm"),
+            self.tmpfs_spec("/tmp", 1610612736),
+            self.tmpfs_spec("/dev/shm", 67108864),
         ]
 
     def mount_inventory(self, name: str, required: list[dict]) -> dict:
@@ -2471,8 +2671,12 @@ done
         if raw.returncode != 0:
             raise GateError(f"inspect failed for {name}")
         meta = json.loads(raw.stdout)[0]
+        mounted = meta.get("Mounts")
+        host = meta.get("HostConfig")
+        if not isinstance(mounted, list) or not isinstance(host, dict) or not isinstance(host.get("Tmpfs"), dict):
+            return {"ok": False, "missing": [], "unexpected": [], "mounts": [], "env_bad": False, "malformed": "inspect mounts"}
         rows = []
-        for item in meta.get("Mounts") or []:
+        for item in mounted:
             source = str(item.get("Source") or "")
             host_stat = None
             if source:
@@ -2493,6 +2697,16 @@ done
                     "host_stat": host_stat,
                 }
             )
+        malformed = merge_host_tmpfs(rows, host["Tmpfs"])
+        if malformed:
+            return {"ok": False, "missing": [], "unexpected": [], "mounts": rows, "env_bad": False, "malformed": malformed}
+        live_proc = self.exec(name, ["cat", "/proc/self/mountinfo"], 10)
+        try:
+            live = parse_mountinfo(live_proc.stdout.decode()) if live_proc.returncode == 0 else None
+        except ValueError:
+            live = None
+        if live is None:
+            return {"ok": False, "missing": [], "unexpected": [], "mounts": rows, "env_bad": False, "malformed": "mountinfo"}
         missing = []
         matched = set()
         for spec in required:
@@ -2507,10 +2721,8 @@ done
                 )
                 mode_text = str(row["mode"] or "")
                 mode_ok = True if not mode_text else mode_text.startswith("rw" if spec["rw"] else "ro")
-                options = row["options"] or []
-                if isinstance(options, str):
-                    options = [item for item in options.split(",") if item]
-                options_ok = not any(str(option) in {"shared", "rshared", "master", "rslave"} for option in options)
+                options = mount_option_set(row.get("options"))
+                options_ok = options is not None and not options.intersection({"shared", "rshared", "master", "rslave"})
                 stat_ok = True
                 if spec["type"] == "bind":
                     stat_ok = (
@@ -2519,17 +2731,25 @@ done
                         and row["host_stat"]["mode"] == spec["mode"]
                     )
                 elif spec["type"] == "tmpfs":
-                    measured = self.exec(name, ["stat", "-c", "%u %g %a", spec["destination"]], 10)
-                    if measured.returncode != 0:
-                        stat_ok = False
-                    else:
-                        observed = measured.stdout.decode().split()
-                        row["container_stat"] = observed
-                        stat_ok = observed == [
+                    options_ok = bool(options_ok and options is not None and tmpfs_flags_ok(options, spec["size"], spec["mode"]))
+                    measured = self.exec(name, ["stat", "-c", "%u %g %a %m", spec["destination"]], 10)
+                    observed = measured.stdout.decode().split()
+                    row["container_stat"] = observed
+                    live_ok = any(
+                        item["dest"] == spec["destination"] and tmpfs_flags_ok(set(item["options"]), spec["size"], spec["mode"])
+                        for item in live
+                    )
+                    stat_ok = (
+                        measured.returncode == 0
+                        and observed
+                        == [
                             str(spec["container_uid"]),
                             str(spec["container_gid"]),
                             format(spec["mode"], "o"),
+                            spec["destination"],
                         ]
+                        and live_ok
+                    )
                 if (
                     row["type"] == spec["type"]
                     and row["rw"] is spec["rw"]
@@ -2623,7 +2843,7 @@ done
         else:
             names = [item for item in proc.stdout.decode().split() if item.startswith("kiln-g7-")]
         secret_left = []
-        for relative in ("auth", "args", "neg-args", "cleanup-args", "jnlp", "jenkins-home", "work", "work-neg", "work-cleanup"):
+        for relative in ("auth", "args", "neg-args", "cleanup-args", "jnlp", "jenkins-home", "jenkins-dot", "work", "work-neg", "work-cleanup"):
             path = self.private / relative
             try:
                 if path.is_dir() and not path.is_symlink():
@@ -2795,7 +3015,11 @@ done
             finally:
                 listener.close()
                 listener6.close()
-            net_ok = self.safe_network(before) and self.safe_network(after)
+            net_ok = (
+                self.safe_network(before)
+                and self.safe_network(after)
+                and before["netns"] == after["netns"]
+            )
             self.ledger.record(
                 "G7-NET-CLOSED",
                 "PASS" if net_ok else "FAIL",
