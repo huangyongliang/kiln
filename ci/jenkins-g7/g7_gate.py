@@ -983,7 +983,7 @@ class Gate:
         self.ledger.record(test_id, "FAIL", expected, observed, teardown="owned resources removed in finally")
         self.aborted = observed
 
-    def podman_base(self, name: str, image: str, network: str, userns: str) -> list[str]:
+    def podman_base(self, name: str, image: str, network: str, userns: str, tmp_size: int = 268435456) -> list[str]:
         return [
             "podman",
             "run",
@@ -1008,7 +1008,7 @@ class Gate:
             "--unsetenv=_JAVA_OPTIONS",
             *[f"--unsetenv={name}" for name in PROXY_ENV],
             "--tmpfs",
-            "/tmp:rw,nosuid,nodev,mode=1777,size=268435456",
+            f"/tmp:rw,nosuid,nodev,mode=1777,size={tmp_size}",
             "--tmpfs",
             "/dev/shm:rw,nosuid,nodev,mode=1777,size=67108864",
         ]
@@ -1340,7 +1340,8 @@ println("g7-auth-ready")
             raise GateError("controller start failed: " + tail(self.guard, proc.stderr))
 
     def start_java(self, name: str, image_args: list[str], network: str, userns: str, mounts: list[str]) -> None:
-        cmd = self.podman_base(name, self.inbound_image, network, userns)
+        # 1536 MiB stays bounded and sits above the 1 GiB TemporarySpaceMonitor default.
+        cmd = self.podman_base(name, self.inbound_image, network, userns, tmp_size=1610612736)
         cmd += ["-e", "HOME=/home/jenkins/agent"]
         for mount in mounts:
             cmd += ["--mount", mount]
