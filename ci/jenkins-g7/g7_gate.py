@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import select
 import shutil
 import socket
 import stat
@@ -18,6 +19,7 @@ import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from pathlib import Path
 
 SO_PEERCRED = 17
@@ -557,6 +559,302 @@ class OutsideListener:
         self.sock.close()
 
 
+OBS_BYTE_CAP = 65536
+OBS_READ_TARGET = 5.0
+OBS_WAIT_TARGET = 1.0
+OBS_PHASES = frozenset(
+    {
+        "BEFORE_EXACT",
+        "EXACT_FAILED",
+        "AFTER_EXACT",
+        "EXTRA_SUCCESS",
+        "EXTRA_TIMEOUT",
+        "EXTRA_FAILED",
+    }
+)
+OBS_EVENTS = (
+    ("Terminated", "TERMINATED"),
+    ("Performing onReconnect operation.", "ON_RECONNECT"),
+    ("Restarting agent via ", "RESTARTER_ATTEMPT"),
+    ("Failed to exec", "EXEC_FAILED"),
+)
+_OBS_STAMP_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?Z (.*)\Z", re.DOTALL)
+_OBS_EVENT_RE = re.compile(
+    r"^event=(TERMINATED|ON_RECONNECT|RESTARTER_ATTEMPT|EXEC_FAILED)@"
+    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z|UNKNOWN)$"
+)
+
+
+def obs_extra_terminal(timed_out: bool) -> str:
+    if timed_out:
+        return "EXTRA_TIMEOUT"
+    return "EXTRA_FAILED"
+
+
+def obs_resolve(original: BaseException | None, reap_unconfirmed: bool, emit_failed: bool) -> BaseException | None:
+    if original is not None:
+        return original
+    if reap_unconfirmed:
+        return GateError("observation collector reap unconfirmed")
+    if emit_failed:
+        return GateError("observation emission failed")
+    return None
+
+
+def obs_safe_emit(write, text: str) -> bool:
+    try:
+        write(text)
+        return True
+    except Exception:
+        return False
+
+
+def obs_split_stamp(line: str) -> tuple[str, str]:
+    match = _OBS_STAMP_RE.match(line)
+    if match is None:
+        return "UNKNOWN", line
+    try:
+        datetime(
+            int(match.group(1)),
+            int(match.group(2)),
+            int(match.group(3)),
+            int(match.group(4)),
+            int(match.group(5)),
+            int(match.group(6)),
+            tzinfo=timezone.utc,
+        )
+    except ValueError:
+        return "UNKNOWN", match.group(8)
+    fraction = match.group(7) or ""
+    stamp = (
+        f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+        f"T{int(match.group(4)):02d}:{int(match.group(5)):02d}:{int(match.group(6)):02d}{fraction}Z"
+    )
+    return stamp, match.group(8)
+
+
+def obs_events_from_lines(stdout_lines: list[str], stderr_lines: list[str]) -> tuple[list[str], bool, bool]:
+    pairs: set[tuple[str, str]] = set()
+    ambiguous = False
+    for line in stdout_lines:
+        for pair in _obs_pairs(line):
+            pairs.add(pair)
+    for line in stderr_lines:
+        for pair in _obs_pairs(line):
+            pairs.add(pair)
+    by_id: dict[str, set[str]] = {}
+    for event_id, stamp in pairs:
+        by_id.setdefault(event_id, set()).add(stamp)
+        if stamp == "UNKNOWN":
+            ambiguous = True
+    if any(len(stamps) > 1 for stamps in by_id.values()):
+        ambiguous = True
+    capped = len(pairs) > 8
+    if capped:
+        ambiguous = True
+    exported = [f"event={event_id}@{stamp}" for event_id, stamp in sorted(pairs)[:8]]
+    exported = [item for item in exported if _OBS_EVENT_RE.fullmatch(item)]
+    return exported, ambiguous, capped
+
+
+def _obs_pairs(line: str) -> list[tuple[str, str]]:
+    stamp, payload = obs_split_stamp(line)
+    return [(event_id, stamp) for needle, event_id in OBS_EVENTS if needle in payload]
+
+
+def _obs_complete_lines(buf: bytes) -> tuple[list[str], bytes]:
+    lines: list[str] = []
+    while True:
+        mark = buf.find(b"\n")
+        if mark < 0:
+            return lines, buf
+        lines.append(buf[:mark].decode("utf-8", "replace"))
+        buf = buf[mark + 1 :]
+
+
+def obs_read_streams(proc) -> tuple[list[str], list[str], bool, bool, bool, bool]:
+    streams = (proc.stdout, proc.stderr)
+    pending = {stream: b"" for stream in streams}
+    lines = {stream: [] for stream in streams}
+    eof = {stream: False for stream in streams}
+    remaining = OBS_BYTE_CAP
+    discarded = False
+    truncated = False
+    read_failed = False
+    deadline = time.monotonic() + OBS_READ_TARGET
+    os.set_blocking(proc.stdout.fileno(), False)
+    os.set_blocking(proc.stderr.fileno(), False)
+    while remaining > 0 and not all(eof.values()):
+        if time.monotonic() >= deadline:
+            read_failed = True
+            break
+        watch = [stream for stream in streams if not eof[stream]]
+        try:
+            ready, _, _ = select.select(watch, [], [], max(0.0, deadline - time.monotonic()))
+        except Exception:
+            read_failed = True
+            break
+        late = time.monotonic() >= deadline
+        if not ready:
+            read_failed = True
+            break
+        if late:
+            read_failed = True
+        stop = False
+        for stream in ready:
+            if remaining <= 0 or eof[stream]:
+                continue
+            try:
+                chunk = os.read(stream.fileno(), remaining)
+            except BlockingIOError:
+                continue
+            except Exception:
+                read_failed = True
+                stop = True
+                break
+            if not isinstance(chunk, (bytes, bytearray)):
+                read_failed = True
+                stop = True
+                break
+            if len(chunk) > remaining:
+                chunk = bytes(chunk[:remaining])
+                truncated = True
+            if chunk == b"":
+                eof[stream] = True
+                if pending[stream]:
+                    discarded = True
+                    pending[stream] = b""
+                continue
+            remaining -= len(chunk)
+            pending[stream] = pending[stream] + bytes(chunk)
+            complete, pending[stream] = _obs_complete_lines(pending[stream])
+            lines[stream].extend(complete)
+            if remaining <= 0:
+                truncated = True
+                stop = True
+                break
+        if time.monotonic() >= deadline:
+            read_failed = True
+            break
+        if stop:
+            break
+    if remaining <= 0:
+        truncated = True
+    for stream in streams:
+        if pending[stream]:
+            discarded = True
+            pending[stream] = b""
+    if time.monotonic() >= deadline:
+        read_failed = True
+    both_eof = all(eof.values()) and not read_failed and not truncated
+    return lines[streams[0]], lines[streams[1]], discarded, truncated, read_failed, both_eof
+
+
+def obs_close_kill_wait(proc) -> tuple[bool, bool, int | None]:
+    cleanup_error = False
+    for stream in (getattr(proc, "stdout", None), getattr(proc, "stderr", None)):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except Exception:
+            cleanup_error = True
+    try:
+        running = proc.poll() is None
+    except Exception:
+        cleanup_error = True
+        running = True
+    if running:
+        try:
+            proc.kill()
+        except Exception:
+            cleanup_error = True
+    try:
+        proc.wait(timeout=OBS_WAIT_TARGET)
+    except Exception:
+        cleanup_error = True
+    try:
+        returncode = proc.poll()
+    except Exception:
+        cleanup_error = True
+        returncode = None
+    return cleanup_error, returncode is not None, returncode
+
+
+def obs_judge(returncode: int | None, both_eof: bool, discarded: bool, truncated: bool, read_failed: bool, reaped: bool) -> str:
+    if reaped and returncode == 0 and both_eof and not discarded and not truncated and not read_failed:
+        return "ok"
+    return "failed"
+
+
+def obs_format_line(phase: str, fields: dict) -> str:
+    phase_token = phase if phase in OBS_PHASES else "UNKNOWN"
+    stamp, _rest = obs_split_stamp(str(fields.get("ts", "")) + " marker")
+    events = [item for item in fields.get("events", []) if _OBS_EVENT_RE.fullmatch(item)]
+    ambiguous = "true" if fields.get("ambiguous") else "false"
+    capped = "true" if fields.get("events_capped") else "false"
+    capture = "ok" if fields.get("capture") == "ok" else "failed"
+    cleanup = "error" if fields.get("cleanup") == "error" else "ok"
+    reap = "unconfirmed" if fields.get("reap") == "unconfirmed" else "confirmed"
+    tokens = [
+        f"phase={phase_token}",
+        f"ts={stamp}",
+        f"capture={capture}",
+        "interval_coverage=UNKNOWN",
+        "gaps_possible=true",
+        "order=ambiguous",
+        f"ambiguous={ambiguous}",
+        f"events_capped={capped}",
+        *events,
+        "unmatched=UNKNOWN",
+        "events_do_not_exclude_exec",
+        f"cleanup={cleanup}",
+        f"reap={reap}",
+    ]
+    return "G7-OBS " + " ".join(tokens)
+
+
+def obs_capture(agent: str, live: list) -> dict:
+    proc = subprocess.Popen(
+        ["podman", "logs", "--timestamps", "--tail", "200", agent],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    live.append(proc)
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    discarded = False
+    truncated = False
+    read_failed = True
+    both_eof = False
+    try:
+        if proc.stdout is None or proc.stderr is None:
+            read_failed = True
+        else:
+            stdout_lines, stderr_lines, discarded, truncated, read_failed, both_eof = obs_read_streams(proc)
+    except Exception:
+        read_failed = True
+    cleanup_error, reaped, returncode = obs_close_kill_wait(proc)
+    if reaped:
+        try:
+            live.remove(proc)
+        except ValueError:
+            pass
+    events, ambiguous, capped = obs_events_from_lines(stdout_lines, stderr_lines)
+    if discarded or truncated:
+        ambiguous = True
+    del stdout_lines, stderr_lines
+    return {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "capture": obs_judge(returncode, both_eof, discarded, truncated, read_failed, reaped),
+        "ambiguous": ambiguous,
+        "events_capped": capped,
+        "events": events,
+        "cleanup": "error" if cleanup_error else "ok",
+        "reap": "confirmed" if reaped else "unconfirmed",
+    }
+
+
 class Gate:
     def __init__(self) -> None:
         self.guard = Guard()
@@ -582,6 +880,11 @@ class Gate:
         self.crumbs: dict[str, str] = {}
         self.containers = [self.controller, self.agent, self.neg, self.cleanup_name]
         self.phase = ""
+        self._obs_live: list = []
+        self._obs_reap_unconfirmed = False
+        self._obs_emit_failed = False
+        self._obs_cleanup_error = False
+        self._extra_wait_timed_out = False
 
     def check_time(self, phase: str) -> None:
         if time.monotonic() > self.deadline:
@@ -1587,6 +1890,69 @@ done
         if code not in {200, 201, 302, 303}:
             raise GateError(f"trigger {name} returned {code}")
 
+    def emit_observation(self, phase: str) -> None:
+        if phase not in OBS_PHASES:
+            return
+        try:
+            if self._obs_reap_unconfirmed:
+                fields = {
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "capture": "failed",
+                    "ambiguous": False,
+                    "events_capped": False,
+                    "events": [],
+                    "cleanup": "error" if self._obs_cleanup_error else "ok",
+                    "reap": "unconfirmed",
+                }
+            else:
+                fields = obs_capture(self.agent, self._obs_live)
+                if fields["reap"] == "unconfirmed":
+                    self._obs_reap_unconfirmed = True
+                if fields["cleanup"] == "error":
+                    self._obs_cleanup_error = True
+            text = obs_format_line(phase, fields)
+        except Exception:
+            self._obs_cleanup_error = True
+            text = obs_format_line(
+                phase,
+                {
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "capture": "failed",
+                    "ambiguous": True,
+                    "events_capped": False,
+                    "events": [],
+                    "cleanup": "error",
+                    "reap": "unconfirmed" if self._obs_reap_unconfirmed else "confirmed",
+                },
+            )
+        if not obs_safe_emit(lambda line: print(line, flush=True), text):
+            self._obs_emit_failed = True
+
+    def _finish_obs(self, original: BaseException | None) -> None:
+        exc = obs_resolve(original, self._obs_reap_unconfirmed, self._obs_emit_failed)
+        if exc is not None:
+            raise exc
+
+    def _obs_teardown_fallback(self) -> None:
+        try:
+            for proc in list(self._obs_live):
+                try:
+                    cleanup_error, reaped, _returncode = obs_close_kill_wait(proc)
+                except Exception:
+                    cleanup_error, reaped = True, False
+                if cleanup_error:
+                    self._obs_cleanup_error = True
+                if reaped:
+                    try:
+                        self._obs_live.remove(proc)
+                    except ValueError:
+                        pass
+                else:
+                    self._obs_reap_unconfirmed = True
+        except Exception:
+            self._obs_cleanup_error = True
+            self._obs_reap_unconfirmed = True
+
     def wait_build(self, name: str, secret: str) -> tuple[dict, dict]:
         deadline = time.time() + 90
         saw_child_pid = False
@@ -1617,7 +1983,10 @@ done
                         "clean": saw_child_pid and not secret_seen and not read_failed,
                     }
             time.sleep(1)
-        raise GateError(f"{name} timed out {self.schedule_class(name)}")
+        message = f"{name} timed out {self.schedule_class(name)}"
+        if name == "kiln-g7-extra":
+            self._extra_wait_timed_out = True
+        raise GateError(message)
 
     def schedule_class(self, name: str) -> str:
         code, body = self.http("/computer/kiln-managed-1/api/json?tree=offline,idle,numExecutors", user="feas-admin")
@@ -2279,20 +2648,34 @@ done
                 still = self.wait_online("kiln-managed-1", 20)
                 self.phase = "G7-EXCLUSIVE"
                 queue = self.queue_case()
-                exact = self.pinned_job(
-                    "kiln-g7-exact",
-                    "echo pinned-ok | tee marker.txt\nsleep 3",
-                    "kiln-managed-1",
-                    b"pinned-ok",
-                    secret,
-                )
-                extra = self.pinned_job(
-                    "kiln-g7-extra",
-                    "echo extra-label-ok | tee marker.txt\nsleep 3",
-                    "kiln-slot-jdk-maven",
-                    b"extra-label-ok",
-                    secret,
-                )
+                self.emit_observation("BEFORE_EXACT")
+                self._finish_obs(None)
+                try:
+                    exact = self.pinned_job(
+                        "kiln-g7-exact",
+                        "echo pinned-ok | tee marker.txt\nsleep 3",
+                        "kiln-managed-1",
+                        b"pinned-ok",
+                        secret,
+                    )
+                except Exception as exc:
+                    self.emit_observation("EXACT_FAILED")
+                    self._finish_obs(exc)
+                self.emit_observation("AFTER_EXACT")
+                self._finish_obs(None)
+                try:
+                    extra = self.pinned_job(
+                        "kiln-g7-extra",
+                        "echo extra-label-ok | tee marker.txt\nsleep 3",
+                        "kiln-slot-jdk-maven",
+                        b"extra-label-ok",
+                        secret,
+                    )
+                except Exception as exc:
+                    self.emit_observation(obs_extra_terminal(self._extra_wait_timed_out))
+                    self._finish_obs(exc)
+                self.emit_observation("EXTRA_SUCCESS")
+                self._finish_obs(None)
             finally:
                 listener.close()
                 listener6.close()
@@ -2414,6 +2797,7 @@ done
                 status = "BLOCKED" if "rootless" in message or "Docker socket" in message else "FAIL"
                 self.ledger.force(self.phase, status, "completed measurement", message)
         finally:
+            self._obs_teardown_fallback()
             try:
                 removed = self.remove_owned()
                 teardown_ok = not removed["remaining_containers"] and not removed["secret_dirs_left"] and not removed["errors"]
@@ -2430,6 +2814,10 @@ done
             except Exception as exc:  # noqa: BLE001
                 self.aborted = self.aborted or "teardown failed"
                 self.ledger.force("G7-TEARDOWN", "FAIL", "teardown", tail(self.guard, str(exc).encode()))
+            if not self.aborted and self._obs_reap_unconfirmed:
+                self.aborted = "observation collector reap unconfirmed"
+            elif not self.aborted and self._obs_emit_failed:
+                self.aborted = "observation emission failed"
             self.phase = "G7-PEER-UID"
             self.peer_result()
             self.ledger.fill_missing(self.aborted or "not reached")
