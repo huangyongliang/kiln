@@ -814,6 +814,89 @@ def obs_format_line(phase: str, fields: dict) -> str:
     return "G7-OBS " + " ".join(tokens)
 
 
+def _obs_bool(value: object) -> str:
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    return "unknown"
+
+
+def _obs_int(value: object) -> str:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return "none"
+    return str(value)
+
+
+def obs_cause_class(cause: object) -> str:
+    if not isinstance(cause, dict):
+        return "none"
+    name = cause.get("_class")
+    if not isinstance(name, str) or not name:
+        return "none"
+    if name.endswith("$DiskSpace") or name.endswith(".DiskSpace"):
+        return "disk_space"
+    if name.endswith("$ChannelTermination"):
+        return "channel_termination"
+    if name.endswith("$SimpleOfflineCause"):
+        return "simple_offline"
+    if name.endswith("$UserCause"):
+        return "user_cause"
+    return "other"
+
+
+def obs_path_class(path: object) -> str:
+    if not isinstance(path, str) or not path:
+        return "NONE"
+    if path == "/tmp" or path.startswith("/tmp/"):
+        return "TMP"
+    return "OTHER"
+
+
+def obs_reason_class(reason: object) -> str:
+    if not isinstance(reason, str) or not reason.strip():
+        return "none"
+    text = reason.casefold()
+    if "disk space" in text:
+        return "disk_space"
+    if "connection was broken" in text or "channel is terminated" in text or (
+        "channel" in text and any(token in text for token in ("terminat", "broken", "closed"))
+    ):
+        return "channel_terminated"
+    if "monitor" in text:
+        return "monitor_offline"
+    return "other"
+
+
+def obs_node_status_line(phase: str, data: object) -> str:
+    phase_token = phase if phase in {"BEFORE_EXACT", "AFTER_EXACT", "EXTRA_TIMEOUT"} else "UNKNOWN"
+    if not isinstance(data, dict):
+        return f"G7-NODE phase={phase_token} read=failed"
+    cause = data.get("offlineCause")
+    cause_class = obs_cause_class(cause)
+    cause_ts = "none"
+    size = "none"
+    total_size = "none"
+    threshold = "none"
+    path_class = "NONE"
+    if isinstance(cause, dict):
+        cause_ts = _obs_int(cause.get("timestamp"))
+        if cause_class == "disk_space":
+            size = _obs_int(cause.get("size"))
+            total_size = _obs_int(cause.get("totalSize"))
+            threshold = _obs_int(cause.get("threshold"))
+            path_class = obs_path_class(cause.get("path"))
+    executors = data.get("numExecutors")
+    executor_token = str(executors) if isinstance(executors, int) and not isinstance(executors, bool) else "unknown"
+    return (
+        f"G7-NODE phase={phase_token} offline={_obs_bool(data.get('offline'))} "
+        f"temporarily_offline={_obs_bool(data.get('temporarilyOffline'))} "
+        f"idle={_obs_bool(data.get('idle'))} executors={executor_token} "
+        f"cause_class={cause_class} cause_ts={cause_ts} size={size} total_size={total_size} "
+        f"threshold={threshold} path_class={path_class} reason_class={obs_reason_class(data.get('offlineCauseReason'))}"
+    )
+
+
 def obs_capture(agent: str, live: list) -> dict:
     proc = subprocess.Popen(
         ["podman", "logs", "--timestamps", "--tail", "200", agent],
@@ -1927,6 +2010,22 @@ done
             )
         if not obs_safe_emit(lambda line: print(line, flush=True), text):
             self._obs_emit_failed = True
+        if phase in {"BEFORE_EXACT", "AFTER_EXACT", "EXTRA_TIMEOUT"}:
+            try:
+                status = self._node_status_line(phase)
+            except Exception:
+                status = f"G7-NODE phase={phase} read=failed"
+            obs_safe_emit(lambda line: print(line, flush=True), status)
+
+    def _node_status_line(self, phase: str) -> str:
+        code, body = self.http(
+            "/computer/kiln-managed-1/api/json?tree=offline,temporarilyOffline,idle,numExecutors,"
+            "offlineCause[_class,timestamp,size,totalSize,threshold,path],offlineCauseReason",
+            user="feas-admin",
+        )
+        if code != 200:
+            return f"G7-NODE phase={phase} read=failed"
+        return obs_node_status_line(phase, json.loads(body))
 
     def _finish_obs(self, original: BaseException | None) -> None:
         exc = obs_resolve(original, self._obs_reap_unconfirmed, self._obs_emit_failed)
@@ -2267,24 +2366,19 @@ done
         return path
 
     def offline_class(self) -> str:
-        code, body = self.http(
-            "/computer/kiln-managed-1/api/json?tree=offline,offlineCause[description]",
-            user="feas-admin",
-        )
-        if code != 200:
-            return f"http{code}"
-        data = json.loads(body)
-        if data.get("offline") is not True:
+        try:
+            code, body = self.http(
+                "/computer/kiln-managed-1/api/json?tree=offline,offlineCause[_class],offlineCauseReason",
+                user="feas-admin",
+            )
+            if code != 200:
+                return f"http{code}"
+            data = json.loads(body)
+        except Exception:
+            return "unknown"
+        if not isinstance(data, dict) or data.get("offline") is not True:
             return "online"
-        description = str((data.get("offlineCause") or {}).get("description") or "")
-        match = re.search(r"([A-Za-z_][A-Za-z0-9_]*Exception)", description)
-        if match:
-            return match.group(1)
-        lowered = description.lower()
-        for token in ("broken", "terminated", "disconnect", "offline"):
-            if token in lowered:
-                return token
-        return "text" if description else "empty"
+        return f"{obs_cause_class(data.get('offlineCause'))}/{obs_reason_class(data.get('offlineCauseReason'))}"
 
     def wait_online(self, name: str, timeout: int) -> bool:
         deadline = time.time() + timeout
