@@ -453,6 +453,276 @@ def effective_writable(mounts: list[dict], allow: set[str], covered_by: dict[str
     return bad
 
 
+_FIRMWARE_DEST = "/sys/firmware/efi/efivars"
+_FIRMWARE_STDERR = re.compile(
+    rb"stat: cannot statx? '" + re.escape(_FIRMWARE_DEST.encode("ascii")) + rb"': ([A-Za-z][A-Za-z ]{0,64})\n?\Z"
+)
+_FIRMWARE_FAILURE = {
+    "Permission denied": "permission",
+    "Operation not permitted": "permission",
+    "No such file or directory": "absent",
+    "Not a directory": "other",
+    "Input/output error": "other",
+    "Too many levels of symbolic links": "other",
+    "File name too long": "other",
+    "Invalid argument": "other",
+    "Read-only file system": "other",
+    "No such device": "other",
+    "No such device or address": "other",
+    "Is a directory": "other",
+    "Device or resource busy": "other",
+    "Stale file handle": "other",
+}
+_DIAG_TRI = {"true", "false", "UNKNOWN"}
+_MOUNT_TARGETS = {"/tmp": "TMP", "/dev/shm": "SHM"}
+_LIVE_MODE = {"unknown", "absent", "present1777", "other"}
+_LIVE_SIZE = {"unknown", "absent", "exact-bytes", "exact-kibibytes", "other"}
+_SIZE_LIMIT = 1 << 32
+
+
+def _firmware_unknown() -> dict:
+    return {
+        "target": "FIRMWARE",
+        "exit": "unknown",
+        "failure": "unknown",
+        "covering_match": "UNKNOWN",
+        "mask_proof": "UNKNOWN",
+    }
+
+
+def _seal_firmware(diag: dict) -> dict:
+    sealed = _firmware_unknown()
+    if diag.get("exit") in {"nonzero", "malformed-stdout", "ok", "unknown"}:
+        sealed["exit"] = diag["exit"]
+    if diag.get("failure") in {"permission", "absent", "other", "unknown"}:
+        sealed["failure"] = diag["failure"]
+    if diag.get("covering_match") in _DIAG_TRI:
+        sealed["covering_match"] = diag["covering_match"]
+    if diag.get("mask_proof") in _DIAG_TRI:
+        sealed["mask_proof"] = diag["mask_proof"]
+    return sealed
+
+
+def _firmware_failure(stderr: bytes | None) -> str:
+    if not isinstance(stderr, bytes) or not stderr or len(stderr) > 160:
+        return "unknown"
+    matched = _FIRMWARE_STDERR.fullmatch(stderr)
+    if not matched:
+        return "unknown"
+    return _FIRMWARE_FAILURE.get(matched.group(1).decode("ascii"), "unknown")
+
+
+def _safe_mount_path(stdout: bytes | None) -> str | None:
+    if not isinstance(stdout, bytes) or not stdout or len(stdout) > 128:
+        return None
+    if stdout.count(b"\n") > 1 or b"\r" in stdout or b"\x00" in stdout:
+        return None
+    text = stdout.strip().decode("ascii", "ignore")
+    if not re.fullmatch(r"/[A-Za-z0-9._/-]+", text):
+        return None
+    return text
+
+
+def classify_firmware_probe(proc: object, mounts: list[dict], allow: set[str]) -> dict:
+    diag = _firmware_unknown()
+    code = getattr(proc, "returncode", None)
+    stdout = getattr(proc, "stdout", None)
+    stderr = getattr(proc, "stderr", None)
+    if not isinstance(code, int):
+        return diag
+    if code != 0:
+        diag["exit"] = "nonzero"
+        diag["failure"] = _firmware_failure(stderr if isinstance(stderr, bytes) else None)
+        return _seal_firmware(diag)
+    path = _safe_mount_path(stdout if isinstance(stdout, bytes) else None)
+    if path is None:
+        diag["exit"] = "malformed-stdout"
+        return _seal_firmware(diag)
+    diag["exit"] = "ok"
+    if path == _FIRMWARE_DEST:
+        diag["covering_match"] = "true"
+        diag["mask_proof"] = "false"
+        return _seal_firmware(diag)
+    diag["covering_match"] = "false"
+    upper = None
+    if isinstance(mounts, list):
+        for item in mounts:
+            if isinstance(item, dict) and item.get("dest") == path:
+                upper = item
+                break
+    fstype = upper.get("fstype") if isinstance(upper, dict) else None
+    rw = upper.get("rw") if isinstance(upper, dict) else None
+    if not isinstance(fstype, str) or not isinstance(rw, bool) or not isinstance(allow, set):
+        diag["mask_proof"] = "UNKNOWN"
+        return _seal_firmware(diag)
+    if (not rw) or fstype in PSEUDO_FS or path in allow:
+        diag["mask_proof"] = "true"
+    else:
+        diag["mask_proof"] = "false"
+    return _seal_firmware(diag)
+
+
+def _mount_side(side: str) -> str:
+    return side if side in {"CONTROLLER", "AGENT"} else "UNKNOWN"
+
+
+def _blank_mount_target(side: str, target: str) -> dict:
+    return {
+        "side": side,
+        "target": target,
+        "seen": False,
+        "type": False,
+        "rw": False,
+        "source": False,
+        "mode": False,
+        "options": False,
+        "stat": False,
+        "flag_rw": False,
+        "flag_nosuid": False,
+        "flag_nodev": False,
+        "flag_mode": False,
+        "flag_size": False,
+        "live_row": False,
+        "live_literal": False,
+        "live_mode": "unknown",
+        "live_size": "unknown",
+        "live_size_bytes": None,
+        "covering_match": "UNKNOWN",
+    }
+
+
+def _seal_mount_diag(diag: dict) -> dict:
+    number = diag.get("live_size_bytes")
+    if isinstance(number, bool) or not isinstance(number, int) or number < 0 or number > _SIZE_LIMIT:
+        number = None
+    sealed = _blank_mount_target(
+        diag.get("side") if diag.get("side") in {"CONTROLLER", "AGENT", "UNKNOWN"} else "UNKNOWN",
+        diag.get("target") if diag.get("target") in {"TMP", "SHM"} else "UNKNOWN",
+    )
+    for key in (
+        "seen",
+        "type",
+        "rw",
+        "source",
+        "mode",
+        "options",
+        "stat",
+        "flag_rw",
+        "flag_nosuid",
+        "flag_nodev",
+        "flag_mode",
+        "flag_size",
+        "live_row",
+        "live_literal",
+    ):
+        sealed[key] = diag.get(key) is True
+    if diag.get("live_mode") in _LIVE_MODE:
+        sealed["live_mode"] = diag["live_mode"]
+    if diag.get("live_size") in _LIVE_SIZE:
+        sealed["live_size"] = diag["live_size"]
+    sealed["live_size_bytes"] = number
+    if diag.get("covering_match") in _DIAG_TRI:
+        sealed["covering_match"] = diag["covering_match"]
+    if not sealed["live_row"]:
+        sealed["live_mode"] = "unknown"
+        sealed["live_size"] = "unknown"
+        sealed["live_size_bytes"] = None
+    return sealed
+
+
+def blank_mount_diag(side: str) -> list[dict]:
+    safe = _mount_side(side)
+    return [_seal_mount_diag(_blank_mount_target(safe, "TMP")), _seal_mount_diag(_blank_mount_target(safe, "SHM"))]
+
+
+def _flag_map(options: set[str] | None, size: int, mode: int) -> dict[str, bool]:
+    if options is None:
+        return {key: False for key in ("flag_rw", "flag_nosuid", "flag_nodev", "flag_mode", "flag_size")}
+    return {
+        "flag_rw": "rw" in options,
+        "flag_nosuid": "nosuid" in options,
+        "flag_nodev": "nodev" in options,
+        "flag_mode": f"mode={format(mode, 'o')}" in options,
+        "flag_size": f"size={size}" in options,
+    }
+
+
+def _live_mode_enum(tokens: list[str]) -> str:
+    modes = [item[5:] for item in tokens if item.startswith("mode=")]
+    if not modes:
+        return "absent"
+    if len(modes) == 1 and modes[0] == "1777":
+        return "present1777"
+    return "other"
+
+
+def _parse_size_token(token: str) -> int | None:
+    if token.isdigit():
+        value = int(token)
+    elif len(token) > 1 and token.endswith("k") and token[:-1].isdigit():
+        value = int(token[:-1]) * 1024
+    else:
+        return None
+    if value < 0 or value > _SIZE_LIMIT:
+        return None
+    return value
+
+
+def _live_size_enum(tokens: list[str], expected: int) -> tuple[str, int | None]:
+    sizes = [item[5:] for item in tokens if item.startswith("size=")]
+    if not sizes:
+        return "absent", None
+    if len(sizes) != 1:
+        return "other", None
+    raw = sizes[0]
+    number = _parse_size_token(raw)
+    if number is not None and raw == str(expected):
+        return "exact-bytes", number
+    if number is not None and expected % 1024 == 0 and raw == f"{expected // 1024}k":
+        return "exact-kibibytes", number
+    return "other", number
+
+
+def _covering_match(returncode: int, observed: list[str], dest: str) -> str:
+    if returncode != 0 or len(observed) != 4:
+        return "UNKNOWN"
+    mountpoint = observed[3]
+    if not re.fullmatch(r"/[A-Za-z0-9._/-]+", mountpoint):
+        return "UNKNOWN"
+    return "true" if mountpoint == dest else "false"
+
+
+def build_mount_diag(side: str, target: str, dest: str, payload: dict | None, live: list[dict]) -> dict:
+    diag = _blank_mount_target(_mount_side(side), target if target in {"TMP", "SHM"} else "UNKNOWN")
+    if not isinstance(payload, dict):
+        return _seal_mount_diag(diag)
+    diag["seen"] = True
+    for key in ("type", "rw", "source", "mode", "options", "stat", "live_literal"):
+        diag[key] = payload.get(key) is True
+    flags = payload.get("flags")
+    if isinstance(flags, dict):
+        for key in ("flag_rw", "flag_nosuid", "flag_nodev", "flag_mode", "flag_size"):
+            diag[key] = flags.get(key) is True
+    rows = [
+        item
+        for item in live
+        if isinstance(item, dict) and item.get("dest") == dest and item.get("fstype") == "tmpfs"
+    ]
+    options = rows[0].get("options") if len(rows) == 1 else None
+    if len(rows) == 1 and isinstance(options, list) and all(isinstance(item, str) for item in options):
+        diag["live_row"] = True
+        diag["live_mode"] = _live_mode_enum(options)
+        expected = payload.get("size")
+        size_enum, size_number = _live_size_enum(options, expected if isinstance(expected, int) else -1)
+        diag["live_size"] = size_enum
+        diag["live_size_bytes"] = size_number
+    code = payload.get("returncode")
+    observed = payload.get("observed")
+    if isinstance(code, int) and isinstance(observed, list) and all(isinstance(item, str) for item in observed):
+        diag["covering_match"] = _covering_match(code, observed, dest)
+    return _seal_mount_diag(diag)
+
+
 def listen_ports(text: str) -> set[int]:
     ports = set()
     for line in text.splitlines()[1:]:
@@ -1760,6 +2030,8 @@ done
         proc = self.exec(name, ["cat", "/proc/self/mountinfo"], 15)
         mounts: list[dict] = []
         bad = ["mountinfo unreadable"]
+        firmware = _firmware_unknown()
+        firmware_probe = None
         if proc.returncode == 0:
             try:
                 mounts = parse_mountinfo(proc.stdout.decode())
@@ -1773,6 +2045,8 @@ done
                     if not item["rw"] or item["fstype"] in PSEUDO_FS or item["dest"] in allow:
                         continue
                     measured = self.exec(name, ["stat", "-c", "%m", item["dest"]], 10)
+                    if item["dest"] == _FIRMWARE_DEST and firmware_probe is None:
+                        firmware_probe = measured
                     text = measured.stdout.decode().strip()
                     if measured.returncode != 0 or not text.startswith("/"):
                         probe_failed = True
@@ -1782,6 +2056,11 @@ done
                 bad = effective_writable(mounts, allow, covered)
                 if probe_failed and not bad:
                     bad = ["mount probe unreadable"]
+                if firmware_probe is not None:
+                    try:
+                        firmware = classify_firmware_probe(firmware_probe, mounts, allow)
+                    except Exception:
+                        firmware = _firmware_unknown()
         inspect = self.run(
             [
                 "podman",
@@ -1817,6 +2096,7 @@ done
             "uid": uid,
             "uid_map": uid_map,
             "mounts": [{"dest": item["dest"], "fstype": item["fstype"], "rw": item["rw"]} for item in mounts],
+            "firmware": firmware,
         }
 
     def direct_curl(self, name: str, args: list[str], timeout: int) -> subprocess.CompletedProcess[bytes]:
@@ -2666,7 +2946,7 @@ done
             self.tmpfs_spec("/dev/shm", 67108864),
         ]
 
-    def mount_inventory(self, name: str, required: list[dict]) -> dict:
+    def mount_inventory(self, name: str, required: list[dict], side: str = "UNKNOWN") -> dict:
         raw = self.run(["podman", "inspect", name], 20)
         if raw.returncode != 0:
             raise GateError(f"inspect failed for {name}")
@@ -2674,7 +2954,15 @@ done
         mounted = meta.get("Mounts")
         host = meta.get("HostConfig")
         if not isinstance(mounted, list) or not isinstance(host, dict) or not isinstance(host.get("Tmpfs"), dict):
-            return {"ok": False, "missing": [], "unexpected": [], "mounts": [], "env_bad": False, "malformed": "inspect mounts"}
+            return {
+                "ok": False,
+                "missing": [],
+                "unexpected": [],
+                "mounts": [],
+                "env_bad": False,
+                "malformed": "inspect mounts",
+                "diag": blank_mount_diag(side),
+            }
         rows = []
         for item in mounted:
             source = str(item.get("Source") or "")
@@ -2699,19 +2987,37 @@ done
             )
         malformed = merge_host_tmpfs(rows, host["Tmpfs"])
         if malformed:
-            return {"ok": False, "missing": [], "unexpected": [], "mounts": rows, "env_bad": False, "malformed": malformed}
+            return {
+                "ok": False,
+                "missing": [],
+                "unexpected": [],
+                "mounts": rows,
+                "env_bad": False,
+                "malformed": malformed,
+                "diag": blank_mount_diag(side),
+            }
         live_proc = self.exec(name, ["cat", "/proc/self/mountinfo"], 10)
         try:
             live = parse_mountinfo(live_proc.stdout.decode()) if live_proc.returncode == 0 else None
         except ValueError:
             live = None
         if live is None:
-            return {"ok": False, "missing": [], "unexpected": [], "mounts": rows, "env_bad": False, "malformed": "mountinfo"}
+            return {
+                "ok": False,
+                "missing": [],
+                "unexpected": [],
+                "mounts": rows,
+                "env_bad": False,
+                "malformed": "mountinfo",
+                "diag": blank_mount_diag(side),
+            }
         missing = []
         matched = set()
+        mount_snaps: dict[str, dict] = {}
         for spec in required:
             found = None
             for index, row in enumerate(rows):
+                mount_snap = None
                 if index in matched or row["destination"] != spec["destination"]:
                     continue
                 source_ok = (
@@ -2750,6 +3056,20 @@ done
                         ]
                         and live_ok
                     )
+                    if spec["destination"] in _MOUNT_TARGETS:
+                        mount_snap = {
+                            "type": row["type"] == spec["type"],
+                            "rw": row["rw"] is spec["rw"],
+                            "source": source_ok,
+                            "mode": mode_ok,
+                            "options": options_ok,
+                            "stat": stat_ok,
+                            "flags": _flag_map(options if isinstance(options, set) else None, spec["size"], spec["mode"]),
+                            "live_literal": live_ok,
+                            "size": spec["size"],
+                            "returncode": measured.returncode,
+                            "observed": observed,
+                        }
                 if (
                     row["type"] == spec["type"]
                     and row["rw"] is spec["rw"]
@@ -2759,7 +3079,11 @@ done
                     and stat_ok
                 ):
                     found = index
+                    if mount_snap is not None:
+                        mount_snaps[spec["destination"]] = mount_snap
                     break
+                if mount_snap is not None and spec["destination"] not in mount_snaps:
+                    mount_snaps[spec["destination"]] = mount_snap
             if found is None:
                 missing.append(spec["destination"])
             else:
@@ -2770,12 +3094,20 @@ done
             item.encode() in env_proc.stdout.lower()
             for item in ("github_token", "actions_runtime_token", "aws_secret_access_key")
         )
+        try:
+            diag = [
+                build_mount_diag(_mount_side(side), target, dest, mount_snaps.get(dest), live)
+                for dest, target in (("/tmp", "TMP"), ("/dev/shm", "SHM"))
+            ]
+        except Exception:
+            diag = blank_mount_diag(side)
         return {
             "ok": not missing and not unexpected and not env_bad,
             "missing": missing,
             "unexpected": unexpected,
             "mounts": rows,
             "env_bad": env_bad,
+            "diag": diag,
         }
 
     def queue_case(self) -> dict:
@@ -3042,8 +3374,8 @@ done
                 json.dumps({"controller_uid": controller_fs["uid"], "agent_uid": agent_fs["uid"]}),
                 "podman --userns=keep-id:uid=1000,gid=1000 --user 1000:1000",
             )
-            controller_mounts = self.mount_inventory(self.controller, self.controller_mount_specs())
-            agent_mounts = self.mount_inventory(self.agent, self.agent_mount_specs())
+            controller_mounts = self.mount_inventory(self.controller, self.controller_mount_specs(), "CONTROLLER")
+            agent_mounts = self.mount_inventory(self.agent, self.agent_mount_specs(), "AGENT")
             self.ledger.record(
                 "G7-MOUNTS",
                 "PASS" if controller_mounts["ok"] and agent_mounts["ok"] else "FAIL",
