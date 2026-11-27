@@ -5,13 +5,20 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  CHAT_ACTIVE_ID_KEY,
+  CHAT_CONVERSATIONS_KEY,
   CHAT_MESSAGE_LIMIT,
   CHAT_MODEL_KEY,
+  CHAT_SCHEMA_VERSION_KEY,
   CHAT_THREAD_KEY,
+  CONVERSATION_LIMIT_TIP,
+  DELETE_CHAT_WARNING,
   EMPTY_CATALOG_TIP,
   MODEL_NOT_ALLOWED,
+  NEW_CONVERSATION_TITLE,
   NO_MODELS_FOR_ACCOUNT,
   STALE_MODEL_TIP,
+  conversationTitleFromContent,
   chatModelState,
   chatRequestBody,
   chatRequestMessages,
@@ -337,6 +344,37 @@ test("logout clears the chat thread, the selected model, and other kiln.chat key
   clearChatStorage(plain);
   assert.equal(plain.getItem(CHAT_THREAD_KEY), null);
   assert.equal(plain.getItem(CHAT_MODEL_KEY), null);
+});
+
+test("a conversation title collapses whitespace and counts the ellipsis inside 40 code points", () => {
+  assert.equal(conversationTitleFromContent("  你好   世界 \n "), "你好 世界");
+  assert.equal(conversationTitleFromContent("   "), NEW_CONVERSATION_TITLE);
+  assert.equal(conversationTitleFromContent(""), NEW_CONVERSATION_TITLE);
+  const wide = "🙂".repeat(41);
+  const title = conversationTitleFromContent(wide);
+  assert.equal(Array.from(title).length, 40);
+  assert.equal(title.endsWith("…"), true);
+  assert.equal(title, `${"🙂".repeat(39)}…`);
+  assert.equal(DELETE_CHAT_WARNING, "删除后无法恢复。这段对话只保存在本机浏览器中。已创建的 Skill 和已发起的构建仍会保留。");
+  assert.equal(DELETE_CHAT_WARNING.includes("已取消构建"), false);
+  assert.equal(CONVERSATION_LIMIT_TIP.includes("50"), true);
+});
+
+test("clearChatStorage removes the conversation list keys and leaves the account alone", () => {
+  const storage = scanningStorage();
+  storage.setItem(CHAT_CONVERSATIONS_KEY, "[]");
+  storage.setItem(CHAT_SCHEMA_VERSION_KEY, "1");
+  storage.setItem(CHAT_ACTIVE_ID_KEY, "conversation-1");
+  storage.setItem(CHAT_MODEL_KEY, "model-a");
+  storage.setItem(CHAT_THREAD_KEY, "[]");
+  storage.setItem("kiln.account", "keep");
+  clearChatStorage(storage);
+  assert.equal(storage.getItem(CHAT_CONVERSATIONS_KEY), null);
+  assert.equal(storage.getItem(CHAT_SCHEMA_VERSION_KEY), null);
+  assert.equal(storage.getItem(CHAT_ACTIVE_ID_KEY), null);
+  assert.equal(storage.getItem(CHAT_MODEL_KEY), null);
+  assert.equal(storage.getItem(CHAT_THREAD_KEY), null);
+  assert.equal(storage.getItem("kiln.account"), "keep");
 });
 
 test("Enter sends, Shift+Enter inserts a newline, and IME composition does not send", () => {

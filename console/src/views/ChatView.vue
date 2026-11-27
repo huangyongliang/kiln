@@ -4,7 +4,7 @@ import { RouterLink } from "vue-router";
 
 import { accessReady, perms } from "../access";
 import { createChatSession } from "../chatSession";
-import { EMPTY_CATALOG_TIP, INTERRUPTED_MARK, NEW_CHAT_WARNING, composerKeyAction } from "../chat";
+import { DELETE_CHAT_WARNING, EMPTY_CATALOG_TIP, INTERRUPTED_MARK, composerKeyAction } from "../chat";
 import MarkdownBody from "../components/MarkdownBody.vue";
 import PageIntro from "../components/PageIntro.vue";
 import StatePanel from "../components/StatePanel.vue";
@@ -17,8 +17,10 @@ const note =
   "模型接口固定为 OpenAI 兼容协议，端点由环境变量配置。端点未就绪时使用模拟或关闭模式。对话不能下发任意 shell。";
 
 const listEl = ref(null);
+const cancelDeleteButton = ref(null);
 const session = createChatSession({
-  storage: window.sessionStorage,
+  localStorage: window.localStorage,
+  sessionStorage: window.sessionStorage,
   async afterTurn() {
     await nextTick();
     if (listEl.value) {
@@ -38,7 +40,11 @@ const {
   forbidden,
   mode,
   statusRecovery,
-  confirmOpen,
+  conversations,
+  activeId,
+  listNotice,
+  menuConversationId,
+  deleteConfirmOpen,
   provider,
   selectedModel,
   mineItems,
@@ -62,10 +68,22 @@ const {
   send,
   onModelChange,
   requestNewChat,
-  cancelNewChat,
-  confirmNewChat,
+  openConversation,
+  openConversationMenu,
+  closeConversationMenu,
+  requestDelete,
+  confirmDelete,
+  cancelDelete,
   dispose,
 } = session;
+
+watch(deleteConfirmOpen, async (open) => {
+  if (!open) {
+    return;
+  }
+  await nextTick();
+  cancelDeleteButton.value?.focus?.();
+});
 
 onMounted(load);
 watch(accessReady, (ready) => {
@@ -74,6 +92,36 @@ watch(accessReady, (ready) => {
   }
 });
 onBeforeUnmount(dispose);
+
+function onConversationKeydown(id, event) {
+  if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+    event.preventDefault();
+    openConversationMenu(id);
+  } else if (event.key === "Escape") {
+    closeConversationMenu();
+  }
+}
+
+function onMenuButtonPointerDown(id, event) {
+  if (event.pointerType !== "touch") {
+    return;
+  }
+  const timer = setTimeout(() => openConversationMenu(id), 500);
+  const clear = () => {
+    clearTimeout(timer);
+    event.currentTarget?.removeEventListener("pointerup", clear);
+    event.currentTarget?.removeEventListener("pointercancel", clear);
+  };
+  event.currentTarget?.addEventListener("pointerup", clear);
+  event.currentTarget?.addEventListener("pointercancel", clear);
+}
+
+function onDeleteKeydown(event) {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    cancelDelete();
+  }
+}
 
 function onKeydown(event) {
   if (composerKeyAction(event) !== "send") {
@@ -131,15 +179,54 @@ function canBuildItem(item) {
         <span v-if="pill" class="pill" :data-provider="provider?.provider">{{ pill }}</span>
       </template>
     </PageIntro>
-    <div v-if="confirmOpen" class="chat-confirm" role="alertdialog" aria-labelledby="new-chat-title">
-      <h2 id="new-chat-title">确认清除当前对话</h2>
-      <p>{{ NEW_CHAT_WARNING }}</p>
+    <div
+      v-if="deleteConfirmOpen"
+      class="chat-confirm"
+      role="alertdialog"
+      aria-labelledby="delete-chat-title"
+      aria-describedby="delete-chat-copy"
+      @keydown="onDeleteKeydown"
+    >
+      <h2 id="delete-chat-title">删除对话</h2>
+      <p id="delete-chat-copy">{{ DELETE_CHAT_WARNING }}</p>
       <div class="modal-actions">
-        <button type="button" class="btn btn-secondary" @click="cancelNewChat">取消</button>
-        <button type="button" class="btn" @click="confirmNewChat">确认</button>
+        <button ref="cancelDeleteButton" type="button" class="btn btn-secondary" @click="cancelDelete">取消</button>
+        <button type="button" class="btn" @click="confirmDelete">确认</button>
       </div>
     </div>
     <div class="chat-body">
+      <aside class="conversation-rail" aria-label="对话列表">
+        <h2>对话</h2>
+        <ul>
+          <li v-for="item in conversations" :key="item.id" class="conversation-row">
+            <button
+              type="button"
+              class="conversation-item"
+              :aria-current="item.id === activeId ? 'true' : undefined"
+              @click="openConversation(item.id)"
+              @contextmenu.prevent="openConversationMenu(item.id)"
+              @keydown="onConversationKeydown(item.id, $event)"
+              @pointerdown="onMenuButtonPointerDown(item.id, $event)"
+            >
+              {{ item.title }}
+            </button>
+            <button
+              type="button"
+              class="conversation-more"
+              aria-label="更多操作"
+              aria-haspopup="menu"
+              @click="openConversationMenu(item.id)"
+              @pointerdown="onMenuButtonPointerDown(item.id, $event)"
+            >
+              …
+            </button>
+            <div v-if="menuConversationId === item.id" class="conversation-menu" role="menu">
+              <button type="button" role="menuitem" @click="requestDelete(item.id)">删除</button>
+            </div>
+          </li>
+        </ul>
+        <p v-if="listNotice" class="hint" role="alert">{{ listNotice }}</p>
+      </aside>
       <aside class="skill-rail" aria-label="Skill 列表">
         <section>
           <h2>我产出的</h2>

@@ -1,7 +1,8 @@
 /**
  * Identity-wide auth epoch, separate from the per-tab chat generation.
- * New conversation advances only the chat generation. Logout, a current 401,
- * and a successful login advance the epoch and must not be undone by a reset.
+ * Logout, a current 401, and a successful login advance the epoch.
+ * Leaving the chat page advances the chat generation and aborts in-flight
+ * requests. Switching or creating a conversation does not.
  */
 
 import { clearChatStorage, writeChatThread } from "./chat.js";
@@ -289,13 +290,14 @@ function enqueuePersistFlush() {
   queueMicrotask(flushChatPersist);
 }
 
-export function scheduleChatPersist(viewToken, isAlive, readLive, storage) {
+export function scheduleChatPersist(viewToken, isAlive, readLive, storage, write) {
   const scheduled = {
     authEpoch,
     chatGeneration,
     persistStamp,
     viewToken,
   };
+  const persist = typeof write === "function" ? write : writeChatThread;
   persistJobs.push(() => {
     const nowEpoch = authEpoch;
     const nowGeneration = chatGeneration;
@@ -312,7 +314,7 @@ export function scheduleChatPersist(viewToken, isAlive, readLive, storage) {
     if (typeof isAlive === "function" && !isAlive()) {
       return;
     }
-    writeChatThread(storage, readLive());
+    persist(storage, readLive());
   });
   enqueuePersistFlush();
 }

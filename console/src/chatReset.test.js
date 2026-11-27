@@ -267,6 +267,12 @@ class MiniElement extends MiniNode {
     this.dispatchEvent({ type: "click", preventDefault() {}, stopPropagation() {} });
   }
 
+  focus() {
+    if (this.ownerDocument) {
+      this.ownerDocument.activeElement = this;
+    }
+  }
+
   matches(selector) {
     if (selector.startsWith("#")) {
       return this.getAttribute("id") === selector.slice(1);
@@ -377,9 +383,26 @@ globalThis.window = {
   cancelAnimationFrame(id) {
     clearTimeout(id);
   },
-  addEventListener() {},
-  removeEventListener() {},
+  addEventListener(type, handler) {
+    const list = this._listeners.get(type) || [];
+    list.push(handler);
+    this._listeners.set(type, list);
+  },
+  removeEventListener(type, handler) {
+    const list = this._listeners.get(type) || [];
+    this._listeners.set(
+      type,
+      list.filter((item) => item !== handler),
+    );
+  },
+  dispatchEvent(event) {
+    for (const handler of this._listeners.get(event.type) || []) {
+      handler(event);
+    }
+    return true;
+  },
 };
+globalThis.window._listeners = new Map();
 globalThis.getComputedStyle = globalThis.window.getComputedStyle;
 if (typeof globalThis.Document === "undefined") {
   globalThis.Document = class Document {};
@@ -410,13 +433,21 @@ if (typeof globalThis.history === "undefined") {
 
 const { createChatSession } = await import("./chatSession.js");
 const {
+  CHAT_ACTIVE_ID_KEY,
+  CHAT_CONVERSATIONS_KEY,
   CHAT_MODEL_KEY,
+  CHAT_SCHEMA_VERSION_KEY,
   CHAT_THREAD_KEY,
+  CONVERSATION_LIMIT_TIP,
+  CONVERSATION_SAVE_TIP,
+  DELETE_CHAT_WARNING,
   INTERRUPTED_HINT,
   INTERRUPTED_MARK,
   MODEL_NOT_ALLOWED,
   NEW_CHAT_WARNING,
+  NEW_CONVERSATION_TITLE,
   STALE_MODEL_TIP,
+  normalizeLoadedThread,
   readChatThread,
 } = await import("./chat.js");
 const {
@@ -586,6 +617,11 @@ function count(url, method = "GET") {
   return calls.filter((call) => call.url === url && (call.options.method || "GET") === method).length;
 }
 
+function storedConversations() {
+  const raw = localStorage.getItem(CHAT_CONVERSATIONS_KEY);
+  return raw ? JSON.parse(raw) : [];
+}
+
 async function settled() {
   for (let step = 0; step < 8; step += 1) {
     await Promise.resolve();
@@ -627,55 +663,72 @@ afterEach(() => {
   writeApiToken("");
 });
 
-test("A01 cancel leaves thread, draft, sending, model, storage, and the request alone", async () => {
+test("A01 new chat keeps the previous conversation and does not abort its request", async () => {
   const session = openSession();
   await boot(session);
   session.selectedModel.value = "model-b";
   session.onModelChange();
   session.prompt.value = "还没发送";
-  session.requestNewChat();
-  assert.equal(session.confirmOpen.value, true);
-  const before = sessionStorage.getItem(CHAT_THREAD_KEY);
-  const model = sessionStorage.getItem(CHAT_MODEL_KEY);
   const epoch = currentAuthEpoch();
-  session.cancelNewChat();
+  const generation = (await import("./identity.js")).currentChatGeneration();
+  session.requestNewChat();
   assert.equal(session.confirmOpen.value, false);
-  assert.equal(session.prompt.value, "还没发送");
+  assert.equal(session.prompt.value, "");
   assert.equal(session.messages.value.length, 0);
   assert.equal(session.selectedModel.value, "model-b");
-  assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY), before);
-  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), model);
+  assert.equal(localStorage.getItem(CHAT_MODEL_KEY), "model-b");
+  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), null);
   assert.equal(currentAuthEpoch(), epoch);
+  assert.equal((await import("./identity.js")).currentChatGeneration(), generation);
   assert.equal(count("/api/v1/llm/chat", "POST"), 0);
+  const kept = storedConversations().find((item) => item.draft === "还没发送");
+  assert.ok(kept);
+  assert.notEqual(kept.id, session.activeId.value);
+  assert.equal(kept.messages.length, 0);
 
+  session.openConversation(kept.id);
+  assert.equal(session.prompt.value, "还没发送");
   session.prompt.value = "";
   session.messages.value = [{ role: "user", content: "已在页面上" }];
   session.requestNewChat();
-  session.cancelNewChat();
-  assert.equal(session.messages.value[0].content, "已在页面上");
-  flushHeldChatPersist();
-  assert.equal(readChatThread(sessionStorage)[0].content, "已在页面上");
+  assert.equal(session.messages.value.length, 0);
+  assert.equal(
+    storedConversations().some((item) => item.messages.some((message) => message.content === "已在页面上")),
+    true,
+  );
 
+  const original = storedConversations().find((item) =>
+    item.messages.some((message) => message.content === "已在页面上"),
+  );
+  session.openConversation(original.id);
   session.messages.value = [];
   session.prompt.value = "发送中的正文";
   const sending = session.send();
   const chat = take("/api/v1/llm/chat", "POST");
   assert.equal(chat.options.signal.aborted, false);
+  const inFlightId = session.activeId.value;
   session.requestNewChat();
-  session.cancelNewChat();
-  assert.equal(session.sending.value, true);
+  assert.equal(session.confirmOpen.value, false);
+  assert.equal(session.sending.value, false);
   assert.equal(chat.options.signal.aborted, false);
-  assert.equal(session.messages.value.at(-1).content, "发送中的正文");
+  assert.equal(session.messages.value.some((item) => item.content === "发送中的正文"), false);
   chat.resolveWith({ json: { content: "答", model: "model-b" } });
   await sending;
+  assert.equal(session.sending.value, false);
+  assert.equal(session.messages.value.some((item) => item.content === "答"), false);
+  session.openConversation(inFlightId);
   assert.equal(session.messages.value.at(-1).content, "答");
+  assert.equal(session.sending.value, false);
   flushHeldChatPersist();
-  assert.equal(readChatThread(sessionStorage).at(-1).content, "答");
+  assert.equal(
+    storedConversations().some((item) => item.messages.some((message) => message.content === "答")),
+    true,
+  );
   assert.equal(location.pathname, "/chat");
   assert.equal(readAccount().username, "ada");
 });
 
-test("A02 confirm clears the tab, empty page is a no-op, and only an error can be cleared", async () => {
+test("A02 new chat keeps the previous thread, an empty thread is a no-op, and only an error can be cleared", async () => {
   const session = openSession();
   await boot(session);
   session.selectedModel.value = "model-b";
@@ -691,18 +744,20 @@ test("A02 confirm clears the tab, empty page is a no-op, and only an error can b
   session.error.value = "无法连接 API";
   const providerCalls = count("/api/v1/llm/provider");
   session.requestNewChat();
-  assert.equal(session.confirmOpen.value, true);
-  session.confirmNewChat();
-  flushHeldChatPersist();
   assert.equal(session.confirmOpen.value, false);
+  flushHeldChatPersist();
   assert.equal(session.messages.value.length, 0);
   assert.equal(session.prompt.value, "");
   assert.equal(session.error.value, "");
   assert.equal(session.sending.value, false);
   assert.equal(session.selectedModel.value, "model-b");
   assert.equal(session.modelNotice.value, "");
-  assert.deepEqual(readChatThread(sessionStorage), []);
-  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), "model-b");
+  const kept = storedConversations().find((item) => item.messages.some((message) => message.content === "旧回答"));
+  assert.ok(kept);
+  assert.equal(kept.draft, "草稿");
+  assert.equal(kept.messages[0].actions[0].id, SKILL_ID);
+  assert.notEqual(kept.id, session.activeId.value);
+  assert.equal(localStorage.getItem(CHAT_MODEL_KEY), "model-b");
   assert.equal(count("/api/v1/llm/provider"), providerCalls);
   assert.equal(count("/api/v1/llm/chat", "POST"), 0);
   assert.equal(calls.some((call) => call.options.method === "DELETE"), false);
@@ -758,7 +813,8 @@ test("A02 keeps an allowed model, falls back when it is not allowed, and off can
   session.confirmNewChat();
   assert.equal(session.selectedModel.value, "model-a");
   assert.equal(session.modelNotice.value, STALE_MODEL_TIP);
-  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), "model-a");
+  assert.equal(localStorage.getItem(CHAT_MODEL_KEY), "model-a");
+  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), null);
 
   const off = openSession();
   await boot(off, { provider: "off", models: ["model-a"], default_model: "model-a" });
@@ -805,7 +861,8 @@ test("A02 an unknown catalog keeps the candidate and blocks send until a trusted
   assert.equal(session.selectedModel.value, "model-a");
   assert.equal(session.modelNotice.value, STALE_MODEL_TIP);
   assert.equal(session.sendDisabled.value, false);
-  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), "model-a");
+  assert.equal(localStorage.getItem(CHAT_MODEL_KEY), "model-a");
+  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), null);
 });
 
 test("A03 late chat success, error, and finally stay out after reset and after the next send", async () => {
@@ -949,7 +1006,8 @@ test("A04 out-of-order model success, error, finally, and a newer selection stay
   assert.equal(session.pageError.value, "");
   assert.equal(session.selectedModel.value, "model-b");
   assert.equal(session.modelNotice.value, "");
-  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), "model-b");
+  assert.equal(localStorage.getItem(CHAT_MODEL_KEY), "model-b");
+  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), null);
 });
 
 test("A05 unmount, remount, and reload turn a pending send into an interrupted message", async () => {
@@ -961,7 +1019,9 @@ test("A05 unmount, remount, and reload turn a pending send into an interrupted m
   chat.honorAbort = false;
   flushHeldChatPersist();
   assert.equal(session.messages.value.at(-1).pending, true);
-  assert.equal(readChatThread(sessionStorage).at(-1).interrupted, true);
+  const pendingStored = storedConversations()[0].messages.at(-1);
+  assert.equal(pendingStored.pending, true);
+  assert.equal(normalizeLoadedThread([pendingStored]).messages.at(-1).interrupted, true);
   session.dispose();
   sessions.pop();
   chat.resolveWith({ json: { content: "不该出现", actions: [{ type: "build_started", id: SKILL_ID, name: "包" }] } });
@@ -972,7 +1032,8 @@ test("A05 unmount, remount, and reload turn a pending send into an interrupted m
   assert.equal(reloaded.messages.value[0].interrupted, true);
   assert.equal(reloaded.messages.value[0].pending, undefined);
   assert.equal(reloaded.interruptNotice.value, INTERRUPTED_HINT);
-  assert.equal(JSON.stringify(readChatThread(sessionStorage)).includes("pending"), false);
+  assert.equal(JSON.stringify(storedConversations()).includes("pending"), false);
+  assert.equal(storedConversations().some((item) => item.messages.some((message) => message.interrupted)), true);
   await boot(reloaded);
   assert.equal(count("/api/v1/llm/chat", "POST"), 1);
   reloaded.prompt.value = "手工继续";
@@ -1009,12 +1070,14 @@ test("A05 a stored pending message is not sending and is not polled or retried",
   assert.equal(session.messages.value.length, 1);
   assert.equal(session.messages.value[0].interrupted, true);
   assert.equal(session.interruptNotice.value, INTERRUPTED_HINT);
-  const saved = sessionStorage.getItem(CHAT_THREAD_KEY);
+  assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY), null);
+  const saved = localStorage.getItem(CHAT_CONVERSATIONS_KEY);
   assert.equal(saved.includes("pending"), false);
   assert.equal(saved.includes("secret-token"), false);
   assert.equal(saved.includes("whole response"), false);
   assert.equal(saved.includes("系统提示不要落盘"), false);
   assert.equal(saved.includes("hidden"), false);
+  assert.equal(saved.includes("controller"), false);
   await boot(session);
   assert.equal(count("/api/v1/llm/chat", "POST"), 0);
   assert.equal(session.sending.value, false);
@@ -1195,9 +1258,13 @@ test("storage watchers acquire the current generation and do not restore a clear
   flushHeldChatPersist();
   assert.equal(session.messages.value.length, 0);
   assert.equal(session.prompt.value, "");
-  assert.deepEqual(readChatThread(sessionStorage), []);
-  assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY).includes("会回来吗"), false);
-  assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY).includes("未发送草稿"), false);
+  const keptThread = storedConversations().find((item) =>
+    item.messages.some((message) => message.content === "会回来吗"),
+  );
+  assert.ok(keptThread);
+  assert.equal(keptThread.draft, "未发送草稿");
+  assert.notEqual(session.activeId.value, keptThread.id);
+  assert.equal(session.conversations.value.length, 2);
 
   const other = memoryStorage();
   other.setItem(CHAT_THREAD_KEY, JSON.stringify([{ role: "user", content: "其它标签" }]));
@@ -1215,7 +1282,7 @@ test("an unheld watcher flush persists the live thread and still skips a stale j
   await nextTick();
   await Promise.resolve();
   flushChatPersist();
-  assert.equal(readChatThread(sessionStorage)[0].content, "自动落盘");
+  assert.equal(storedConversations()[0].messages[0].content, "自动落盘");
 });
 
 function compileVue(file) {
@@ -1254,6 +1321,10 @@ function readVue(file) {
 
 function buttonsNamed(text) {
   return document.body.querySelectorAll("button").filter((button) => button.textContent.trim() === text);
+}
+
+function conversationButtons() {
+  return document.body.querySelectorAll("button").filter((button) => button.className.split(/\s+/).includes("conversation-item"));
 }
 
 async function mountChatView() {
@@ -1295,16 +1366,18 @@ async function finishInitialLoad(provider = OPENAI) {
   await nextTick();
 }
 
-test("the mounted page has one 新建对话 button and the exact confirmation", async () => {
+test("the mounted page keeps a conversation on 新建对话 and confirms only delete", async () => {
   await mountChatView();
   await finishInitialLoad();
   assert.equal(buttonsNamed("新建对话").length, 1);
+  assert.equal(document.body.querySelector('[aria-label="对话列表"]') != null, true);
   assert.equal(document.body.textContent.includes(NEW_CHAT_WARNING), false);
   buttonsNamed("新建对话")[0].click();
   await nextTick();
   assert.equal(document.body.textContent.includes(NEW_CHAT_WARNING), false);
   assert.equal(document.body.querySelector('[role="alertdialog"]'), null);
   assert.equal(buttonsNamed("重试读取模型状态").length, 0);
+  assert.equal(conversationButtons().length, 1);
 
   const textarea = document.body.querySelector("textarea");
   textarea.value = "未发送草稿";
@@ -1312,26 +1385,30 @@ test("the mounted page has one 新建对话 button and the exact confirmation", 
   await nextTick();
   buttonsNamed("新建对话")[0].click();
   await nextTick();
-  const dialog = document.body.querySelector('[role="alertdialog"]');
-  assert.ok(dialog);
-  assert.equal(dialog.textContent.includes(NEW_CHAT_WARNING), true);
-  assert.equal(buttonsNamed("新建对话").length, 1);
-  buttonsNamed("取消")[0].click();
-  await nextTick();
   flushHeldChatPersist();
   assert.equal(document.body.querySelector('[role="alertdialog"]'), null);
-  assert.equal(textarea.value, "未发送草稿");
-  assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY) || "[]", "[]");
-
-  buttonsNamed("新建对话")[0].click();
-  await nextTick();
-  buttonsNamed("确认")[0].click();
-  await nextTick();
-  flushHeldChatPersist();
-  assert.equal(textarea.value, "");
-  assert.equal(document.body.textContent.includes("未发送草稿"), false);
   assert.equal(document.body.textContent.includes(NEW_CHAT_WARNING), false);
-  assert.deepEqual(readChatThread(sessionStorage), []);
+  assert.equal(textarea.value, "");
+  assert.equal(conversationButtons().length, 2);
+  assert.equal(storedConversations().some((item) => item.draft === "未发送草稿"), true);
+  const kept = conversationButtons().find((button) => button.getAttribute("aria-current") !== "true");
+  assert.ok(kept);
+  kept.dispatchEvent({ type: "contextmenu", preventDefault() {}, stopPropagation() {} });
+  await nextTick();
+  assert.equal(buttonsNamed("删除").length, 1);
+  buttonsNamed("删除")[0].click();
+  await nextTick();
+  await nextTick();
+  const dialog = document.body.querySelector('[role="alertdialog"]');
+  assert.ok(dialog);
+  assert.equal(dialog.textContent.includes(DELETE_CHAT_WARNING), true);
+  assert.equal(dialog.textContent.includes("已取消构建"), false);
+  assert.equal(document.activeElement?.textContent?.trim(), "取消");
+  dialog.dispatchEvent({ type: "keydown", key: "Escape", preventDefault() {}, stopPropagation() {} });
+  await nextTick();
+  assert.equal(document.body.querySelector('[role="alertdialog"]'), null);
+  assert.equal(conversationButtons().length, 2);
+  assert.equal(storedConversations().some((item) => item.draft === "未发送草稿"), true);
 });
 
 test("a cold provider failure stays recoverable after 新建对话 clears the error", async () => {
@@ -1401,8 +1478,8 @@ test("a cached but untrusted provider keeps status recovery after the error is c
   await nextTick();
   buttonsNamed("新建对话")[0].click();
   await nextTick();
-  assert.ok(document.body.querySelector('[role="alertdialog"]'));
-  buttonsNamed("确认")[0].click();
+  assert.equal(document.body.querySelector('[role="alertdialog"]'), null);
+  assert.equal(document.body.textContent.includes(NEW_CHAT_WARNING), false);
   await settled();
   const afterConfirm = take("/api/v1/llm/provider");
   take("/api/v1/skills?scope=mine").resolveWith({ json: { items: [] } });
@@ -1462,8 +1539,7 @@ test("the mounted page drops a late reply after confirm and hides the chat from 
   assert.equal(document.body.textContent.includes("第一问"), true);
   buttonsNamed("新建对话")[0].click();
   await nextTick();
-  buttonsNamed("确认")[0].click();
-  await nextTick();
+  assert.equal(document.body.querySelector('[role="alertdialog"]'), null);
   chat.resolveWith({
     json: {
       content: "旧回答",
@@ -1473,9 +1549,12 @@ test("the mounted page drops a late reply after confirm and hides the chat from 
   await settled();
   await nextTick();
   flushHeldChatPersist();
-  assert.equal(document.body.textContent.includes("旧回答"), false);
-  assert.equal(document.body.textContent.includes("第一问"), false);
+  assert.equal(document.body.querySelector(".messages").textContent.includes("旧回答"), false);
+  assert.equal(document.body.querySelector(".messages").textContent.includes("第一问"), false);
+  assert.equal(document.body.textContent.includes("第一问"), true);
   assert.equal(document.body.textContent.includes("已取消构建"), false);
+  assert.equal(storedConversations().some((item) => item.messages.some((message) => message.content === "旧回答")), true);
+  assert.equal(storedConversations().some((item) => item.messages.some((message) => message.content === "第一问")), true);
   assert.deepEqual(readChatThread(sessionStorage), []);
 
   apps.at(-1).unmount();
@@ -1696,7 +1775,8 @@ test("a model change made after the winning status request started is kept", asy
   await settled();
   assert.equal(session.selectedModel.value, "model-b");
   assert.equal(session.modelNotice.value, "");
-  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), "model-b");
+  assert.equal(localStorage.getItem(CHAT_MODEL_KEY), "model-b");
+  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), null);
   assert.equal(session.mode.value, "ready");
 });
 
@@ -2496,8 +2576,9 @@ test("unmounting the chat page drops late success and error from the previous vi
   flushHeldChatPersist();
   assert.equal(document.body.textContent.includes("旧页面的回答"), false);
   assert.equal(document.body.textContent.includes("旧页面的失败"), false);
+  assert.equal(storedConversations().some((item) => item.messages.some((message) => message.content === "旧页面的回答")), false);
+  assert.equal(storedConversations().some((item) => item.messages.some((message) => message.interrupted === true)), true);
   assert.equal(readChatThread(sessionStorage).some((item) => item.content === "旧页面的回答"), false);
-  assert.equal(readChatThread(sessionStorage).some((item) => item.interrupted === true), true);
 });
 
 test("a superseded status or sidebar 401 in the same generation does not log out", async () => {
@@ -2722,6 +2803,600 @@ test("the developer token form clears chat before reload and a separate old 401 
   assert.equal(remounted.messages.value.length, 0);
   assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY), null);
   assert.equal(readChatThread(sessionStorage).some((item) => item.content === "旧令牌回答"), false);
+});
+
+test("L01 the chat page shows a highlighted conversation list", async () => {
+  await mountChatView();
+  await finishInitialLoad();
+  const list = document.body.querySelector('[aria-label="对话列表"]');
+  assert.ok(list);
+  assert.equal(conversationButtons().length >= 1, true);
+  const current = conversationButtons().find((button) => button.getAttribute("aria-current") === "true");
+  assert.ok(current);
+  assert.equal(current.textContent.includes(NEW_CONVERSATION_TITLE), true);
+});
+
+test("L02 新建对话 keeps the previous thread and does not ask to destroy it", async () => {
+  const session = openSession();
+  await boot(session);
+  session.prompt.value = "上一轮";
+  const sending = session.send();
+  const chat = take("/api/v1/llm/chat", "POST");
+  chat.resolveWith({ json: { content: "留下" } });
+  await sending;
+  const previous = session.activeId.value;
+  session.requestNewChat();
+  assert.equal(session.confirmOpen.value, false);
+  assert.equal(session.deleteConfirmOpen.value, false);
+  assert.notEqual(session.activeId.value, previous);
+  assert.equal(session.messages.value.length, 0);
+  const kept = session.conversations.value.find((item) => item.id === previous);
+  assert.equal(kept.messages.at(-1).content, "留下");
+  assert.equal(kept.title, "上一轮");
+  assert.equal(NEW_CHAT_WARNING.includes("无法恢复"), true);
+  assert.equal(session.listNotice.value.includes(NEW_CHAT_WARNING), false);
+});
+
+test("L03 a new chat on an idle empty thread does nothing", async () => {
+  const session = openSession();
+  await boot(session);
+  const before = session.conversations.value.length;
+  const id = session.activeId.value;
+  const callsBefore = calls.length;
+  session.prompt.value = "   ";
+  session.requestNewChat();
+  assert.equal(session.conversations.value.length, before);
+  assert.equal(session.activeId.value, id);
+  assert.equal(calls.length, callsBefore);
+  assert.equal(session.confirmOpen.value, false);
+});
+
+test("L04 switching restores messages and the draft", async () => {
+  const session = openSession();
+  await boot(session);
+  session.prompt.value = "第一稿";
+  session.messages.value = [{ role: "user", content: "第一段" }];
+  const first = session.activeId.value;
+  session.requestNewChat();
+  session.prompt.value = "第二稿";
+  const second = session.activeId.value;
+  session.openConversation(first);
+  assert.equal(session.prompt.value, "第一稿");
+  assert.equal(session.messages.value[0].content, "第一段");
+  assert.equal(session.conversations.value.some((item) => item.id === second), true);
+  session.openConversation(second);
+  assert.equal(session.prompt.value, "第二稿");
+  assert.equal(session.messages.value.length, 0);
+  session.openConversation(second);
+  assert.equal(session.activeId.value, second);
+  assert.equal(session.prompt.value, "第二稿");
+});
+
+test("L05 delete confirms from the context menu, the more button, and the keyboard", async () => {
+  await mountChatView();
+  await finishInitialLoad();
+  const textarea = document.body.querySelector("textarea");
+  textarea.value = "可删除";
+  textarea.dispatchEvent({ type: "input", preventDefault() {}, stopPropagation() {} });
+  await nextTick();
+  buttonsNamed("新建对话")[0].click();
+  await nextTick();
+  const older = conversationButtons().find((button) => button.getAttribute("aria-current") !== "true");
+  older.dispatchEvent({ type: "contextmenu", preventDefault() {}, stopPropagation() {} });
+  await nextTick();
+  assert.equal(buttonsNamed("删除").length, 1);
+  buttonsNamed("删除")[0].click();
+  await nextTick();
+  await nextTick();
+  assert.equal(document.body.textContent.includes(DELETE_CHAT_WARNING), true);
+  assert.equal(document.activeElement?.textContent?.trim(), "取消");
+  buttonsNamed("取消")[0].click();
+  await nextTick();
+  assert.equal(conversationButtons().length, 2);
+  assert.equal(storedConversations().some((item) => item.draft === "可删除"), true);
+
+  buttonsNamed("…")[0].click();
+  await nextTick();
+  assert.equal(buttonsNamed("删除").length, 1);
+  document.body.querySelector(".conversation-menu").dispatchEvent({
+    type: "keydown",
+    key: "Escape",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  older.dispatchEvent({
+    type: "keydown",
+    key: "F10",
+    shiftKey: true,
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  await nextTick();
+  assert.equal(buttonsNamed("删除").length, 1);
+  older.dispatchEvent({
+    type: "keydown",
+    key: "ContextMenu",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  await nextTick();
+  assert.equal(buttonsNamed("删除").length, 1);
+  buttonsNamed("删除")[0].click();
+  await nextTick();
+  buttonsNamed("确认")[0].click();
+  await nextTick();
+  assert.equal(conversationButtons().length, 1);
+  assert.equal(storedConversations().some((item) => item.draft === "可删除"), false);
+  assert.equal(document.body.textContent.includes("已取消构建"), false);
+
+  const row = conversationButtons()[0];
+  row.dispatchEvent({
+    type: "pointerdown",
+    pointerType: "touch",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  await nextTick();
+  assert.equal(buttonsNamed("删除").length, 1);
+});
+
+test("L06 deleting the current conversation falls back to the newest one, or a new empty thread", async () => {
+  const session = openSession();
+  await boot(session);
+  session.messages.value = [{ role: "user", content: "较旧" }];
+  session.requestNewChat();
+  session.messages.value = [{ role: "user", content: "较新" }];
+  const newest = session.activeId.value;
+  session.requestNewChat();
+  const current = session.activeId.value;
+  session.requestDelete(current);
+  session.cancelDelete();
+  assert.equal(session.conversations.value.some((item) => item.id === current), true);
+  session.requestDelete(current);
+  assert.equal(session.deleteConfirmOpen.value, true);
+  session.confirmDelete();
+  assert.equal(session.activeId.value, newest);
+  assert.equal(session.messages.value[0].content, "较新");
+  session.requestDelete(session.activeId.value);
+  session.confirmDelete();
+  assert.equal(session.messages.value[0].content, "较旧");
+  session.requestDelete(session.activeId.value);
+  session.confirmDelete();
+  assert.equal(session.conversations.value.length, 1);
+  assert.equal(session.messages.value.length, 0);
+  assert.equal(session.conversations.value[0].title, NEW_CONVERSATION_TITLE);
+  assert.equal(storedConversations().some((item) => item.messages.some((message) => message.content === "较旧")), false);
+});
+
+test("L07 refreshing the same tab restores the list, the open conversation, and the draft", async () => {
+  const session = openSession();
+  await boot(session);
+  session.prompt.value = "还在";
+  session.messages.value = [{ role: "user", content: "刷新前" }];
+  const id = session.activeId.value;
+  flushHeldChatPersist();
+  session.dispose();
+  sessions.pop();
+  const again = openSession();
+  assert.equal(again.activeId.value, id);
+  assert.equal(again.prompt.value, "还在");
+  assert.equal(again.messages.value[0].content, "刷新前");
+  assert.equal(sessionStorage.getItem(CHAT_ACTIVE_ID_KEY), id);
+  assert.equal(localStorage.getItem(CHAT_CONVERSATIONS_KEY).includes("还在"), true);
+});
+
+test("L08 a tab without an active id opens the most recently updated conversation", async () => {
+  const session = openSession();
+  await boot(session);
+  session.messages.value = [{ role: "user", content: "旧的" }];
+  session.requestNewChat();
+  session.messages.value = [{ role: "user", content: "新的" }];
+  flushHeldChatPersist();
+  session.dispose();
+  sessions.pop();
+  sessionStorage.removeItem(CHAT_ACTIVE_ID_KEY);
+  const again = openSession();
+  assert.equal(again.messages.value[0].content, "新的");
+  assert.equal(again.conversations.value.length, 2);
+  assert.equal(again.conversations.value.some((item) => item.messages.some((message) => message.content === "旧的")), true);
+});
+
+test("L09 the first user message locks a collapsed title of at most 40 code points", async () => {
+  const session = openSession();
+  await boot(session);
+  assert.equal(session.conversations.value[0].title, NEW_CONVERSATION_TITLE);
+  assert.equal(session.conversations.value[0].titleLocked, false);
+  session.prompt.value = "  你好   世界 \n ";
+  const first = session.send();
+  const firstCall = take("/api/v1/llm/chat", "POST");
+  firstCall.resolveWith({ json: { content: "好" } });
+  await first;
+  assert.equal(session.conversations.value[0].title, "你好 世界");
+  assert.equal(session.conversations.value[0].titleLocked, true);
+  session.prompt.value = "后面的消息";
+  const second = session.send();
+  const secondCall = take("/api/v1/llm/chat", "POST");
+  secondCall.resolveWith({ json: { content: "继续" } });
+  await second;
+  assert.equal(session.conversations.value[0].title, "你好 世界");
+
+  session.requestNewChat();
+  const wide = "🙂".repeat(41);
+  session.prompt.value = wide;
+  const third = session.send();
+  const thirdCall = take("/api/v1/llm/chat", "POST");
+  thirdCall.resolveWith({ json: { content: "截断" } });
+  await third;
+  const title = session.conversations.value.find((item) => item.id === session.activeId.value).title;
+  assert.equal(Array.from(title).length, 40);
+  assert.equal(title.endsWith("…"), true);
+  assert.equal(title.startsWith("🙂"), true);
+  assert.equal(session.conversations.value.find((item) => item.title === "你好 世界") != null, true);
+});
+
+test("L10 legacy thread migration writes v1 before deleting the old key and does not import twice", async () => {
+  const events = [];
+  const setItem = localStorage.setItem.bind(localStorage);
+  const removeItem = sessionStorage.removeItem.bind(sessionStorage);
+  localStorage.setItem = (key, value) => {
+    events.push(["set", key]);
+    return setItem(key, value);
+  };
+  sessionStorage.removeItem = (key) => {
+    events.push(["remove", key]);
+    return removeItem(key);
+  };
+  try {
+    sessionStorage.setItem(CHAT_THREAD_KEY, JSON.stringify([
+      { role: "user", content: "旧线程", pending: true, token: "secret-token" },
+      { role: "system", content: "不要落盘" },
+    ]));
+    sessionStorage.setItem(CHAT_MODEL_KEY, "model-b");
+    const session = openSession();
+    const setAt = events.findIndex((item) => item[0] === "set" && item[1] === CHAT_CONVERSATIONS_KEY);
+    const removeAt = events.findIndex((item) => item[0] === "remove" && item[1] === CHAT_THREAD_KEY);
+    assert.equal(setAt >= 0 && removeAt > setAt, true);
+    assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY), null);
+    assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), null);
+    assert.equal(localStorage.getItem(CHAT_MODEL_KEY), "model-b");
+    assert.equal(localStorage.getItem(CHAT_SCHEMA_VERSION_KEY), "1");
+    assert.equal(session.messages.value[0].content, "旧线程");
+    assert.equal(session.messages.value[0].interrupted, true);
+    assert.equal(session.conversations.value[0].title, "旧线程");
+    assert.equal(localStorage.getItem(CHAT_CONVERSATIONS_KEY).includes("secret-token"), false);
+    assert.equal(localStorage.getItem(CHAT_CONVERSATIONS_KEY).includes("不要落盘"), false);
+    session.dispose();
+    sessions.pop();
+    sessionStorage.setItem(CHAT_THREAD_KEY, JSON.stringify([{ role: "user", content: "不要再导入" }]));
+    const again = openSession();
+    assert.equal(again.conversations.value.length, 1);
+    assert.equal(again.messages.value.some((item) => item.content === "不要再导入"), false);
+    assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY), null);
+  } finally {
+    localStorage.setItem = setItem;
+    sessionStorage.removeItem = removeItem;
+  }
+
+  sessionStorage.clear();
+  localStorage.clear();
+  localStorage.setItem(CHAT_SCHEMA_VERSION_KEY, "1");
+  sessionStorage.setItem(CHAT_THREAD_KEY, JSON.stringify([{ role: "user", content: "schema 已在" }]));
+  const skipped = openSession();
+  assert.equal(skipped.messages.value.some((item) => item.content === "schema 已在"), false);
+  assert.equal(skipped.conversations.value[0].title, NEW_CONVERSATION_TITLE);
+  assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY), null);
+
+  skipped.dispose();
+  sessions.pop();
+  sessionStorage.clear();
+  localStorage.clear();
+  sessionStorage.setItem(CHAT_THREAD_KEY, "{");
+  const broken = openSession();
+  assert.equal(broken.conversations.value.length, 1);
+  assert.equal(broken.messages.value.length, 0);
+  assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY), null);
+
+  broken.dispose();
+  sessions.pop();
+  sessionStorage.clear();
+  localStorage.clear();
+  localStorage.setItem(CHAT_MODEL_KEY, "model-a");
+  sessionStorage.setItem(CHAT_MODEL_KEY, "model-b");
+  const preferred = openSession();
+  assert.equal(preferred.selectedModel.value, "model-a");
+  assert.equal(localStorage.getItem(CHAT_MODEL_KEY), "model-a");
+  assert.equal(sessionStorage.getItem(CHAT_MODEL_KEY), null);
+});
+
+test("L11 logout, login, a current 401, and token replacement clear both chat stores", async () => {
+  const session = openSession();
+  await boot(session);
+  session.messages.value = [{ role: "user", content: "只属于这一账号" }];
+  session.prompt.value = "草稿也清";
+  session.onModelChange();
+  const loggingOut = logoutSession(requestJson);
+  const logoutCall = take("/api/v1/auth/logout", "POST");
+  logoutCall.resolveWith({ json: { ok: true } });
+  await loggingOut;
+  flushHeldChatPersist();
+  const afterLogout = `${localStorage.getItem(CHAT_CONVERSATIONS_KEY) || ""}${sessionStorage.getItem(CHAT_ACTIVE_ID_KEY) || ""}${localStorage.getItem(CHAT_MODEL_KEY) || ""}`;
+  assert.equal(afterLogout.includes("只属于这一账号"), false);
+  assert.equal(afterLogout.includes("草稿也清"), false);
+  assert.equal(localStorage.getItem(CHAT_MODEL_KEY), null);
+  assert.equal(sessionStorage.getItem(CHAT_THREAD_KEY), null);
+  const next = openSession();
+  assert.equal(next.messages.value.some((item) => item.content === "只属于这一账号"), false);
+
+  next.messages.value = [{ role: "user", content: "过期前的对话" }];
+  const expired = getJson("/api/v1/builds");
+  take("/api/v1/builds").resolveWith({ status: 401, json: { detail: "未登录" } });
+  await assert.rejects(expired, (caught) => caught.status === 401 && caught.staleAuth !== true);
+  flushHeldChatPersist();
+  assert.equal(`${localStorage.getItem(CHAT_CONVERSATIONS_KEY) || ""}`.includes("过期前的对话"), false);
+
+  location.pathname = "/chat";
+  assigned.length = 0;
+  allowQa();
+  const third = openSession();
+  third.messages.value = [{ role: "user", content: "登录前" }];
+  acceptLogin({ id: "user-2", username: "bea", role_ids: ["reader"] });
+  flushHeldChatPersist();
+  assert.equal(`${localStorage.getItem(CHAT_CONVERSATIONS_KEY) || ""}`.includes("登录前"), false);
+  assert.equal(readAccount().username, "bea");
+  const fourth = openSession();
+  assert.equal(fourth.messages.value.some((item) => item.content === "登录前"), false);
+
+  fourth.messages.value = [{ role: "user", content: "换令牌前" }];
+  localStorage.setItem(CHAT_MODEL_KEY, "model-b");
+  sessionStorage.setItem(CHAT_ACTIVE_ID_KEY, fourth.activeId.value);
+  replaceApiToken("next-token");
+  assert.equal(localStorage.getItem(CHAT_CONVERSATIONS_KEY), null);
+  assert.equal(localStorage.getItem(CHAT_SCHEMA_VERSION_KEY), null);
+  assert.equal(localStorage.getItem(CHAT_MODEL_KEY), null);
+  assert.equal(sessionStorage.getItem(CHAT_ACTIVE_ID_KEY), null);
+  assert.equal(readApiToken(), "next-token");
+});
+
+test("L12 a switched conversation keeps its in-flight result off the conversation on screen", async () => {
+  const session = openSession();
+  await boot(session);
+  session.prompt.value = "问题A";
+  const first = session.send();
+  const firstCall = take("/api/v1/llm/chat", "POST");
+  assert.equal(firstCall.options.signal.aborted, false);
+  const idA = session.activeId.value;
+  const stale = storedConversations().map((item) =>
+    item.id === idA ? { ...item, messages: [], updatedAt: 1, title: "旧快照" } : item,
+  );
+  window.dispatchEvent({
+    type: "storage",
+    key: CHAT_CONVERSATIONS_KEY,
+    newValue: JSON.stringify(stale),
+  });
+  assert.equal(session.messages.value.at(-1).content, "问题A");
+  assert.equal(session.messages.value.at(-1).pending, true);
+  session.requestNewChat();
+  assert.equal(firstCall.options.signal.aborted, false);
+  session.prompt.value = "问题B";
+  const second = session.send();
+  const secondCall = take("/api/v1/llm/chat", "POST");
+  assert.equal(session.sending.value, true);
+  firstCall.resolveWith({ json: { content: "回答A", model: "model-a" } });
+  await first;
+  flushHeldChatPersist();
+  assert.equal(session.sending.value, true);
+  assert.deepEqual(session.messages.value.map((item) => item.content), ["问题B"]);
+  assert.equal(session.error.value, "");
+  session.openConversation(idA);
+  assert.equal(session.messages.value.at(-1).content, "回答A");
+  assert.equal(session.sending.value, false);
+  secondCall.resolveWith({ json: { content: "回答B" } });
+  await second;
+  assert.equal(session.messages.value.at(-1).content, "回答A");
+  const idB = session.conversations.value.find((item) => item.messages.some((message) => message.content === "问题B")).id;
+  session.openConversation(idB);
+  assert.equal(session.messages.value.at(-1).content, "回答B");
+  assert.equal(session.sending.value, false);
+
+  session.openConversation(idA);
+  session.prompt.value = "会失败的A";
+  const failing = session.send();
+  const failingCall = take("/api/v1/llm/chat", "POST");
+  session.openConversation(idB);
+  session.prompt.value = "B仍在发送";
+  const live = session.send();
+  const liveCall = take("/api/v1/llm/chat", "POST");
+  failingCall.resolveWith({ status: 500, json: { detail: "旧错误" } });
+  await failing;
+  assert.equal(session.sending.value, true);
+  assert.equal(session.error.value, "");
+  assert.equal(session.messages.value.at(-1).failed === true, false);
+  assert.equal(session.messages.value.at(-1).content, "B仍在发送");
+  session.openConversation(idA);
+  assert.equal(session.messages.value.at(-1).failed, true);
+  assert.equal(session.error.value, "旧错误");
+  liveCall.resolveWith({ json: { content: "B完成" } });
+  await live;
+  session.openConversation(idB);
+  assert.equal(session.messages.value.at(-1).content, "B完成");
+  assert.equal(session.sending.value, false);
+});
+
+test("L13 an old chat 401 does not log out or land in the conversation on screen", async () => {
+  const session = openSession();
+  await boot(session);
+  session.prompt.value = "旧身份的问题";
+  const first = session.send();
+  const firstCall = take("/api/v1/llm/chat", "POST");
+  firstCall.honorAbort = false;
+  session.requestNewChat();
+  session.prompt.value = "新的问题";
+  const second = session.send();
+  const secondCall = take("/api/v1/llm/chat", "POST");
+  firstCall.resolveWith({ status: 401, json: { detail: "旧对话未登录" } });
+  await first;
+  flushHeldChatPersist();
+  assert.equal(readAccount().username, "ada");
+  assert.equal(assigned.length, 0);
+  assert.equal(session.sending.value, true);
+  assert.deepEqual(session.messages.value.map((item) => item.content), ["新的问题"]);
+  assert.equal(session.messages.value[0].failed, false);
+  secondCall.resolveWith({ json: { content: "新的回答" } });
+  await second;
+  acceptLogin({ id: "user-2", username: "bea", role_ids: ["reader"] });
+  flushHeldChatPersist();
+  const later = openSession();
+  const saved = JSON.stringify(storedConversations());
+  assert.equal(saved.includes("旧身份的问题"), false);
+  assert.equal(saved.includes("新的问题"), false);
+  assert.equal(later.messages.value.some((item) => item.content === "旧身份的问题"), false);
+  assert.equal(readAccount().username, "bea");
+});
+
+test("L14 reloading during a send marks it interrupted and does not resend", async () => {
+  const session = openSession();
+  await boot(session);
+  session.prompt.value = "发出去了";
+  const sending = session.send();
+  const chat = take("/api/v1/llm/chat", "POST");
+  chat.honorAbort = false;
+  session.dispose();
+  sessions.pop();
+  const again = openSession();
+  assert.equal(again.sending.value, false);
+  assert.equal(again.messages.value[0].interrupted, true);
+  assert.equal(again.messages.value[0].content, "发出去了");
+  assert.equal(again.interruptNotice.value, INTERRUPTED_HINT);
+  await boot(again);
+  assert.equal(count("/api/v1/llm/chat", "POST"), 1);
+  chat.resolveWith({ json: { content: "不该自动出现" } });
+  await sending;
+  assert.equal(again.messages.value.some((item) => item.content === "不该自动出现"), false);
+});
+
+test("L15 another tab deleting the open conversation switches this tab", async () => {
+  const session = openSession();
+  await boot(session);
+  session.messages.value = [{ role: "user", content: "会被删" }];
+  const doomed = session.activeId.value;
+  session.requestNewChat();
+  session.messages.value = [{ role: "user", content: "留下的" }];
+  const stay = session.activeId.value;
+  session.openConversation(doomed);
+  const snapshot = storedConversations().filter((item) => item.id !== doomed);
+  window.dispatchEvent({
+    type: "storage",
+    key: CHAT_CONVERSATIONS_KEY,
+    newValue: JSON.stringify(snapshot),
+  });
+  assert.equal(session.activeId.value, stay);
+  assert.equal(session.messages.value[0].content, "留下的");
+  assert.equal(session.conversations.value.some((item) => item.id === doomed), false);
+  assert.equal(session.conversations.value.length >= 1, true);
+
+  window.dispatchEvent({
+    type: "storage",
+    key: CHAT_CONVERSATIONS_KEY,
+    newValue: "[]",
+  });
+  assert.equal(session.conversations.value.length, 1);
+  assert.equal(session.conversations.value[0].title, NEW_CONVERSATION_TITLE);
+  assert.equal(session.messages.value.length, 0);
+});
+
+test("L16 the fiftieth conversation blocks a new one without deleting older conversations", async () => {
+  const existing = [];
+  for (let index = 0; index < 50; index += 1) {
+    existing.push({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      title: `旧${index}`,
+      titleLocked: true,
+      createdAt: index,
+      updatedAt: index,
+      draft: "",
+      messages: [{ role: "user", content: `内容${index}` }],
+    });
+  }
+  localStorage.setItem(CHAT_CONVERSATIONS_KEY, JSON.stringify(existing));
+  localStorage.setItem(CHAT_SCHEMA_VERSION_KEY, "1");
+  sessionStorage.setItem(CHAT_ACTIVE_ID_KEY, existing[49].id);
+  const session = openSession();
+  await boot(session);
+  assert.equal(session.conversations.value.length, 50);
+  session.requestNewChat();
+  assert.equal(session.listNotice.value, CONVERSATION_LIMIT_TIP);
+  assert.equal(session.conversations.value.length, 50);
+  assert.equal(session.activeId.value, existing[49].id);
+  assert.equal(storedConversations().length, 50);
+  assert.equal(storedConversations().some((item) => item.messages[0].content === "内容0"), true);
+  assert.equal(session.messages.value[0].content, "内容49");
+});
+
+test("a conversation write failure keeps the page and the other conversations", async () => {
+  const session = openSession();
+  await boot(session);
+  session.messages.value = [{ role: "user", content: "已经在的" }];
+  flushHeldChatPersist();
+  const original = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (key, value) => {
+    if (key === CHAT_CONVERSATIONS_KEY) {
+      throw new Error("QuotaExceededError");
+    }
+    return original(key, value);
+  };
+  try {
+    session.prompt.value = "再来一条";
+    session.requestNewChat();
+    assert.equal(session.conversations.value.length, 2);
+    assert.equal(session.conversations.value.some((item) => item.messages.some((message) => message.content === "已经在的")), true);
+    assert.equal(session.listNotice.value, CONVERSATION_SAVE_TIP);
+    assert.equal(session.messages.value.length, 0);
+    assert.equal(storedConversations().some((item) => item.messages.some((message) => message.content === "已经在的")), true);
+  } finally {
+    localStorage.setItem = original;
+  }
+});
+
+test("L17 delete and new chat leave skills and builds in place", async () => {
+  const session = openSession();
+  await boot(session, OPENAI, {
+    mine: [{ id: SKILL_ID, name: "已有", version: "1", status: "draft" }],
+  });
+  session.messages.value = [
+    {
+      role: "user",
+      content: "清列表不是清构建",
+      actions: [{ type: "build_started", id: SKILL_ID, name: "包" }],
+    },
+  ];
+  session.requestNewChat();
+  const doomed = session.conversations.value.find((item) => item.messages.length > 0);
+  session.requestDelete(doomed.id);
+  assert.equal(session.deleteConfirmOpen.value, true);
+  session.cancelDelete();
+  assert.equal(session.conversations.value.some((item) => item.id === doomed.id), true);
+  session.requestDelete(doomed.id);
+  session.confirmDelete();
+  assert.equal(session.mineItems.value[0].name, "已有");
+  assert.equal(calls.some((call) => call.options.method === "DELETE"), false);
+  assert.equal(DELETE_CHAT_WARNING.includes("已创建的 Skill 和已发起的构建仍会保留"), true);
+  assert.equal(DELETE_CHAT_WARNING.includes("已取消构建"), false);
+  assert.equal(CONVERSATION_LIMIT_TIP.includes("已取消构建"), false);
+  assert.equal(CONVERSATION_SAVE_TIP.includes("已取消构建"), false);
+  assert.equal(NEW_CHAT_WARNING.includes("已取消构建"), false);
+});
+
+test("L18 a reader has no chat page and no conversation list", async () => {
+  perms.value = new Set(["skill.read"]);
+  await mountChatView();
+  await nextTick();
+  assert.equal(document.body.querySelector('[aria-label="对话列表"]'), null);
+  assert.equal(buttonsNamed("新建对话").length, 0);
+  assert.equal(document.body.querySelector("textarea"), null);
+  assert.equal(document.body.textContent.includes("你没有查看此页面的权限"), true);
+  assert.equal(count("/api/v1/llm/chat", "POST"), 0);
+  assert.equal(count("/api/v1/llm/provider"), 0);
 });
 
 function chromeBinary() {
