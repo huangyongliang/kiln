@@ -1,0 +1,201 @@
+{
+  "schema": "kiln-g7-input-lock-1",
+  "resolved_on": "2026-11-23",
+  "notes": [
+    "Pins are frozen in this file. The workflow must not resolve moving tags at runtime.",
+    "Controller digest and inbound digest are different images. Do not substitute one for the other.",
+    "G7-EGRESS (routed production destination allowlist) is NOT RUN / NOT CLAIMED by this lock.",
+    "Package updates require a reviewed lock change. Shared libraries already in the runner image are observed at runtime and are not downgraded."
+  ],
+  "baseline": {
+    "initial_specified_main": "ec4e5581b11b76fc7f0a7494c9f743aa1c63ec6b",
+    "initial_specified_tree": "6382e88311241994ec2ed5334c40229528b1f433",
+    "integrated_main": "4801b73d9381d2df60d426cff83566763e23c890",
+    "integrated_main_subject": "Reset the current chat tab without mixing later responses (#37)",
+    "integration": "CI-only branch was created from integrated main after PR 37 squash-merged. No product file from that merge is modified. No earlier CI-only commit existed, so no follow-up merge commit was required."
+  },
+  "runner": {
+    "label": "ubuntu-24.04",
+    "architecture": "x64"
+  },
+  "actions": {
+    "checkout": {
+      "repository": "actions/checkout",
+      "release": "v4.4.0",
+      "sha": "11d5960a326750d5838078e36cf38b85af677262"
+    },
+    "upload_artifact": {
+      "repository": "actions/upload-artifact",
+      "release": "v4.6.2",
+      "sha": "ea165f8d65b6e75b540449e92b4886f43607fa02"
+    }
+  },
+  "apt": {
+    "sources": [
+      "deb http://archive.ubuntu.com/ubuntu noble main universe",
+      "deb http://archive.ubuntu.com/ubuntu noble-updates main universe",
+      "deb http://security.ubuntu.com/ubuntu noble-security main universe"
+    ],
+    "provenance": "Official Ubuntu noble Packages.gz indexes read on 2026-11-23. Versions are the newest published in noble, noble-updates, or noble-security for each package.",
+    "install_recommends": false,
+    "packages": [
+      {
+        "name": "podman",
+        "version": "4.9.3+ds1-1ubuntu0.2",
+        "filename": "podman_4.9.3+ds1-1ubuntu0.2_amd64.deb",
+        "sha256": "e5c1c37e387ed14c352a744a75fbb79fb2f82573ca7bf36886e3b7333fc9ef1a"
+      },
+      {
+        "name": "conmon",
+        "version": "2.1.10+ds1-1build2",
+        "filename": "conmon_2.1.10+ds1-1build2_amd64.deb",
+        "sha256": "4bf1eebadfd32246d01e35ccd96d4c73af5103dfa4384a851b7b9b25401802db"
+      },
+      {
+        "name": "crun",
+        "version": "1.14.1-1",
+        "filename": "crun_1.14.1-1_amd64.deb",
+        "sha256": "2263368dabe3d126189dffd9da7cc31159d8766c9a9a2e3ca8231ad3fcc11109"
+      },
+      {
+        "name": "golang-github-containers-common",
+        "version": "0.57.4+ds1-2ubuntu0.2",
+        "filename": "golang-github-containers-common_0.57.4+ds1-2ubuntu0.2_all.deb",
+        "sha256": "dae82b120f8a1b429c0a63a2ccd2ff3c91563f97e2188b1fbaf78ba76f7fb89c"
+      },
+      {
+        "name": "uidmap",
+        "version": "1:4.13+dfsg1-4ubuntu3.2",
+        "filename": "uidmap_4.13+dfsg1-4ubuntu3.2_amd64.deb",
+        "sha256": "a80cb7f72dd18c73cbb0b07b7fbe855504f26bfafae072a9b3d125c89d499b9e"
+      },
+      {
+        "name": "libsubid4",
+        "version": "1:4.13+dfsg1-4ubuntu3.2",
+        "filename": "libsubid4_4.13+dfsg1-4ubuntu3.2_amd64.deb",
+        "sha256": "ba97fd28c53560a8d2a2261e8f75a7ab4112535b12f9fe1d50970c30051da0da"
+      },
+      {
+        "name": "slirp4netns",
+        "version": "1.2.1-1build2",
+        "filename": "slirp4netns_1.2.1-1build2_amd64.deb",
+        "sha256": "3fc72a72a376a3ad3b439434bc87d89d245f9d54a1d540e8a06b74d4e2385e0a"
+      },
+      {
+        "name": "containernetworking-plugins",
+        "version": "1.1.1+ds1-3ubuntu0.24.04.3",
+        "filename": "containernetworking-plugins_1.1.1+ds1-3ubuntu0.24.04.3_amd64.deb",
+        "sha256": "0ffc31ebfa430615d2e35ad7cea6b3717faa8fdbc02debd773625cad83fcdd65"
+      },
+      {
+        "name": "iptables",
+        "version": "1.8.10-3ubuntu2",
+        "filename": "iptables_1.8.10-3ubuntu2_amd64.deb",
+        "sha256": "d341e8ffc42ca035f5aa0fd9a798c8d2b2edb019225dc11f4dac16edf9c57840"
+      },
+      {
+        "name": "catatonit",
+        "version": "0.1.7-1",
+        "filename": "catatonit_0.1.7-1_amd64.deb",
+        "sha256": "fb815ec9de328c7e36c7a98354882160693af92d9f00ecaf9028ce8862622d3d"
+      }
+    ]
+  },
+  "registry": {
+    "auth_url": "https://auth.docker.io/token",
+    "registry_url": "https://registry-1.docker.io"
+  },
+  "controller": {
+    "repository": "jenkins/jenkins",
+    "role": "controller-only",
+    "index_digest": "sha256:36ec665a8d5db42c9087d980b609a02c2a1f5d20c283b1c5e0eeda0b159edede",
+    "index_media_type": "application/vnd.oci.image.index.v1+json",
+    "amd64_digest": "sha256:d8d3fd5fe320403f2d5eb49b26dd2f61677017bba0d8e3209ba58b20f978ba07",
+    "config_digest": "sha256:1956ca6436a8145b1f1ac7644750834469c12bb7fa919fc75433a609ce841780",
+    "platform": "linux/amd64",
+    "user": "jenkins",
+    "jenkins_version": "2.580.2",
+    "java_home": "/opt/java/openjdk",
+    "jenkins_home": "/var/jenkins_home",
+    "war_path": "/usr/share/jenkins/jenkins.war",
+    "war_url": "https://get.jenkins.io/war-stable/2.580.2/jenkins.war",
+    "war_sha256": "d98032d2401c540a35613a82ed358921fcf3166d5e6eaaaf60a7941845be3251",
+    "source_revision": "e3a0f666c584a47fc5b372ae88b203b7c77c2617",
+    "core_tag": "jenkins-2.580.2",
+    "core_commit": "ea3f958268fe87ed86a5d1c2d90c5a99426b97ce"
+  },
+  "inbound": {
+    "repository": "jenkins/inbound-agent",
+    "role": "official-glibc-inbound-agent",
+    "provenance_tag_resolved_once": "3386.v353e57a_1b_ea_0-3-jdk21",
+    "provenance_note": "Tag was resolved once from Docker Hub on 2026-11-23 to select the official glibc linux/amd64 image whose remoting matches controller war remoting 3386. Runtime pull uses the amd64 digest only.",
+    "source_repository": "https://github.com/jenkinsci/docker-agent",
+    "source_commit": "3f94c25a25bc9cbdb6a5c89087cd6f5da9ac02f3",
+    "debian_release": "trixie-20260824",
+    "index_digest": "sha256:a373e1b43de85b9b1da1a1cdacdfc526784f786d064f4cabb9e243f1524fe3bb",
+    "amd64_digest": "sha256:618fee71809fad38e1cb7046c27294efda0dbfa21bb81df430a54f3201aac346",
+    "config_digest": "sha256:1382a2d139b8a33b2675fcf39c0e7edce628e2fe220a830fb933499486b00f3e",
+    "platform": "linux/amd64",
+    "user": "jenkins",
+    "uid": 1000,
+    "gid": 1000,
+    "java_home": "/opt/java/openjdk",
+    "java_elf": "/opt/java/openjdk/bin/java",
+    "java_version": "21.0.12.1",
+    "java_version_source": "image layer file opt/java/openjdk/release JAVA_VERSION, digest sha256:347703d8f70f3facdf0c1dee21dd94ac5a98859386ccf736619738fb907c4e1c",
+    "agent_jar": "/usr/share/jenkins/agent.jar",
+    "remoting_version": "3386.v353e57a_1b_ea_0",
+    "remoting_build": "353e57a1bea05f55558357e6f24e9b9b26faf262",
+    "workdir": "/home/jenkins/agent"
+  },
+  "plugins": [
+    {
+      "name": "matrix-auth",
+      "version": "3.2.10",
+      "url": "https://updates.jenkins.io/download/plugins/matrix-auth/3.2.10/matrix-auth.hpi",
+      "sha256": "223d003698a30c2556bf27173ef39a5fcd207001b095cf58e88e6eec230a3316"
+    },
+    {
+      "name": "ionicons-api",
+      "version": "88.va_4187cb_eddf1",
+      "url": "https://updates.jenkins.io/download/plugins/ionicons-api/88.va_4187cb_eddf1/ionicons-api.hpi",
+      "sha256": "2d6ea40a587572bd0dbf60050f0a6c0468e66f12b35f3ca65cdfce50440dfa6f"
+    }
+  ],
+  "writable_allowlist": {
+    "controller": [
+      {
+        "path": "/var/jenkins_home",
+        "kind": "bind",
+        "necessity": "JENKINS_HOME for controller state, plugins, jobs, and logs"
+      },
+      {
+        "path": "/tmp",
+        "kind": "tmpfs",
+        "necessity": "JVM and Jetty temporary files"
+      },
+      {
+        "path": "/dev/shm",
+        "kind": "tmpfs",
+        "necessity": "bounded JVM POSIX shared memory"
+      }
+    ],
+    "agent": [
+      {
+        "path": "/home/jenkins/agent",
+        "kind": "bind",
+        "necessity": "agent workDir and job workspace"
+      },
+      {
+        "path": "/tmp",
+        "kind": "tmpfs",
+        "necessity": "JVM temporary files"
+      },
+      {
+        "path": "/dev/shm",
+        "kind": "tmpfs",
+        "necessity": "bounded JVM POSIX shared memory"
+      }
+    ]
+  }
+}
